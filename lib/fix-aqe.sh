@@ -501,6 +501,37 @@ else
   done < <(find "$CMD_SRC" -type f -name '*.md' 2>/dev/null)
 fi
 
+# ── Step 6: dream min-concepts floor (AQE-DREAM-MINCONCEPTS-V1) ─────────────
+# DEFAULT_DREAM_CONFIG.minConceptsRequired=10 hard-blocks ALL dream consolidation
+# until the concept graph has 10 nodes — so a fresh fleet (the 2 seeded patterns)
+# can NEVER dream ("Insufficient concepts: N<10"). Lower the floor so a young fleet
+# starts consolidating early; dream QUALITY scales with accumulated concepts, so a
+# low floor only UNBLOCKS early cycles, it does not degrade later ones. Codifies the
+# workaround validated in the e2e (10→2 produced 5 real insights on a 2-pattern fleet).
+# Global agentic-qe dist; sentinel + .bak + node --check; runs AFTER the lockfix step
+# so a lockfix restore-then-repatch is followed by this re-apply in the same run.
+header "6" "Dream min-concepts floor (AQE-DREAM-MINCONCEPTS-V1)"
+AQE_DREAM_MINCONCEPTS="2"   # kit floor (stock default is 10); raise to retune
+if [[ -z "$AQE_ROOT" ]]; then
+  warn "global agentic-qe not found — skipping dream min-concepts floor"
+else
+  DEN6="$AQE_ROOT/dist/learning/dream/dream-engine.js"
+  if [[ ! -f "$DEN6" ]]; then
+    warn "dream-engine.js not found — skipping"
+  elif grep -q "AQE-DREAM-MINCONCEPTS-V1" "$DEN6"; then
+    pass "dream min-concepts floor already set (AQE-DREAM-MINCONCEPTS-V1)"
+  elif ! grep -q "minConceptsRequired: 10," "$DEN6"; then
+    warn "minConceptsRequired: 10 anchor not found (version drift?) — verify manually"
+  elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    info "[dry-run] would set minConceptsRequired 10 → $AQE_DREAM_MINCONCEPTS"
+  else
+    [[ -e "$DEN6.minconcepts-bak" ]] || cp "$DEN6" "$DEN6.minconcepts-bak"
+    MC="$AQE_DREAM_MINCONCEPTS" node -e 'const fs=require("fs"),F=process.argv[1];let s=fs.readFileSync(F,"utf8");s=s.replace("minConceptsRequired: 10,","minConceptsRequired: "+process.env.MC+", /* AQE-DREAM-MINCONCEPTS-V1 (stock 10; lowered so a young fleet can consolidate) */");fs.writeFileSync(F,s)' "$DEN6"
+    if node --check "$DEN6" 2>/dev/null; then fix "Lowered dream minConceptsRequired 10 → $AQE_DREAM_MINCONCEPTS (AQE-DREAM-MINCONCEPTS-V1)"; pass "minConceptsRequired → $AQE_DREAM_MINCONCEPTS"
+    else warn "min-concepts patch produced invalid JS — restoring"; cp "$DEN6.minconcepts-bak" "$DEN6"; fi
+  fi
+fi
+
 echo -e "\n============================================"
 echo " fix-aqe complete — ${FIXES} change(s)"
 for l in "${FIX_LOG[@]:-}"; do [[ -n "$l" ]] && echo "   • $l"; done

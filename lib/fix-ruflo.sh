@@ -2240,6 +2240,37 @@ else
   ((ERRORS++)) || true
 fi
 
+# ── Step 11b: learning.json reader path fix (RUFLO-LEARNING-PATH-V1) ───────────
+# Upstream defect: the hooks statusline/consolidate reader searches .claude-flow/,
+# .claude/.claude-flow/, .swarm/ for learning.json — but `ruflo init` WRITES it to
+# .claude-flow/metrics/ (init/executor.js). The reader therefore never finds the file
+# that exists and falls through to a meaningless .swarm/memory.db file-SIZE proxy for
+# the 🧠 intelligence chip (a routine WAL checkpoint can snap it 9%→100%). Add the
+# metrics/ path as the first search entry so the reader finds the real file. (The kit's
+# statusline RUFLO-INTEL overlay already supersedes the 🧠 chip with real LoRA/routing
+# metrics; this fixes the upstream reader so it stops consuming the volatile proxy and
+# is correct for anyone reading `ruflo hooks statusline --json` directly.) Global
+# @claude-flow/cli dist; sentinel + .bak + node --check. Clean one-line upstream fix.
+header "11b/11" "learning.json reader path (RUFLO-LEARNING-PATH-V1)"
+LJ_HOOKS="$(npm root -g 2>/dev/null)/ruflo/node_modules/@claude-flow/cli/dist/src/commands/hooks.js"
+if [[ ! -f "$LJ_HOOKS" ]]; then
+  warn "global @claude-flow/cli hooks.js not found — skipping learning.json path fix"
+elif grep -q "RUFLO-LEARNING-PATH-V1" "$LJ_HOOKS"; then
+  pass "learning.json reader path already fixed (RUFLO-LEARNING-PATH-V1)"
+elif ! grep -q "const learningJsonPaths = \[" "$LJ_HOOKS"; then
+  warn "learningJsonPaths anchor not found (version drift?) — verify manually"
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  info "[dry-run] would add .claude-flow/metrics/ to learningJsonPaths"
+else
+  [[ -e "$LJ_HOOKS.learnpath-bak" ]] || cp "$LJ_HOOKS" "$LJ_HOOKS.learnpath-bak"
+  node -e 'const fs=require("fs"),F=process.argv[1];const A="const learningJsonPaths = [\n";const INS="                path.join(process.cwd(), \x27.claude-flow\x27, \x27metrics\x27, \x27learning.json\x27), /* RUFLO-LEARNING-PATH-V1 */\n";let s=fs.readFileSync(F,"utf8");if(s.includes(A)&&!s.includes("RUFLO-LEARNING-PATH-V1")){s=s.replace(A,A+INS);fs.writeFileSync(F,s);}' "$LJ_HOOKS"
+  if node --check "$LJ_HOOKS" 2>/dev/null && grep -q "RUFLO-LEARNING-PATH-V1" "$LJ_HOOKS"; then
+    fix "Added .claude-flow/metrics/ to learning.json reader (RUFLO-LEARNING-PATH-V1)"; pass "learning.json reader path fixed"
+  else
+    warn "learning.json path patch failed / anchor mismatch — restoring"; cp "$LJ_HOOKS.learnpath-bak" "$LJ_HOOKS"
+  fi
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 
 echo ""
