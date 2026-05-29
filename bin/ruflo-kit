@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# ============================================================================
+# ruflo-kit — single entrypoint for the ruflo + Agentic QE setup/repair kit.
+#
+# Clone this repo once, then run it against ANY codebase path:
+#
+#   bin/ruflo-kit init        /path/to/codebase     # first-time bootstrap
+#   bin/ruflo-kit session     /path/to/codebase     # per-session maintenance
+#   bin/ruflo-kit health      /path/to/codebase     # growth-delta health check
+#   bin/ruflo-kit fix-ruflo   /path/to/codebase     # repair ruflo MCP/AgentDB
+#   bin/ruflo-kit fix-aqe     /path/to/codebase     # codify AQE hardening
+#   bin/ruflo-kit fix-statusbar /path/to/codebase   # restore the statusline
+#   bin/ruflo-kit upgrade     /path/to/codebase     # major ruflo version bump
+#   bin/ruflo-kit bench       /path/to/codebase     # self-improvement bench (read-only)
+#   bin/ruflo-kit harvest     /path/to/codebase     # replay AQE experiences
+#
+# The target path is optional and defaults to $RUFLO_KIT_TARGET, else $(pwd).
+# Flags (--dry-run/--force/--reactivate) may appear before or after the path.
+# ============================================================================
+set -uo pipefail
+
+KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+
+usage() {
+  sed -n '2,/^# ===/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; s/^=.*//'
+  cat <<EOF
+
+Commands:
+  init           First-time bootstrap of a codebase (ruflo + AQE + AgentDB)
+  session        Per-session maintenance (patches, daemon, verification)
+  health         Growth-delta health check (CI-friendly exit code)
+  fix-ruflo      Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup
+  fix-aqe        Codify AQE-side hardening + install .claude helpers/commands
+  fix-statusbar  Restore the rich ruflo + Agentic QE v3 statusline
+  upgrade        Major-version ruflo migration (stop daemon, bump, re-activate)
+  bench          Run the self-improvement bench (read-only)
+  harvest        Replay AQE experiences into the ruflo substrate
+  help           Show this help
+
+Run a command with -h for its own flags. Docs: $KIT_DIR/docs/
+EOF
+}
+
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+  init)          exec bash "$KIT_DIR/lib/init.sh"           "$@" ;;
+  fix-ruflo)     exec bash "$KIT_DIR/lib/fix-ruflo.sh"      "$@" ;;
+  fix-aqe)       exec bash "$KIT_DIR/lib/fix-aqe.sh"        "$@" ;;
+  fix-statusbar) exec bash "$KIT_DIR/lib/fix-statusbar.sh"  "$@" ;;
+  session|session-init) exec bash "$KIT_DIR/lib/session-init.sh" "$@" ;;
+  health)        exec bash "$KIT_DIR/lib/health.sh"         "$@" ;;
+  upgrade)       exec bash "$KIT_DIR/lib/upgrade.sh"        "$@" ;;
+  bench)
+    # tools/ operate on the target's runtime DBs via cwd → cd into the target.
+    t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
+    ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/selfimprove-bench.cjs" "$@" ) ;;
+  harvest)
+    t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
+    ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/aqe-harvest.cjs" "$@" ) ;;
+  ""|help|-h|--help) usage ;;
+  *) echo "ruflo-kit: unknown command '$cmd'"; echo; usage; exit 1 ;;
+esac

@@ -1,0 +1,67 @@
+# ruflo + Agentic QE v3 — Setup & Repair Kit
+
+A cloneable kit that gets [`ruflo`](https://www.npmjs.com/package/ruflo) (the renamed `claude-flow`) and the standalone [`agentic-qe`](https://www.npmjs.com/package/agentic-qe) plugin into a known-good state inside [Claude Code](https://github.com/anthropics/claude-code) — and keeps them there session to session — for **any** codebase you point it at.
+
+## Quickstart
+
+```bash
+# one time per machine — clone the kit
+git clone <repo> && cd <repo>
+
+# one time per project (bootstrap) — pass the target codebase path
+bin/ruflo-kit init /path/to/your/codebase
+
+# every Claude Code session afterwards
+bin/ruflo-kit session /path/to/your/codebase
+```
+
+`init` is idempotent: it skips `ruflo init` / `aqe init` if they have already run and only re-applies the patches. Pass `--force` to wipe and re-init, or `--dry-run` to preview without changes.
+
+## KIT_DIR vs TARGET_DIR
+
+The kit (this clone) is `KIT_DIR` — it holds the dispatcher, the `lib/` implementations, the `assets/`, and the `tools/`. The codebase you operate on is `TARGET_DIR` — a positional path you pass to each command (it defaults to `$(pwd)`). One clone of the kit can set up many target codebases; pass `.` when the target is the current directory.
+
+## Commands
+
+Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` dispatcher:
+
+| Command | Implementation | What it does |
+|---|---|---|
+| `init <target>` | `lib/init.sh` | One-shot bootstrap: `ruflo init` → `ruflo memory init` → `agentic-qe init` → `.claude` backfill → fix-ruflo → fix-statusbar → fix-aqe → activation table → seed memory → verify. Flags: `--force`, `--reactivate`, `--dry-run`. |
+| `session <target>` | `lib/session-init.sh` | Per-session entry: applies patches, checks MCP + daemon, verifies storage and AgentDB controllers. Run at the start of every Claude Code session. |
+| `health <target>` | `lib/health.sh` | Growth-delta monitor: snapshots ~14 metrics, diffs against the previous run, exits non-zero on regression (CI-friendly). Flags: `--reset`, `--dry-run`, `--json`. |
+| `fix-ruflo <target>` | `lib/fix-ruflo.sh` | Diagnose + repair the ruflo / claude-flow MCP setup; re-pins AgentDB to `alpha.10`. Flags: `--dry-run`. |
+| `fix-aqe <target>` | `lib/fix-aqe.sh` | Re-apply AQE-side dist patches + `.claude` helpers/hooks lost on reinstall. Flags: `--dry-run`. |
+| `fix-statusbar <target>` | `lib/fix-statusbar.sh` | Restore the rich ruflo + Agentic QE v3 status line clobbered by `aqe init`. No flags. |
+| `upgrade <target>` | `lib/upgrade.sh` | Upgrade global ruflo, wipe + rehydrate the npx cache, re-run fix-ruflo, then `init --reactivate`. Flags: `--dry-run`. Run AFTER closing the session. |
+| `bench <target>` | `tools/selfimprove-bench.cjs` | READ-ONLY routing-improvement instrument. Flags: `--json`, `--quiet`, `--aqe-confidence`. |
+| `harvest <target>` | `tools/aqe-harvest.cjs` | Batch-replay AQE experiences into the ruflo substrate (SONA LoRA + AgentDB). |
+
+## Layout
+
+```
+bin/      ruflo-kit          single entrypoint dispatcher
+lib/      *.sh + common.sh   shell implementations (common.sh resolves KIT_DIR vs TARGET_DIR)
+assets/   claude-helpers/    hook helpers installed into the target's .claude/helpers/
+          claude-commands/   kit-maintained .claude/commands docs
+          builds/            prebuilt RuVector native (.node) binaries
+tools/    *.cjs              node tools (bench, harvest)
+docs/     narrative docs     deep rationale, cheatsheet, operations, R&D status
+```
+
+## Requirements
+
+- macOS (Darwin) or Linux. Windows via WSL.
+- Bash (the implementations are `#!/usr/bin/env bash`, not POSIX `sh`).
+- Node.js ≥ 18 (recommended ≥ 22) and `npm` reachable on the public registry.
+- `ruflo` and `agentic-qe` installed globally (`npm i -g ruflo agentic-qe`), plus the Claude Code CLI (`claude`) on `PATH`. See [docs/_INSTRUCTIONS.md](docs/_INSTRUCTIONS.md) for the full prerequisite and install detail.
+
+## Docs
+
+- [docs/_INSTRUCTIONS.md](docs/_INSTRUCTIONS.md) — deep technical rationale (the Patch-N narrative).
+- [docs/CHEATSHEET.md](docs/CHEATSHEET.md) — one-line "what do I run for X" reference.
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — step-by-step workflows + troubleshooting.
+
+---
+
+*Licence: MIT. No warranty. Use on a developer machine; never run blind on production infrastructure.*

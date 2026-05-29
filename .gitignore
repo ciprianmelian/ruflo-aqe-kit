@@ -1,0 +1,44 @@
+.env
+*.db
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+secrets/
+data/
+vendor/
+
+# Router B runtime learning store (session state, not source)
+.claude-flow/routing-outcomes.json
+.claude-flow/.ruflo-route.json
+.claude-flow/.ruflo-explore-state.json
+.claude-flow/.ruflo-explore.jsonl
+
+# ── Self-dogfood target state ────────────────────────────────────────────────
+# This repo IS the kit; the canonical SOURCES live in assets/ (helpers, commands,
+# builds) + lib/ + tools/. The trees below are runtime state generated when the
+# kit operates on a target codebase (including this repo when dogfooding) — ignore
+# them so a `bin/ruflo-kit` run never dirties the kit.
+.claude/
+.claude-flow/
+.agentic-qe/
+.swarm/
+.hive-mind/
+node_modules/
+.mcp.json
+package.json
+package-lock.json
+agentdb.*
+*.rvf
+*.rvf.lock
+*.rvf.idmap.json
+.DS_Store
+CLAUDE.md.bak*
+CLAUDE.md.backup
+CLAUDE copy.md
+
+CLAUDE.md

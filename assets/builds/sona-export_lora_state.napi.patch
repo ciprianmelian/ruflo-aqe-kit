@@ -1,0 +1,31 @@
+diff --git a/crates/sona/src/napi_simple.rs b/crates/sona/src/napi_simple.rs
+index 2a4692e..a7a838d 100644
+--- a/crates/sona/src/napi_simple.rs
++++ b/crates/sona/src/napi_simple.rs
+@@ -215,6 +215,26 @@ impl SonaEngine {
+     pub fn is_enabled(&self) -> bool {
+         self.inner.is_enabled()
+     }
++
++    /// Export the trained micro-LoRA A/B weights as JSON for durable persistence.
++    /// Unlike save_state() (patterns + EWC count only), this exposes the actual
++    /// learned LoRA matrices so a host can checkpoint real on-device training.
++    /// @returns JSON {A, B, rank, inputDim, outputDim}, or {} when no layer exists.
++    #[napi]
++    pub fn export_lora_state(&self) -> String {
++        let state = self.inner.export_lora_state();
++        match state.micro_lora_layers.first() {
++            Some(l) => serde_json::json!({
++                "A": l.lora_a,
++                "B": l.lora_b,
++                "rank": l.rank,
++                "inputDim": l.input_dim,
++                "outputDim": l.output_dim,
++            })
++            .to_string(),
++            None => "{}".to_string(),
++        }
++    }
+ }
+ 
+ /// SONA configuration for Node.js
