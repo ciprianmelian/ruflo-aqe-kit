@@ -73,6 +73,33 @@ echo -e "\n${CYAN}[1/4]${NC} Patching .claude/helpers/statusline.cjs"
 STATUSLINE_FILE=".claude/helpers/statusline.cjs"
 STATUSLINE_BAK="${STATUSLINE_FILE}.bak"
 
+# ── Step 1.0: install the kit's canonical statusline (CANONICAL-STATUSLINE-V1) ──
+# Prefer installing the kit's fully-patched, portable statusline.cjs verbatim
+# (assets/statusline.cjs) over anchor-patching a freshly-generated base: that base
+# varies by ruflo/aqe version + indentation, which made the SONA (📶) and SI (🔬)
+# render rows silently fail to attach on fresh targets (the render-row anchors
+# assumed the source repo's evolved indentation). The asset already carries every
+# sentinel, so the patch cascade below no-ops; it remains the fallback when the
+# asset is absent or a non-kit base is in use. cmp-skip, .bak, node --check-gated.
+CANON_SL="$KIT_ASSETS/statusline.cjs"
+if [[ -f "$CANON_SL" ]]; then
+  if cmp -s "$CANON_SL" "$STATUSLINE_FILE" 2>/dev/null; then
+    pass "canonical statusline already installed (assets/statusline.cjs)"
+  elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    info "[dry-run] would install canonical assets/statusline.cjs → $STATUSLINE_FILE"
+  else
+    mkdir -p "$(dirname "$STATUSLINE_FILE")"
+    [[ -f "$STATUSLINE_FILE" && ! -e "$STATUSLINE_FILE.precanon-bak" ]] && cp "$STATUSLINE_FILE" "$STATUSLINE_FILE.precanon-bak"
+    if cp "$CANON_SL" "$STATUSLINE_FILE" && node --check "$STATUSLINE_FILE" 2>/dev/null; then
+      fix "Installed canonical statusline (assets/statusline.cjs — SONA + SI rows included)"
+      pass "installed canonical statusline (assets/statusline.cjs)"
+    else
+      warn "canonical statusline failed node --check — restoring generated base"
+      [[ -e "$STATUSLINE_FILE.precanon-bak" ]] && cp "$STATUSLINE_FILE.precanon-bak" "$STATUSLINE_FILE"
+    fi
+  fi
+fi
+
 if [[ ! -f "$STATUSLINE_FILE" ]]; then
   warn "statusline.cjs not found — skipping (re-run \`npx ruflo init\` to regenerate)"
 else
