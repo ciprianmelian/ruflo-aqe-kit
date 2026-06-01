@@ -4,18 +4,36 @@ A cloneable kit that gets [`ruflo`](https://www.npmjs.com/package/ruflo) (the re
 
 ## Quickstart
 
-```bash
-# one time per machine — clone the kit
-git clone <repo> && cd <repo>
+Install once per machine (clones to `~/.ruflo-kit`, symlinks `ruflo-kit` onto your PATH):
 
-# one time per project (bootstrap) — pass the target codebase path
-bin/ruflo-kit init /path/to/your/codebase
+```bash
+curl -fsSL https://raw.githubusercontent.com/ciprianmelian/ruflo-aqe-kit/main/install.sh | bash
+```
+
+Then point it at any codebase:
+
+```bash
+# one time per project (bootstrap)
+ruflo-kit init /path/to/your/codebase
 
 # every Claude Code session afterwards
-bin/ruflo-kit session /path/to/your/codebase
+ruflo-kit session /path/to/your/codebase
 ```
 
 `init` is idempotent: it skips `ruflo init` / `aqe init` if they have already run and only re-applies the patches. Pass `--force` to wipe and re-init, or `--dry-run` to preview without changes.
+
+**Upgrade** the kit with `ruflo-kit self-update` (or re-run the installer); **uninstall** with `curl … | bash -s -- --uninstall`. The installer bundles Apple-Silicon (darwin-arm64) native SONA/GNN builds; other platforms run with upstream fallbacks (the native step skips cleanly).
+
+### Manual / contributor install
+
+Prefer a hand-managed clone? It works identically — just call the dispatcher by path:
+
+```bash
+git clone https://github.com/ciprianmelian/ruflo-aqe-kit.git && cd ruflo-aqe-kit
+bin/ruflo-kit init /path/to/your/codebase
+```
+
+`bin/ruflo-kit` and the global `ruflo-kit` are the same entrypoint; the global form is a PATH symlink the installer creates. `KIT_DIR` resolves through that symlink, so the clone can live anywhere.
 
 ## KIT_DIR vs TARGET_DIR
 
@@ -36,10 +54,13 @@ Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` di
 | `upgrade <target>` | `lib/upgrade.sh` | Upgrade global ruflo, wipe + rehydrate the npx cache, re-run fix-ruflo, then `init --reactivate`. Flags: `--dry-run`. Run AFTER closing the session. |
 | `bench <target>` | `tools/selfimprove-bench.cjs` | READ-ONLY routing-improvement instrument. Flags: `--json`, `--quiet`, `--aqe-confidence`. |
 | `harvest <target>` | `tools/aqe-harvest.cjs` | Batch-replay AQE experiences into the ruflo substrate (SONA LoRA + AgentDB). |
+| `version` | `bin/ruflo-kit` | Print the kit git sha + detected global `ruflo` / `agentic-qe` versions. |
+| `self-update` | `bin/ruflo-kit` | Fast-forward `git pull` the kit clone (then re-run `fix-ruflo` per Patch 44). |
 
 ## Layout
 
 ```
+install.sh                   one-line installer (clone + PATH symlink); also --uninstall
 bin/      ruflo-kit          single entrypoint dispatcher
 lib/      *.sh + common.sh   shell implementations (common.sh resolves KIT_DIR vs TARGET_DIR)
 assets/   claude-helpers/    hook helpers installed into the target's .claude/helpers/

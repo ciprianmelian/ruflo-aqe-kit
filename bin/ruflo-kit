@@ -13,13 +13,27 @@
 #   bin/ruflo-kit upgrade     /path/to/codebase     # major ruflo version bump
 #   bin/ruflo-kit bench       /path/to/codebase     # self-improvement bench (read-only)
 #   bin/ruflo-kit harvest     /path/to/codebase     # replay AQE experiences
+#   bin/ruflo-kit version                           # kit + ruflo + aqe versions
+#   bin/ruflo-kit self-update                       # git pull the kit clone
 #
 # The target path is optional and defaults to $RUFLO_KIT_TARGET, else $(pwd).
 # Flags (--dry-run/--force/--reactivate) may appear before or after the path.
 # ============================================================================
 set -uo pipefail
 
-KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+# Resolve KIT_DIR through symlinks so a global `ruflo-kit` on PATH (a symlink
+# into the real clone) still finds lib/ assets/ tools/. macOS bash 3.2 has no
+# `readlink -f`, so walk the link chain by hand (no GNU coreutils dependency).
+_kit_resolve_dir() {
+  local src="$1" dir
+  while [ -h "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" 2>/dev/null && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" 2>/dev/null && pwd
+}
+KIT_DIR="$(cd "$(_kit_resolve_dir "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 
 usage() {
   sed -n '2,/^# ===/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; s/^=.*//'
@@ -35,6 +49,8 @@ Commands:
   upgrade        Major-version ruflo migration (stop daemon, bump, re-activate)
   bench          Run the self-improvement bench (read-only)
   harvest        Replay AQE experiences into the ruflo substrate
+  version        Show kit git sha + detected ruflo / agentic-qe versions
+  self-update    git pull the kit clone (fast-forward only)
   help           Show this help
 
 Run a command with -h for its own flags. Docs: $KIT_DIR/docs/
@@ -57,6 +73,21 @@ case "$cmd" in
   harvest)
     t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/aqe-harvest.cjs" "$@" ) ;;
+  version|--version|-v)
+    kit_sha="$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    kit_date="$(git -C "$KIT_DIR" log -1 --format=%cd --date=short 2>/dev/null || echo '?')"
+    echo "ruflo-kit   $kit_sha ($kit_date)   $KIT_DIR"
+    if command -v ruflo >/dev/null 2>&1; then
+      rv="$(node -p "require('$(npm root -g 2>/dev/null)/ruflo/package.json').version" 2>/dev/null || echo '?')"
+      echo "ruflo       $rv (global)"
+    else echo "ruflo       not installed (npm i -g ruflo)"; fi
+    av="$(node -p "require('$(npm root -g 2>/dev/null)/agentic-qe/package.json').version" 2>/dev/null || echo 'not installed')"
+    echo "agentic-qe  $av (global)" ;;
+  self-update)
+    [ -d "$KIT_DIR/.git" ] || { echo "ruflo-kit: $KIT_DIR is not a git clone — re-run the installer"; exit 1; }
+    echo "Updating kit at $KIT_DIR …"
+    git -C "$KIT_DIR" pull --ff-only && echo "Now at $(git -C "$KIT_DIR" rev-parse --short HEAD)."
+    echo "Reminder: after any global ruflo bump, run 'ruflo-kit fix-ruflo <target>' + restart the daemon (see docs Patch 44)." ;;
   ""|help|-h|--help) usage ;;
   *) echo "ruflo-kit: unknown command '$cmd'"; echo; usage; exit 1 ;;
 esac

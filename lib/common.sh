@@ -14,7 +14,20 @@
 
 # ── Kit location (independent of cwd / target) ──────────────────────────────
 # common.sh lives in <KIT_DIR>/lib/, so KIT_DIR is its parent's parent.
-KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+# Resolve through symlinks: a global install puts `ruflo-kit` on PATH as a
+# symlink into the real clone, so a naive `dirname $BASH_SOURCE` would point at
+# the symlink's dir, not the clone. Walk the link chain by hand — macOS bash 3.2
+# has no `readlink -f`, so we don't depend on GNU coreutils.
+_kit_resolve_dir() {
+  local src="$1" dir
+  while [ -h "$src" ]; do
+    dir="$(cd -P "$(dirname "$src")" 2>/dev/null && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")" 2>/dev/null && pwd
+}
+KIT_DIR="$(cd "$(_kit_resolve_dir "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 KIT_LIB="$KIT_DIR/lib"
 KIT_ASSETS="$KIT_DIR/assets"
 KIT_TOOLS="$KIT_DIR/tools"
