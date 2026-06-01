@@ -23,9 +23,13 @@ set -uo pipefail
 #       routing.confidenceThreshold = 0.6 (survives an aqe-init regen).
 #   (5) CLAUDE-CMD-DOCS-V1 — install kit-maintained .claude/commands docs from
 #       tracked assets/claude-commands/ (currently the analysis compliance report).
+#   (6) AQE-POSTTASK-ARGS-V1 — normalize the stock post-task hook `aqe init`
+#       generates (`--success` with no value -> success=0 on every trajectory;
+#       no --agent -> agent='unknown'). Rewrites to `--success true` + real
+#       --agent/--description so Task trajectories can promote into patterns.
 #
 # Idempotent (sentinels / cmp / membership / value checks), reversible (.bak).
-# Full rationale: docs/_INSTRUCTIONS.md Patches 21-22, 35, 41.
+# Full rationale: docs/_INSTRUCTIONS.md Patches 21-22, 35, 41, 46.
 # ============================================================================
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -154,6 +158,27 @@ ensureHook(s.hooks.Stop, '', POSTROUTE, 'aqe-post-route', 8000);  // wire wrappe
 const ROUTECAP = "sh -c \x27exec node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/ruflo-route-capture.cjs\"\x27";
 s.hooks.UserPromptSubmit = s.hooks.UserPromptSubmit || [];
 ensureHook(s.hooks.UserPromptSubmit, '', ROUTECAP, 'ruflo-route-capture', 6000);
+// AQE-POSTTASK-ARGS-V1: normalize the stock post-task hook that `aqe init` generates.
+// Upstream emits `... post-task --task-id "$TOOL_RESULT_agent_id" --success --json`,
+// but `--success <bool>` REQUIRES a value — commander consumes the next token ("--json")
+// as the value, so `e.success!=="true"` => EVERY trajectory writes success=0, and --json
+// is swallowed. It also passes no --agent, so the trajectory agent is "unknown". Both
+// starve pattern distillation (qe_trajectories never promote). Fix in place, on the
+// existing ^(Task|Agent)$ group where $TOOL_INPUT_subagent_type/$TOOL_RESULT_agent_id are
+// real: (A) --success -> --success true; (B) add --agent "$TOOL_INPUT_subagent_type" +
+// --description "$TOOL_INPUT_prompt" (the latter feeds upstream's domain/taskType bridge).
+// NOTE: post-task has no --domain flag and Z() never sets it, so the trajectory's domain
+// column stays 'general' regardless — out of scope here (would need a dist patch). Idempotent
+// (skips if already '--success true'); rewrites only the agentic-qe post-task command string.
+const PT_FIXED = 'npx agentic-qe hooks post-task --task-id "$TOOL_RESULT_agent_id" --agent "$TOOL_INPUT_subagent_type" --success true --description "$TOOL_INPUT_prompt" --json';
+for (const g of (s.hooks.PostToolUse || [])) {
+  for (const h of (g.hooks || [])) {
+    const c = h.command || '';
+    if (c.includes('agentic-qe hooks post-task') && !c.includes('--success true')) {
+      h.command = PT_FIXED; changed = true;  // AQE-POSTTASK-ARGS-V1
+    }
+  }
+}
 const en = Array.isArray(s.enabledMcpjsonServers) ? s.enabledMcpjsonServers : [];
 if (!en.includes('claude-flow')) { s.enabledMcpjsonServers = en.concat(['claude-flow']); changed = true; }
 if (changed) { fs.writeFileSync(F, JSON.stringify(s, null, 2) + '\n'); console.log('CHANGED'); } else { console.log('UNCHANGED'); }
