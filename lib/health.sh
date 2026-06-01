@@ -200,15 +200,20 @@ fi
 # reports `arm64`. node's view is what ruflo will actually load, so it's
 # the authoritative source.
 detect_hnsw_backend() {
-  local platarch
-  platarch="$(node -e "process.stdout.write(process.platform + '-' + process.arch)" 2>/dev/null || echo "darwin-arm64")"
-  local napi
-  napi="$(find "$HOME/.npm/_npx" -name "rvf-node.${platarch}.node" 2>/dev/null | head -1)"
+  # Platform tag + search roots come from common.sh (ruvector_platform_tag /
+  # ruvector_search_roots) so session + health agree. The old probe built
+  # `linux-arm64` (missing the `-gnu` libc suffix @ruvector uses) and searched
+  # only ~/.npm/_npx — both produced false WASM/unknown readings on linux-arm64.
+  local platarch napi roots=()
+  platarch="$(ruvector_platform_tag)"
+  while IFS= read -r r; do [[ -n "$r" && -e "$r" ]] && roots+=("$r"); done < <(ruvector_search_roots)
+  [[ ${#roots[@]} -eq 0 ]] && { echo "unknown"; return; }
+  napi="$(find "${roots[@]}" -name "rvf-node.${platarch}.node" 2>/dev/null | head -1)"
   if [[ -n "$napi" ]]; then
     echo "NAPI (${platarch})"
     return
   fi
-  if find "$HOME/.npm/_npx" -name "*.wasm" 2>/dev/null | grep -q ruvector; then
+  if find "${roots[@]}" -name "*.wasm" 2>/dev/null | grep -q ruvector; then
     echo "WASM (fallback - ~50x slower)"
     return
   fi

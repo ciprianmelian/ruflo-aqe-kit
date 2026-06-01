@@ -175,24 +175,23 @@ fi
 
 echo -e "\n${CYAN}[7/7]${NC} RuVector native binary check"
 
-# Use node's view of the arch, not `uname -m`: under Rosetta on Apple Silicon
-# `uname -m` reports x86_64 while node (the runtime ruflo loads under) reports
-# arm64. Mismatched arch → false "native not found" warnings. Matches the probe
-# in ruflo-health.sh (Patch 17.5).
-PLATFORM="$(node -e 'process.stdout.write(process.arch)' 2>/dev/null || uname -m)"
-case "$PLATFORM" in
-  arm64) ARCH="darwin-arm64" ;;
-  x64|x86_64) ARCH="darwin-x64" ;;
-  *) ARCH="unknown" ;;
-esac
+# Platform-correct native-binary tag (darwin-arm64 / linux-arm64-gnu / …) and
+# search roots (npx cache + global-ruflo nested node_modules). Both come from
+# common.sh so session + health agree. Fixes false "native not found" on
+# linux-arm64 hosts (e.g. DGX Spark): the old map sent arm64 → darwin-arm64 and
+# searched only ~/.npm/_npx, missing the real linux-arm64-gnu binary under the
+# global ruflo install. WASM fallback covers any genuine absence (slower, fine).
+ARCH="$(ruvector_platform_tag)"
+ROOTS=(); while IFS= read -r r; do [[ -n "$r" && -e "$r" ]] && ROOTS+=("$r"); done < <(ruvector_search_roots)
 
-SONA_BIN=$(find ~/node_modules/@ruvector ~/.npm/_npx -name "sona.$ARCH.node" 2>/dev/null | head -1)
-ATTENTION_BIN=$(find ~/node_modules/@ruvector ~/.npm/_npx -name "attention.$ARCH.node" 2>/dev/null | head -1)
-GRAPH_BIN=$(find ~/node_modules/@ruvector ~/.npm/_npx -name "ruvector-graph*.node" 2>/dev/null | head -1)
+_find_native() { [[ ${#ROOTS[@]} -gt 0 ]] && find "${ROOTS[@]}" -name "$1" 2>/dev/null | head -1; }
+SONA_BIN=$(_find_native "sona.$ARCH.node")
+ATTENTION_BIN=$(_find_native "attention.$ARCH.node")
+GRAPH_BIN=$(_find_native "ruvector-graph*.node")
 
-[[ -n "$SONA_BIN" ]] && pass "SONA native: $ARCH" || warn "SONA native not found for $ARCH"
-[[ -n "$ATTENTION_BIN" ]] && pass "Attention native: $ARCH" || warn "Attention native not found for $ARCH"
-[[ -n "$GRAPH_BIN" ]] && pass "GNN native: found" || warn "GNN native not found"
+[[ -n "$SONA_BIN" ]] && pass "SONA native: $ARCH" || warn "SONA native not found for $ARCH (WASM fallback active)"
+[[ -n "$ATTENTION_BIN" ]] && pass "Attention native: $ARCH" || warn "Attention native not found for $ARCH (WASM fallback active)"
+[[ -n "$GRAPH_BIN" ]] && pass "GNN native: found" || warn "GNN native not found (WASM fallback active)"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
