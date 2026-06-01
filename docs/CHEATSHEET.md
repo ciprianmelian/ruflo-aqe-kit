@@ -10,9 +10,12 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 
 | I want to... | Run |
 |---|---|
+| Install the kit on a new machine (clone + PATH symlink) | `curl -fsSL https://raw.githubusercontent.com/ciprianmelian/ruflo-aqe-kit/main/install.sh \| bash` |
+| Update the kit clone | `ruflo-kit self-update` (or re-run the installer) |
+| Show kit + ruflo + aqe versions | `ruflo-kit version` |
 | Start a session (prime memory, daemon, patches) | `bin/ruflo-kit session <target>` |
 | Check health / is the loop still growing? | `bin/ruflo-kit health <target>` |
-| Upgrade ruflo | `npm i -g ruflo && bin/ruflo-kit upgrade <target>` |
+| Upgrade ruflo (⚠ resets ALL ruflo dist patches + agentdb pin — Patch 44) | `npm i -g ruflo && bin/ruflo-kit upgrade <target>` |
 | Upgrade AQE (manual — no automation) | `npm i -g agentic-qe@latest && aqe init --auto --upgrade && bin/ruflo-kit fix-aqe <target> && aqe learning extract && bin/ruflo-kit fix-statusbar <target>` |
 | Assess quality (AQE) | `aqe quality assess` |
 | Generate tests for a file (AQE) | `aqe test generate <file>` |
@@ -72,6 +75,7 @@ Each `bin/ruflo-kit <command>` dispatches to an implementation in `lib/` (shell)
 ## 4. Safety (read before destructive ops)
 
 - **BACK UP before any DB operation.** Never `rm -f` on `.agentic-qe/` or `*.db` files without confirmation.
+- **NEVER `cp` a backup over a live `.agentic-qe/memory.db`** (Patch 46). It's WAL-mode with live writers (daemon + MCP) — copying over it corrupts the page tree. Use `sqlite3 DB ".backup '/tmp/x.db'"`, surgical `DELETE` (tag rows with a unique prefix), or stop all writers + restart Claude Code first. Recovery if corrupted: `sqlite3 bad.db ".recover" \| sqlite3 fixed.db`, then `PRAGMA journal_mode=WAL`.
 - **NEVER auto-commit or push.** Wait for an explicit request.
 - **DO NOT bump AgentDB past alpha.10** — it dormant-fails the advanced controllers.
 - **Upgrade via `npm i -g ruflo`, not npx** — npx reconciles its cache on every call and reverts the alpha.10 pin.
