@@ -156,6 +156,7 @@ if [[ -d "$HOME_DIR/node_modules/agentdb" ]]; then
       fi
     fi
   else
+    # shellcheck disable=SC2088  # literal ~ in a human-readable message, not a path
     pass "~/node_modules/agentdb@$SHADOW_VER exports AgentDB class (OK)"
   fi
 else

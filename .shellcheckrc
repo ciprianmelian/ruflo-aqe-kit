@@ -1,0 +1,20 @@
+# shellcheck config for the ruflo-kit (sourced-library + dispatcher architecture).
+# We keep -S warning enforcement for REAL issues (parse errors, unquoted
+# expansions, etc.) but disable codes that are structurally false-positive here:
+
+# SC2034: "var appears unused" — common.sh SETS shared vars (KIT_LIB, KIT_ASSETS,
+#   KIT_TOOLS, FORCE, REACTIVATE, KIT_WANT_HELP, …) that are consumed by the
+#   lib/*.sh scripts which SOURCE it; shellcheck can't see across the source boundary.
+disable=SC2034
+
+# SC2164: "cd without || exit" — every cd targets a path already validated by
+#   common.sh (kit_resolve/kit_require_target), and the dispatcher's tool subshells
+#   carry an explicit `|| cd "$(pwd)"` fallback. A failed cd cannot reach these.
+disable=SC2164
+
+# SC2294: "eval negates arrays" — the dry-run run() helper deliberately evals the
+#   command string it is handed; that is the whole point of the indirection.
+disable=SC2294
+
+# SC1091: don't follow `source`d files (paths are resolved at runtime via KIT_DIR).
+disable=SC1091

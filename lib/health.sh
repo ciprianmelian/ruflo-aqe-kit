@@ -43,7 +43,7 @@ SNAPSHOT_FILE=".claude-flow/data/health-last.json"
 HISTORY_FILE=".claude-flow/data/health-history.jsonl"
 SNAPSHOT_VERSION=1
 
-MODE=diff
+MODE="diff"
 for arg in "$@"; do
   case "$arg" in
     --reset)        MODE=reset ;;
