@@ -1,0 +1,37 @@
+name: shell-smoke
+
+# Bash-only kit: no build, no unit tests — guard against syntax/lint regressions
+# in the dispatcher, the lib/*.sh implementations, and the installer.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (parse every script)
+        run: |
+          set -e
+          for f in install.sh bin/ruflo-kit lib/*.sh; do
+            bash -n "$f" && echo "OK  $f"
+          done
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          # -S warning: surface warnings+errors; lib scripts are large and
+          # intentionally use some dynamic sourcing, so info-level is noisy.
+          shellcheck -S warning -e SC1091 install.sh bin/ruflo-kit lib/*.sh
+
+      - name: dispatcher resolves via symlink (KIT_DIR through a PATH link)
+        run: |
+          set -e
+          BIN="$(mktemp -d)"
+          ln -s "$PWD/bin/ruflo-kit" "$BIN/ruflo-kit"
+          cd /tmp
+          PATH="$BIN:$PATH" ruflo-kit help >/dev/null && echo "OK  help via symlink"
+          PATH="$BIN:$PATH" ruflo-kit version | grep -q "ruflo-kit" && echo "OK  version via symlink"
