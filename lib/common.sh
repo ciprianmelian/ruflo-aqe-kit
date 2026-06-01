@@ -88,3 +88,33 @@ kit_banner() {
 run() { if [[ "${DRY_RUN:-0}" -eq 1 ]]; then info "[dry-run] $*"; else eval "$@"; fi; }
 # Timestamped-once backup before mutating a file: backup <file> [suffix]
 backup() { local f="$1" sfx="${2:-bak}"; [[ -f "$f" && ! -e "$f.$sfx" ]] && cp "$f" "$f.$sfx"; return 0; }
+
+# RuVector native-binary platform tag, matching @ruvector's NAPI naming.
+# Use node's view (process.platform/arch), NOT `uname -m`: under Rosetta on
+# Apple Silicon `uname -m` says x86_64 while node says arm64, and `uname` can't
+# tell us the libc. @ruvector names binaries `<rvf-node|sona|attention>.<tag>.node`:
+#   darwin → darwin-arm64 / darwin-x64        (NO libc suffix)
+#   linux  → linux-arm64-gnu / linux-x64-gnu  (libc suffix; -musl on Alpine)
+# The old darwin-only mapping (`arm64`→`darwin-arm64`) produced false "native not
+# found" warnings on linux-arm64 hosts (e.g. DGX Spark) even with the binary present.
+ruvector_platform_tag() {
+  local p a libc=gnu
+  p="$(node -e 'process.stdout.write(process.platform)' 2>/dev/null || echo "$(uname -s | tr 'A-Z' 'a-z')")"
+  a="$(node -e 'process.stdout.write(process.arch)' 2>/dev/null || uname -m)"
+  case "$a" in arm64|aarch64) a=arm64 ;; x64|x86_64|amd64) a=x64 ;; esac
+  case "$p" in
+    darwin) echo "darwin-$a" ;;                                   # no libc suffix on macOS
+    linux)  [[ "$(ldd --version 2>&1 | head -1)" == *musl* ]] && libc=musl; echo "linux-$a-$libc" ;;
+    win32)  echo "win32-$a-msvc" ;;
+    *)      echo "$p-$a" ;;
+  esac
+}
+
+# Search roots where @ruvector .node binaries live: the npx cache AND the GLOBAL
+# ruflo install's nested node_modules (where a `npm i -g ruflo` lands them). The
+# old probes searched only ~/.npm/_npx and missed the global-nested path.
+ruvector_search_roots() {
+  local groot; groot="$(npm root -g 2>/dev/null)"
+  printf '%s\n' "$HOME/.npm/_npx" "$HOME/node_modules/@ruvector" \
+    ${groot:+"$groot/ruflo/node_modules" "$groot/@ruvector"}
+}
