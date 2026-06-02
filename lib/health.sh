@@ -580,6 +580,39 @@ if [[ "$AGE_MS" -gt "$DAY7_MS" ]]; then
   echo -e " ${CYAN}→${NC} note: baseline is older than 7 days — consider --reset to re-baseline"
 fi
 
+# ── AGENTDB-GLOBAL-MCP-V1: agentdb stdio MCP runtime probe (read-only) ───────
+# The agentdb MCP server launches from the GLOBAL `agentdb` binary and needs its
+# better-sqlite3 peer resolvable, else /mcp reports -32000. Mirrors the
+# session-init assertion; cheap read-only checks only (no installs).
+echo ""
+echo -e " ${DIM}agentdb MCP runtime (AGENTDB-GLOBAL-MCP-V1)${NC}"
+EXPECT_AGENTDB_GLOBAL="3.0.0-alpha.10"
+GLOBAL_AGENTDB_VER="$(npm list -g agentdb --depth=0 2>/dev/null | grep "agentdb@" | sed 's/.*agentdb@//' | tr -d '[:space:]')"
+if [[ "$GLOBAL_AGENTDB_VER" == "$EXPECT_AGENTDB_GLOBAL" ]]; then
+  echo -e "   ${GREEN}✓${NC} global agentdb@$GLOBAL_AGENTDB_VER pinned"
+else
+  echo -e "   ${YELLOW}!${NC} global agentdb '${GLOBAL_AGENTDB_VER:-missing}' (expected $EXPECT_AGENTDB_GLOBAL) — re-run fix-ruflo Step 5a"
+  ((WARNED++)) || true
+fi
+GLOBAL_NM="$(npm root -g 2>/dev/null)"
+# require() (load), not just resolve — catches an ABI-stale better-sqlite3 after a node upgrade.
+if [[ -n "$GLOBAL_NM" ]] && \
+   node -e "const p=require.resolve('better-sqlite3',{paths:['$GLOBAL_NM/agentdb','$GLOBAL_NM']});if(!p.startsWith('$GLOBAL_NM'))process.exit(3);require(p)" >/dev/null 2>&1; then
+  echo -e "   ${GREEN}✓${NC} better-sqlite3 loads from agentdb context"
+else
+  echo -e "   ${YELLOW}!${NC} better-sqlite3 NOT loadable (missing/ABI-stale) — agentdb MCP will -32000; re-run fix-ruflo Step 5a"
+  ((WARNED++)) || true
+fi
+HEALTH_MCP_JSON="$TARGET_DIR/.mcp.json"
+if [[ -f "$HEALTH_MCP_JSON" ]] && command -v jq >/dev/null 2>&1; then
+  ADB_LAUNCH="$(jq -r '.mcpServers.agentdb.command // ""' "$HEALTH_MCP_JSON" 2>/dev/null)"
+  case "$ADB_LAUNCH" in
+    agentdb) echo -e "   ${GREEN}✓${NC} .mcp.json agentdb uses global launch" ;;
+    npx)     echo -e "   ${YELLOW}!${NC} .mcp.json agentdb still launches via npx — re-run fix-ruflo Step 5b"; ((WARNED++)) || true ;;
+    *)       echo -e "   ${YELLOW}!${NC} .mcp.json agentdb launch is '${ADB_LAUNCH:-unset}' (expected 'agentdb')"; ((WARNED++)) || true ;;
+  esac
+fi
+
 # ── summary + verdict ───────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}============================================${NC}"

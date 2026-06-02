@@ -1041,35 +1041,116 @@ fi
 # restored them (see _INSTRUCTIONS.md Patch 17.1 quarterly-review note).
 # - No autoStart (matches agentic-qe's shape; opt-in via settings.json's
 #   `enabledMcpjsonServers`).
-# - Idempotent: `jq -e '.mcpServers.agentdb'` shortcuts when already present.
-#   NOTE: the shortcut means a PRE-EXISTING agentdb entry is NOT version-bumped
-#   on re-run — manually edit .mcp.json (or delete the .mcpServers.agentdb key
-#   first) when changing the pin on an already-registered project.
+#
+# LAUNCH SHAPE — GLOBAL binary, NOT npx (mirrors claude-flow's Tier 7 launch):
+# the old `npx -y agentdb@<ver> mcp start` form crashes on a fresh npx cache —
+# agentdb's native peer `better-sqlite3` is NOT auto-installed by npx, so the
+# server dies on startup with `ERR_MODULE_NOT_FOUND: better-sqlite3` and Claude
+# Code's `/mcp` reports -32000. The durable fix (same rationale as Patch 18 for
+# claude-flow) is to install agentdb + better-sqlite3 GLOBALLY and launch the
+# GLOBAL `agentdb` binary (command:"agentdb", args:["mcp","start"]). npx never
+# reconciles a `npm -g` install, so the native build sticks across restarts.
 AGENTDB_VERSION="3.0.0-alpha.10"
+
+# ── Step 5b.0: AGENTDB-GLOBAL-MCP-V1 — install agentdb + better-sqlite3 globally
+# Idempotent: skip when BOTH the global `agentdb` binary and a resolvable global
+# `better-sqlite3` are present. Native-build failure is non-fatal (warn + keep
+# going) — the .mcp.json entry is still written so a later manual `npm i -g` (or
+# a re-run on a box with build tools) heals it.
+GLOBAL_AGENTDB_OK=0
+GLOBAL_BSQLITE_OK=0
+command -v agentdb >/dev/null 2>&1 && GLOBAL_AGENTDB_OK=1
+NPM_ROOT_G="$(npm root -g 2>/dev/null || echo '')"
+# better-sqlite3 must LOAD from agentdb's own context (that's where the MCP
+# server loads it). We require() it, not just require.resolve() — better-sqlite3
+# is a native addon pinned to NODE_MODULE_VERSION, so after a node upgrade a
+# present-but-ABI-stale build still resolves yet throws on load. Load-testing
+# detects that and forces a reinstall (npm rebuilds against the current ABI),
+# so the fix self-heals across node upgrades instead of silently staying broken.
+# PEER SCOPE (verified against agentdb@3.0.0-alpha.10 dist): better-sqlite3 is
+# the ONLY boot-path peer. The CLI entry agentdb-cli.js statically imports
+# migrate.js → `import Database from 'better-sqlite3'` (top-level), so the CLI
+# can't load without it. The other two declared peers are NOT on the mcp-start
+# path: @xenova/transformers is a lazy `await import()` in EmbeddingService, and
+# `sqlite3` is only used by a CLI report subcommand; the server's DB layer uses
+# sql.js (a regular dep, bundled). So installing better-sqlite3 alone is correct
+# — do NOT add the other peers (extra native builds, no benefit).
+# Assert the resolved path is UNDER the global root — node walks up parent dirs,
+# so a stray ~/node_modules/better-sqlite3 would otherwise satisfy this and mask a
+# missing global install (the .mcp.json `agentdb` binary only sees the global one).
+if [[ -n "$NPM_ROOT_G" ]] && \
+   node -e "const p=require.resolve('better-sqlite3',{paths:['$NPM_ROOT_G/agentdb','$NPM_ROOT_G']});if(!p.startsWith('$NPM_ROOT_G'))process.exit(3);require(p)" >/dev/null 2>&1; then
+  GLOBAL_BSQLITE_OK=1
+fi
+if [[ "$GLOBAL_AGENTDB_OK" -eq 1 && "$GLOBAL_BSQLITE_OK" -eq 1 ]]; then
+  pass "Global agentdb + better-sqlite3 present (AGENTDB-GLOBAL-MCP-V1)"
+else
+  info "Installing agentdb@$AGENTDB_VERSION + better-sqlite3 globally (AGENTDB-GLOBAL-MCP-V1; agentdb=$GLOBAL_AGENTDB_OK better-sqlite3=$GLOBAL_BSQLITE_OK)"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would: npm install -g agentdb@$AGENTDB_VERSION better-sqlite3@^11.8.1"
+  else
+    adb_log="/tmp/ruflo-agentdb-global-install.log"
+    if npm install -g "agentdb@$AGENTDB_VERSION" "better-sqlite3@^11.8.1" >"$adb_log" 2>&1; then
+      fix "Installed global agentdb@$AGENTDB_VERSION + better-sqlite3 (AGENTDB-GLOBAL-MCP-V1)"
+      pass "Global agentdb MCP runtime installed"
+    else
+      warn "npm install -g agentdb + better-sqlite3 failed (likely better-sqlite3 native build — needs a C++ toolchain: xcode-select --install / build-essential). agentdb MCP will report -32000 until 'npm i -g agentdb@$AGENTDB_VERSION better-sqlite3@^11.8.1' succeeds. Build log: $adb_log. Continuing."
+      ((ERRORS++)) || true
+    fi
+  fi
+fi
+
+# ── Step 5b.2: register/migrate the agentdb entry to the GLOBAL launch form ──
+# Migration: a PRE-EXISTING entry whose command=="npx" is the broken form — we
+# REPLACE it with the global form. Truly-absent → add. Already-global → pass.
+AGENTDB_GLOBAL_JQ='.mcpServers.agentdb = {
+        "command": "agentdb",
+        "args": ["mcp", "start"],
+        "env": { "npm_config_update_notifier": "false", "NODE_ENV": "production" }
+      }'
 if [[ -f "$MCP_JSON" ]]; then
   if ! command -v jq >/dev/null 2>&1; then
     warn "jq not on PATH — skipping agentdb MCP registration (install with: brew install jq)"
     ((ERRORS++)) || true
-  elif jq -e '.mcpServers.agentdb' "$MCP_JSON" >/dev/null 2>&1; then
-    pass "agentdb MCP server already registered"
   else
-    info "Registering agentdb@$AGENTDB_VERSION MCP server (unlocks attention/reflexion/skills/causal/learning-session tools)"
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-      info "[dry-run] Would: jq merge agentdb entry into .mcp.json"
-    else
-      tmp_mcp="$(mktemp)"
-      if jq --arg ver "$AGENTDB_VERSION" '.mcpServers.agentdb = {
-        "command": "npx",
-        "args": ["-y", ("agentdb@" + $ver), "mcp", "start"],
-        "env": { "npm_config_update_notifier": "false", "NODE_ENV": "production" }
-      }' "$MCP_JSON" > "$tmp_mcp"; then
-        mv "$tmp_mcp" "$MCP_JSON"
-        fix "Added agentdb@$AGENTDB_VERSION MCP server to .mcp.json"
-        pass "agentdb MCP server registered"
+    ADB_CMD="$(jq -r '.mcpServers.agentdb.command // ""' "$MCP_JSON" 2>/dev/null || echo "")"
+    if [[ "$ADB_CMD" == "agentdb" ]]; then
+      pass "agentdb MCP server already registered (global launch)"
+    elif [[ "$ADB_CMD" == "npx" ]]; then
+      # Broken npx form — migrate to the global launch.
+      info "Migrating agentdb MCP server from npx → global 'agentdb' binary (fixes -32000 on fresh npx cache)"
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "[dry-run] Would: jq replace .mcpServers.agentdb with global launch form in .mcp.json"
       else
-        rm -f "$tmp_mcp"
-        warn "jq merge of agentdb entry failed — leaving .mcp.json untouched"
-        ((ERRORS++)) || true
+        backup "$MCP_JSON"
+        tmp_mcp="$(mktemp)"
+        if jq "$AGENTDB_GLOBAL_JQ" "$MCP_JSON" > "$tmp_mcp" && python3 -c "import json; json.load(open('$tmp_mcp'))" 2>/dev/null; then
+          mv "$tmp_mcp" "$MCP_JSON"
+          fix "Migrated agentdb MCP server to global launch (command:\"agentdb\")"
+          pass "agentdb MCP server migrated to global launch"
+        else
+          rm -f "$tmp_mcp"
+          warn "jq migration of agentdb entry failed — leaving .mcp.json untouched"
+          ((ERRORS++)) || true
+        fi
+      fi
+    else
+      # Truly absent (or a non-npx/non-global shape) — add the global form.
+      info "Registering agentdb MCP server (global launch — unlocks attention/reflexion/skills/causal/learning-session tools)"
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "[dry-run] Would: jq merge global agentdb entry into .mcp.json"
+      else
+        backup "$MCP_JSON"
+        tmp_mcp="$(mktemp)"
+        if jq "$AGENTDB_GLOBAL_JQ" "$MCP_JSON" > "$tmp_mcp" && python3 -c "import json; json.load(open('$tmp_mcp'))" 2>/dev/null; then
+          mv "$tmp_mcp" "$MCP_JSON"
+          fix "Added agentdb MCP server (global launch) to .mcp.json"
+          pass "agentdb MCP server registered (global launch)"
+        else
+          rm -f "$tmp_mcp"
+          warn "jq merge of agentdb entry failed — leaving .mcp.json untouched"
+          ((ERRORS++)) || true
+        fi
       fi
     fi
   fi
