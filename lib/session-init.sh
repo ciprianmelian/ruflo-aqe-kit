@@ -171,6 +171,41 @@ else
   ((ERRORS++)) || true
 fi
 
+# AGENTDB-GLOBAL-MCP-V1: the SEPARATE agentdb stdio MCP server launches from the
+# GLOBAL `agentdb` binary and needs better-sqlite3 (a peer dep npm/npx do NOT
+# auto-install) resolvable, else it dies on startup → /mcp -32000. Three asserts:
+# (1) global agentdb pinned to alpha.10, (2) better-sqlite3 resolvable from
+# agentdb's context, (3) .mcp.json uses the global launch form (not npx).
+EXPECT_AGENTDB_GLOBAL="3.0.0-alpha.10"
+GLOBAL_AGENTDB_VER="$(npm list -g agentdb --depth=0 2>/dev/null | grep "agentdb@" | sed 's/.*agentdb@//' | tr -d '[:space:]')"
+if [[ "$GLOBAL_AGENTDB_VER" == "$EXPECT_AGENTDB_GLOBAL" ]]; then
+  pass "Global agentdb@$GLOBAL_AGENTDB_VER pinned (MCP launcher)"
+else
+  warn "Global agentdb is '${GLOBAL_AGENTDB_VER:-missing}' (expected $EXPECT_AGENTDB_GLOBAL) — re-run fix-ruflo Step 5a (AGENTDB-GLOBAL-MCP-V1)"
+  ((ERRORS++)) || true
+fi
+
+GLOBAL_NM="$(npm root -g 2>/dev/null)"
+# require() (load), not just require.resolve() — catches a NODE_MODULE_VERSION
+# ABI mismatch (present but stale after a node upgrade) that would still -32000.
+if [[ -n "$GLOBAL_NM" ]] && \
+   node -e "const p=require.resolve('better-sqlite3',{paths:['$GLOBAL_NM/agentdb','$GLOBAL_NM']});if(!p.startsWith('$GLOBAL_NM'))process.exit(3);require(p)" >/dev/null 2>&1; then
+  pass "better-sqlite3 loads from agentdb context (no -32000)"
+else
+  warn "better-sqlite3 NOT loadable from agentdb context (missing or ABI-stale) — agentdb MCP will -32000; re-run fix-ruflo Step 5a (AGENTDB-GLOBAL-MCP-V1)"
+  ((ERRORS++)) || true
+fi
+
+MCP_JSON="$TARGET_DIR/.mcp.json"
+if [[ -f "$MCP_JSON" ]] && command -v jq >/dev/null 2>&1; then
+  ADB_LAUNCH="$(jq -r '.mcpServers.agentdb.command // ""' "$MCP_JSON" 2>/dev/null)"
+  case "$ADB_LAUNCH" in
+    agentdb) pass ".mcp.json agentdb uses global launch (command:\"agentdb\")" ;;
+    npx)     warn ".mcp.json agentdb still launches via npx — re-run fix-ruflo Step 5b (AGENTDB-GLOBAL-MCP-V1)"; ((ERRORS++)) || true ;;
+    *)       warn ".mcp.json agentdb launch command is '${ADB_LAUNCH:-unset}' (expected 'agentdb') — re-run fix-ruflo Step 5b"; ((ERRORS++)) || true ;;
+  esac
+fi
+
 # ── Step 7: RuVector native binaries ─────────────────────────────────────────
 
 echo -e "\n${CYAN}[7/7]${NC} RuVector native binary check"

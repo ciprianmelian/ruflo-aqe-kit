@@ -30,6 +30,7 @@ vendor/
 .hive-mind/
 node_modules/
 .mcp.json
+.mcp.json.bak
 package.json
 package-lock.json
 agentdb.*
