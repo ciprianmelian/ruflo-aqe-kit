@@ -22,7 +22,7 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const os = require('os');
 
 // Configuration
@@ -65,11 +65,11 @@ function writeCache(data) {
 // AQE310-REALIGN-V1: overlay AgentDB/MCP/hooks blocks that `ruflo hooks statusline --json` omits.
 function _ra_count(db, sql) {
   if (!fs.existsSync(db)) return 0;
-  try { const o = require('child_process').execSync('sqlite3 -readonly "' + db + '" "' + sql + '"', { timeout: 2000, stdio: ['ignore','pipe','ignore'] }).toString(); const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0; } catch (e) { return 0; }
+  try { const o = execFileSync('sqlite3', ['-readonly', db, sql], { timeout: 2000, stdio: ['ignore','pipe','ignore'] }).toString(); const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0; } catch (e) { return 0; }
 }
 function _ra_tbl(db, t) {
   if (!fs.existsSync(db)) return false;
-  try { return require('child_process').execSync('sqlite3 -readonly "' + db + '" "SELECT 1 FROM sqlite_master WHERE type=' + "'table'" + ' AND name=' + "'" + t + "'" + ' LIMIT 1;"', { timeout: 2000, stdio: ['ignore','pipe','ignore'] }).toString().trim() === '1'; } catch (e) { return false; }
+  try { return execFileSync('sqlite3', ['-readonly', db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='" + t + "' LIMIT 1;"], { timeout: 2000, stdio: ['ignore','pipe','ignore'] }).toString().trim() === '1'; } catch (e) { return false; }
 }
 function _ra_dbkb(db) {
   let kb = 0;
@@ -515,7 +515,7 @@ function getAQEStats() {
   let p = 0, t = 0;
   try {
     const sql = "SELECT (SELECT COUNT(*) FROM qe_patterns WHERE usage_count > 0 OR quality_score > 0 OR name NOT LIKE 'bench-%') || '|' || (SELECT COUNT(*) FROM qe_trajectories);";
-    const out = require('child_process').execSync('sqlite3 -readonly "' + dbPath + '" "' + sql + '"', { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    const out = execFileSync('sqlite3', ['-readonly', dbPath, sql], { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
     const parts = out.split('|').map(n => parseInt(n, 10) || 0); p = parts[0] || 0; t = parts[1] || 0;
   } catch (e) { /* ignore */ }
   let vec = 0, mb = 0, hnsw = false;
