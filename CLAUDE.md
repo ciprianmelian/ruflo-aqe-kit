@@ -182,7 +182,8 @@ ruflo doctor --fix
 - **The claude-flow MCP server launches from the GLOBAL `ruflo` binary** (`.mcp.json` → `command: "ruflo"`, `args: ["mcp","start"]`), NOT `npx -y ruflo@latest`. npx reconciles its cache on every call and would revert the AgentDB controller pin below. So ruflo upgrades go through `npm i -g ruflo` followed by `bin/ruflo-kit upgrade <target>` (which re-runs `bin/ruflo-kit fix-ruflo <target>`).
 - **AgentDB controllers**: the global `@claude-flow/memory`'s nested `agentdb` is pinned to `3.0.0-alpha.10` so all 23 controllers activate (`agentdb_controllers` → 23/23). alpha.12+ regressed the controller classes — do not bump. `bin/ruflo-kit fix-ruflo <target>` Step 3b enforces this.
 - A separate `agentdb` MCP server is registered in `.mcp.json` (pinned alpha.10) exposing the direct attention/reflexion/skills/causal/learning-session tools.
-- Full rationale: `docs/_INSTRUCTIONS.md` (Patches 17–19). Run `bin/ruflo-kit session <target>` at session start to verify.
+- **The background daemon is OPT-IN and BILLED** (Patch 50). It spawns `claude --print` LLM calls (sonnet/opus) every 10–30 min, **24/7, detached to `launchd` — spending with no Claude Code session open**. `session-init.sh` step 4 and `init.sh` 7G no longer auto-start it; control via `RUFLO_DAEMON_MODE` (`off` default / `auto` / `once`). For one-off work without the loop: `ruflo daemon trigger -w audit`. If you `ruflo daemon start`, you own `ruflo daemon stop`. No launchd supervisor is installed. Details: `docs/OPERATIONS.md` §A8.
+- Full rationale: `docs/_INSTRUCTIONS.md` (Patches 17–19; daemon cost-safety = Patch 50). Run `bin/ruflo-kit session <target>` at session start to verify.
 
 
 ## Agentic QE v3
