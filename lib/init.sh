@@ -581,39 +581,52 @@ else
   fi
 fi
 
-# ── 7G: Daemon start (background workers) ─────────────────────────────────
-# MUST run last — depends on memory + embeddings + HNSW being up so workers
-# don't crash-loop. With --force, stop the daemon first to re-seat workers
-# against any new config.
+# ── 7G: Daemon start (background workers) — OPT-IN ────────────────────────
+# COST SAFETY: the daemon runs billed `claude --print` LLM calls every
+# 10–30 min, 24/7, detached to launchd — it spends with NO Claude Code
+# session open. Bootstrap therefore does NOT auto-start it by default.
+# Set RUFLO_DAEMON_MODE=auto to opt in. See docs/_INSTRUCTIONS.md
+# (Daemon cost-safety patch). DO NOT revert to unconditional auto-start.
+#
+# When opted in: MUST run last — depends on memory + embeddings + HNSW being
+# up so workers don't crash-loop. With --force, stop the daemon first to
+# re-seat workers against any new config.
 # NOTE: `ruflo daemon status` ALWAYS exits 0 with an ASCII box — exit code
 # is unreliable. Grep for the canonical "Status: ● RUNNING" line (U+25CF
 # filled circle); fall back to a literal "RUNNING" match for older versions.
+RUFLO_DAEMON_MODE="${RUFLO_DAEMON_MODE:-off}"
 DAEMON_STATUS_OUT="$( "${RUFLO_CMD[@]}" daemon status 2>/dev/null || true )"
 DAEMON_RUNNING=0
 if echo "$DAEMON_STATUS_OUT" | grep -q $'Status: \xe2\x97\x8f RUNNING'; then DAEMON_RUNNING=1; fi
 if [[ "$DAEMON_RUNNING" -eq 0 ]] && echo "$DAEMON_STATUS_OUT" | grep -qE 'Status:.*RUNNING'; then DAEMON_RUNNING=1; fi
 
-if [[ ( "$FORCE" -eq 1 || "$REACTIVATE" -eq 1 ) && "$DAEMON_RUNNING" -eq 1 ]]; then
-  if [[ "$FORCE" -eq 1 ]]; then
-    info "7G: --force — stopping running daemon first"
-  else
-    info "7G: --reactivate — stopping running daemon first"
-  fi
-  run "${RUFLO_CMD[@]}" daemon stop >/tmp/ruflo-daemon-stop.log 2>&1 || true
-  DAEMON_RUNNING=0
-fi
-
-if [[ "$DAEMON_RUNNING" -eq 1 ]]; then
-  pass "7G: daemon already running"
+if [[ "$RUFLO_DAEMON_MODE" != "auto" ]]; then
+  info "7G: daemon auto-start OFF (cost-safe default) — set RUFLO_DAEMON_MODE=auto to opt in"
+  info "7G:   one-shot work without the loop: ruflo daemon trigger -w audit"
   ((ACT_SKIPPED++)) || true
 else
-  info "7G: running: ruflo daemon start"
-  if run "${RUFLO_CMD[@]}" daemon start >/tmp/ruflo-daemon-start.log 2>&1; then
-    pass "7G: daemon started"
-    ((ACT_RUN++)) || true
+  if [[ ( "$FORCE" -eq 1 || "$REACTIVATE" -eq 1 ) && "$DAEMON_RUNNING" -eq 1 ]]; then
+    if [[ "$FORCE" -eq 1 ]]; then
+      info "7G: --force — stopping running daemon first"
+    else
+      info "7G: --reactivate — stopping running daemon first"
+    fi
+    run "${RUFLO_CMD[@]}" daemon stop >/tmp/ruflo-daemon-stop.log 2>&1 || true
+    DAEMON_RUNNING=0
+  fi
+
+  if [[ "$DAEMON_RUNNING" -eq 1 ]]; then
+    pass "7G: daemon already running"
+    ((ACT_SKIPPED++)) || true
   else
-    warn "7G: ruflo daemon start failed (see /tmp/ruflo-daemon-start.log) — continuing"
-    ((ACT_FAILED++)) || true
+    info "7G: running: ruflo daemon start (RUFLO_DAEMON_MODE=auto)"
+    if run "${RUFLO_CMD[@]}" daemon start >/tmp/ruflo-daemon-start.log 2>&1; then
+      pass "7G: daemon started"
+      ((ACT_RUN++)) || true
+    else
+      warn "7G: ruflo daemon start failed (see /tmp/ruflo-daemon-start.log) — continuing"
+      ((ACT_FAILED++)) || true
+    fi
   fi
 fi
 

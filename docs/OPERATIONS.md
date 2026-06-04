@@ -14,6 +14,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
   - [A5. Health check](#a5-health-check)
   - [A6. Self-improvement bench](#a6-self-improvement-bench)
   - [A7. Security scan](#a7-security-scan)
+  - [A8. Daemon & token cost](#a8-daemon--token-cost)
 - [B. Troubleshooting](#b-troubleshooting)
 - [C. Architecture (plain English)](#c-architecture-plain-english)
 - [D. See also](#d-see-also)
@@ -42,7 +43,7 @@ This one script calls `fix-ruflo.sh` (step 5), `fix-statusbar.sh` (step 6) and `
 *Use when:* beginning a Claude Code session, to prime memory and confirm the loop is alive.
 
 1. Run: `bin/ruflo-kit session <target>`
-2. It applies patches (`fix-ruflo.sh`, `fix-statusbar.sh`), checks the MCP server, auto-starts the daemon if stopped, verifies persistent storage, and checks the AgentDB controllers and native binaries.
+2. It applies patches (`fix-ruflo.sh`, `fix-statusbar.sh`), checks the MCP server, reports daemon status (**does not auto-start it** — auto-start is opt-in, see [A8](#a8-daemon--token-cost)), verifies persistent storage, and checks the AgentDB controllers and native binaries.
 3. In Claude Code, verify controllers: `agentdb_controllers` → active **23/23**.
 
 **Verify:** the summary prints "All systems ready" (0 issues). Warnings list anything to address.
@@ -131,6 +132,38 @@ Run only the one that drifted, or run them in this order if several did:
 3. From Claude Code (after `fleet_init`), comprehensive SAST/DAST: `mcp__agentic-qe__security_scan_comprehensive`.
 
 **Verify:** review the reported findings; address before committing.
+
+### A8. Daemon & token cost
+
+*Use when:* deciding whether to run the background daemon, or chasing unexplained Claude token spend.
+
+**The mental model that matters:** the daemon is a **standalone background server**, not part of your Claude Code session. Once started it detaches and reparents to `launchd` (PID 1) and keeps looping — spawning billed `claude --print` LLM calls (sonnet/opus) every 10–30 min, **24/7, whether or not Claude Code, your terminal, or your editor is open**. Closing the session does nothing to it. **If you start it, you own stopping it** — treat `ruflo daemon start` like launching a web server.
+
+**Auto-start is OPT-IN** (Patch 50). The kit no longer starts the daemon for you at session start or bootstrap. Control it with `RUFLO_DAEMON_MODE`:
+
+| `RUFLO_DAEMON_MODE` | session-init / bootstrap behavior | spend |
+|---|---|---|
+| *(unset)* / `off` | **Default.** Never auto-starts. You run the loop yourself when you want it. | none in background |
+| `auto` | Auto-starts the persistent daemon every session (the pre–Patch-50 behavior). | continuous, 24/7 |
+| `once` | Runs **one** worker pass (`daemon trigger -w audit`) at session start, then exits. | bounded per session |
+
+**Daily workflows:**
+
+1. *One-off analysis, no loop:* `ruflo daemon trigger -w audit` (runs once, exits — `audit`, `optimize`, `testgaps`, `map`, `consolidate`).
+2. *Run the persistent loop for a while:* `ruflo daemon start` … then **always** `ruflo daemon stop` when done; confirm with `ruflo daemon status` (`Status: ○ STOPPED`).
+3. *Opt into always-on:* `export RUFLO_DAEMON_MODE=auto` (in your shell profile or the project env). Remember: after any dist patch, `ruflo daemon stop && ruflo daemon start` to reload the in-memory dist.
+
+**Audit anytime** (does anything keep looping?):
+```bash
+alias flowps='ps -ax -o pid,etime,command | grep -E "claude-flow|claude --print|ruflo (daemon|mcp)" | grep -v grep'
+```
+Stale `daemon-state.json` files can read `running: true` with no live process — trust `ps`/`flowps` and `ruflo daemon status`, not the state file.
+
+**No launchd supervisor here.** `ruflo daemon install-supervisor` *would* install a launchd/systemd unit that respawns the daemon on login/reboot — this kit does **not** use it. If you ever ran it, `stop` is not enough; run `ruflo daemon uninstall-supervisor`. (Verified clean on this machine: nothing in `~/Library/LaunchAgents`, `launchctl list`.)
+
+**Hard guardrails (your real safety net, independent of process hygiene):** in the Anthropic Console set a **monthly spend limit + usage alerts**, and use a **separate API key for automation** so it can be monitored and revoked independently of your interactive key.
+
+**Verify:** `ruflo daemon status` → `Status: ○ STOPPED` when you expect it off; `flowps` shows no `claude --print` / `daemon start` processes.
 
 ---
 

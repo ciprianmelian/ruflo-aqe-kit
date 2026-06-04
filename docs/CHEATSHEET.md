@@ -13,7 +13,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 | Install the kit on a new machine (clone + PATH symlink) | `curl -fsSL https://raw.githubusercontent.com/ciprianmelian/ruflo-aqe-kit/main/install.sh \| bash` |
 | Update the kit clone | `ruflo-kit self-update` (or re-run the installer) |
 | Show kit + ruflo + aqe versions | `ruflo-kit version` |
-| Start a session (prime memory, daemon, patches) | `bin/ruflo-kit session <target>` |
+| Start a session (prime memory + patches; daemon stays **off** — opt-in) | `bin/ruflo-kit session <target>` |
 | Check health / is the loop still growing? | `bin/ruflo-kit health <target>` |
 | Upgrade ruflo (⚠ resets ALL ruflo dist patches + agentdb pin — Patch 44) | `npm i -g ruflo && bin/ruflo-kit upgrade <target>` |
 | Upgrade AQE (manual — no automation) | `npm i -g agentic-qe@latest && aqe init --auto --upgrade && bin/ruflo-kit fix-aqe <target> && aqe learning extract && bin/ruflo-kit fix-statusbar <target>` |
@@ -25,7 +25,11 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 | Fix AQE config drift (incl. dream-lock fix + graded reward) | `bin/ruflo-kit fix-aqe <target>` |
 | Fix the status bar | `bin/ruflo-kit fix-statusbar <target>` |
 | First-time project init | `bin/ruflo-kit init <target>` |
-| **Reload dist patches into the running daemon** (REQUIRED after fix-ruflo/fix-aqe) | `ruflo daemon stop && ruflo daemon start` |
+| **Reload dist patches into the running daemon** (REQUIRED after fix-ruflo/fix-aqe, **only if the daemon is running**) | `ruflo daemon stop && ruflo daemon start` |
+| Run ONE background-worker pass (no persistent loop, bounded spend) | `ruflo daemon trigger -w audit` |
+| Start the persistent loop (⚠ billed 24/7 until you stop it) | `ruflo daemon start` → **always** `ruflo daemon stop` when done |
+| Opt into auto-start every session | `export RUFLO_DAEMON_MODE=auto` (`off` default, `once` = single pass) |
+| Audit for anything still looping / spending | `ps -ax -o pid,etime,command \| grep -E "claude --print\|ruflo (daemon\|mcp)" \| grep -v grep` |
 | Run the self-improvement bench (trained arm) | `bin/ruflo-kit bench <target>` |
 | Run the bench CONTROL arm (no-train baseline) | `RUFLO_ROUTE_EPSILON=0 RUFLO_DISABLE_TRAINING=1 bin/ruflo-kit bench <target>` |
 | Disable Router-B exploration (regression-safe / control) | set env `RUFLO_ROUTE_EPSILON=0` |
@@ -65,7 +69,8 @@ Each `bin/ruflo-kit <command>` dispatches to an implementation in `lib/` (shell)
 - **AQE is unpinned / free-floating** (`npm i -g agentic-qe@latest`). `settings.json` `aqe.version: 3.10.1` is a **record of the last init, not an enforced pin** — unlike the hard AgentDB `alpha.10` pin above.
 - Topology: **hierarchical-mesh**, max **15 agents**, **hybrid** memory, **HNSW + neural** enabled.
 - Memory backends: `.agentic-qe/memory.db` (AQE) + ruflo `.swarm/` (`memory.db`, `hnsw.index`, `lora-weights.json`) + the AgentDB store.
-- **The daemon caches the global `dist` in memory at startup** — patching `dist` on disk (via `fix-aqe.sh`/`fix-ruflo.sh`) does NOT take effect until you **restart the daemon** (`ruflo daemon stop && ruflo daemon start`; there is no `restart` subcommand). Skipping this is what made a dream-lock fix appear to "regress". See `_INSTRUCTIONS.md` Patch 40.
+- **The daemon spawns billed `claude --print` LLM calls (sonnet/opus) every 10–30 min, 24/7, detached to `launchd`** — it spends with NO Claude Code session open. **Auto-start is OPT-IN** (Patch 50): `RUFLO_DAEMON_MODE=off` (default, never auto-starts) / `auto` (every session) / `once` (one pass then exit). `session-init.sh` step 4 + `init.sh` 7G are gated on it; **do not revert to unconditional auto-start**. No launchd supervisor is installed (would be `ruflo daemon install-supervisor`; remove via `uninstall-supervisor`). If you start the loop, you own stopping it. See [OPERATIONS.md A8](./OPERATIONS.md#a8-daemon--token-cost).
+- **The daemon caches the global `dist` in memory at startup** — patching `dist` on disk (via `fix-aqe.sh`/`fix-ruflo.sh`) does NOT take effect until you **restart the daemon** (`ruflo daemon stop && ruflo daemon start`; there is no `restart` subcommand). Skipping this is what made a dream-lock fix appear to "regress". See `_INSTRUCTIONS.md` Patch 40. (Only relevant when you've opted the daemon on.)
 - **Dream-cycle locking** (`AQE-DREAM-LOCKFIX-V2`, Patch 35): the DreamScheduler now uses an atomic claim (`WHERE NOT EXISTS` recent running) across all 4 insert paths + `wal_checkpoint(TRUNCATE)` on every cycle exit + a per-cycle orphan sweep. Time predicates use `strftime('%Y-%m-%dT%H:%M:%fZ',…)` to match the stored `toISOString()` format (a `datetime('now')` predicate is lexically broken for same-day rows).
 - **Router B learning** (Patches 36–37): graded reward (`DERIVE-OUTCOME-V2`) + ε-greedy exploration (`RUFLO-ROUTE-EXPLORE-V2`, ε 0.15→0.05, env `RUFLO_ROUTE_EPSILON`, `=0` is an exact no-op). `RUFLO_DISABLE_TRAINING=1` is the no-train control arm. AQE ML router `confidenceThreshold` is **0.6** (`.agentic-qe/config.yaml`, **codified in `fix-aqe.sh` Step 4** so a regen can't reset it); Router B uses its own `topMatch.score > 0.4` gate.
 - **Honest learning status:** self-LEARNING is operationally trustworthy; self-IMPROVEMENT is wired + measurable but **not yet proven** (needs cross-session longitudinal data — see [whats-genuinely-left-rnd.md](./whats-genuinely-left-rnd.md)).

@@ -69,31 +69,67 @@ else
   ((ERRORS++)) || true
 fi
 
-# ── Step 4: Daemon auto-start ────────────────────────────────────────────────
+# ── Step 4: Daemon mode (opt-in by default) ──────────────────────────────────
+#
+# COST SAFETY: the daemon spawns billed `claude --print` LLM calls (sonnet/opus)
+# every 10–30 min, 24/7, detached to launchd — it keeps spending with NO Claude
+# Code session open. Auto-starting it here every session was the de-facto
+# supervisor that made it "bill for days". Auto-start is therefore OPT-IN.
+#
+#   RUFLO_DAEMON_MODE=off   (default) — do NOT start; you run `ruflo daemon
+#                                       start` yourself when you want the loop.
+#   RUFLO_DAEMON_MODE=auto            — auto-start the persistent daemon every
+#                                       session (the old always-on behavior).
+#   RUFLO_DAEMON_MODE=once            — run a single worker pass this session
+#                                       (`daemon trigger`), no persistent loop.
+#
+# DO NOT revert this to unconditional auto-start — see docs/_INSTRUCTIONS.md
+# (Daemon cost-safety patch). The learning-loop value does not justify silent,
+# unattended, 24/7 token spend.
+RUFLO_DAEMON_MODE="${RUFLO_DAEMON_MODE:-off}"
 
-echo -e "\n${CYAN}[4/7]${NC} Daemon auto-start"
+echo -e "\n${CYAN}[4/7]${NC} Daemon mode (${RUFLO_DAEMON_MODE})"
 
 # `ruflo daemon status` always exits 0 with an ASCII box. Grep for the
 # canonical "Status: ● RUNNING" line (U+25CF filled circle) and fall back
-# to a literal "RUNNING" match for older versions. If not running, start it
-# — this is the every-session re-seat that closes the "daemon died between
-# sessions" gap.
-DAEMON_STATUS_OUT="$(npx -y ruflo@latest daemon status 2>/dev/null || true)"
+# to a literal "RUNNING" match for older versions.
+DAEMON_STATUS_OUT="$(ruflo daemon status 2>/dev/null || true)"
 DAEMON_RUNNING=0
 if echo "$DAEMON_STATUS_OUT" | grep -q $'Status: \xe2\x97\x8f RUNNING'; then DAEMON_RUNNING=1; fi
 if [[ "$DAEMON_RUNNING" -eq 0 ]] && echo "$DAEMON_STATUS_OUT" | grep -qE 'Status:.*RUNNING'; then DAEMON_RUNNING=1; fi
 
-if [[ "$DAEMON_RUNNING" -eq 1 ]]; then
-  pass "daemon already running"
-else
-  info "daemon stopped — starting"
-  if npx -y ruflo@latest daemon start >/tmp/ruflo-session-daemon-start.log 2>&1; then
-    pass "daemon started"
-  else
-    warn "ruflo daemon start failed (see /tmp/ruflo-session-daemon-start.log)"
-    ((ERRORS++)) || true
-  fi
-fi
+case "$RUFLO_DAEMON_MODE" in
+  auto)
+    if [[ "$DAEMON_RUNNING" -eq 1 ]]; then
+      pass "daemon already running"
+    else
+      info "daemon stopped — starting (RUFLO_DAEMON_MODE=auto)"
+      if ruflo daemon start >/tmp/ruflo-session-daemon-start.log 2>&1; then
+        pass "daemon started"
+      else
+        warn "ruflo daemon start failed (see /tmp/ruflo-session-daemon-start.log)"
+        ((ERRORS++)) || true
+      fi
+    fi
+    ;;
+  once)
+    info "single worker pass (RUFLO_DAEMON_MODE=once) — no persistent loop"
+    if ruflo daemon trigger -w audit >/tmp/ruflo-session-daemon-trigger.log 2>&1; then
+      pass "worker pass complete"
+    else
+      warn "daemon trigger failed (see /tmp/ruflo-session-daemon-trigger.log)"
+    fi
+    ;;
+  *)
+    if [[ "$DAEMON_RUNNING" -eq 1 ]]; then
+      info "daemon running but RUFLO_DAEMON_MODE=off — leaving it (you started it)"
+    else
+      info "daemon auto-start OFF (cost-safe default)"
+      info "  • opt in:  export RUFLO_DAEMON_MODE=auto   (persistent loop)"
+      info "  • one-shot: ruflo daemon trigger -w audit  (single pass)"
+    fi
+    ;;
+esac
 
 # ── Step 5: Verify persistent storage ────────────────────────────────────────
 
