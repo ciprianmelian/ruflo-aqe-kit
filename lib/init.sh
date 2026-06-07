@@ -367,10 +367,24 @@ mtime_minutes_ago() {
   echo $(( (now_s - mtime_s) / 60 ))
 }
 
-ACT_TOTAL=7
+ACT_TOTAL=8
 ACT_RUN=0
 ACT_SKIPPED=0
 ACT_FAILED=0
+
+# ── 7A0: AgentDB on-disk schema (durable across session restarts) ──────────
+# The standalone agentdb MCP store boots in-memory and loses its schema every
+# restart unless ./agentdb.db holds it on disk (issue #4 gap #1). Write the
+# agentdb-native schema now so db_stats survives restarts from day one — without
+# this, a fresh project stays ephemeral until the first `ruflo-kit session`.
+case "$(ensure_agentdb_schema "$TARGET_DIR")" in
+  INITIALIZED) pass "7A0: agentdb.db schema initialized on disk (durable)"; ((ACT_RUN++)) || true ;;
+  PRESENT)     pass "7A0: agentdb.db on-disk schema present"; ((ACT_SKIPPED++)) || true ;;
+  DRYRUN)      info "7A0: [dry-run] would initialize agentdb.db on-disk schema"; ((ACT_SKIPPED++)) || true ;;
+  NO_CLI)      warn "7A0: agentdb CLI not found — schema not persisted (npm i -g agentdb)"; ((ACT_FAILED++)) || true ;;
+  FAILED)      warn "7A0: agentdb init failed (see /tmp/agentdb-init-schema.log)"; ((ACT_FAILED++)) || true ;;
+  *)           : ;;
+esac
 
 # ── 7A: Swarm init (coordinator + queue) ──────────────────────────────────
 SWARM_STATE=".claude-flow/swarm/swarm-state.json"
