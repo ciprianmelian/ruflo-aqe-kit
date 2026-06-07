@@ -130,6 +130,15 @@ fi
 ACT_RUN=0; ACT_SKIPPED=0; ACT_FAILED=0
 REQUIRED_FAILED=0   # only steps 3,4,6,10 flip CI exit
 
+# Improvement 1 — transient-lock retry. The AQE learning commands intermittently
+# hit "database is locked" / SQLITE_BUSY (back-to-back sqlite writers checkpoint-
+# contending, or a live MCP/daemon connection). Those are transient, so retry the
+# step with exponential backoff — but ONLY when the failure log carries a lock
+# signature (a genuine error must NOT burn retries). Tunable via env for CI.
+FIXLEARN_RETRIES="${FIXLEARN_RETRIES:-3}"   # max attempts on a transient DB lock
+FIXLEARN_BACKOFF="${FIXLEARN_BACKOFF:-1}"   # initial backoff seconds (doubles)
+LOCK_SIG='database is locked|database table is locked|SQLITE_BUSY|SQLITE_LOCKED'
+
 # step <n> <required:0|1> <skip-test-cmd-or-empty> -- <command...>
 # skip-test: a command string eval'd; exit 0 == already satisfied (skip).
 step() {
@@ -139,12 +148,37 @@ step() {
     pass "$n: already satisfied — skipping"; ACT_SKIPPED=$((ACT_SKIPPED+1)); return 0
   fi
   info "$n: running: $*"
-  if run "$* >/tmp/fix-learning-$n.log 2>&1"; then
-    pass "$n: done"; ACT_RUN=$((ACT_RUN+1))
-  else
-    warn "$n: failed (see /tmp/fix-learning-$n.log) — continuing"
+  local log="/tmp/fix-learning-$n.log" attempt=1 delay="$FIXLEARN_BACKOFF"
+  while :; do
+    if run "$* >$log 2>&1"; then
+      if [[ "$attempt" -gt 1 ]]; then pass "$n: done (after $attempt attempts)"; else pass "$n: done"; fi
+      ACT_RUN=$((ACT_RUN+1)); return 0
+    fi
+    # run() in --dry-run never fails, so we only get here on a real failure.
+    if [[ "$attempt" -lt "$FIXLEARN_RETRIES" ]] && grep -qiE "$LOCK_SIG" "$log" 2>/dev/null; then
+      warn "$n: transient DB lock (attempt $attempt/$FIXLEARN_RETRIES) — retrying in ${delay}s"
+      sleep "$delay"; delay=$((delay * 2)); attempt=$((attempt + 1)); continue
+    fi
+    warn "$n: failed (see $log) — continuing"
     ACT_FAILED=$((ACT_FAILED+1))
     [[ "$required" -eq 1 ]] && REQUIRED_FAILED=$((REQUIRED_FAILED+1))
+    return 0
+  done
+}
+
+# Improvement 2 — persistence assertion. Issue #4's core meta-finding: the
+# runtime reports success while the committed tables stay empty ("looks healthy,
+# is hollow"). After a populate step, confirm the target table ACTUALLY grew on
+# disk; if a step claimed success but committed nothing, WARN loudly instead of
+# trusting the ✓. Never flips the exit code (diagnostic). No-op in dry-run.
+persist_check() {
+  local n="$1" db="$2" tbl="$3" before="$4" after
+  [[ "${DRY_RUN:-0}" -eq 1 ]] && return 0
+  after="$(count_tbl "$db" "$tbl")"
+  if [[ "$after" -gt "$before" ]]; then
+    pass "$n: persisted $tbl ${before}->${after} (+$((after - before)))"
+  else
+    warn "$n: step reported success but $tbl did NOT grow on disk (${before}->${after}) — runtime over-reported vs committed state (issue #4); likely DB-locked or a no-op. Re-run with the daemon + live Claude Code stopped."
   fi
 }
 
@@ -173,7 +207,10 @@ step 5 0 '[[ "$(lora_adaptations)" -gt 0 ]]' -- "${AQE[@]}" upgrade
 step 6 1 'grep -q useNativeHNSW "'"$AQE_CONFIG"'"' -- "${AQE[@]}" ruvector flags --set useNativeHNSW=true
 
 # 7 — extract patterns from experiences (#2/#4). Idempotent; always run.
+# Persistence-checked: extract must actually commit qe_patterns, not just claim it.
+QP_BEFORE="$(count_tbl "$AQE_DB" qe_patterns)"
 step 7 0 "" -- "${AQE[@]}" learning extract
+persist_check 7 "$AQE_DB" qe_patterns "$QP_BEFORE"
 
 # 8 — consolidate/promote patterns (optional; skip if subcommand absent).
 SUB=consolidate
@@ -184,9 +221,12 @@ else
 fi
 
 # 9 — dream-cycle discovery (#10) (optional; skip if subcommand absent).
+# Persistence-checked: dream must actually commit dream_cycles.
 SUB=dream
 if sub_exists "${AQE[@]}" learning; then
+  DC_BEFORE="$(count_tbl "$AQE_DB" dream_cycles)"
   step 9 0 "" -- "${AQE[@]}" learning dream
+  persist_check 9 "$AQE_DB" dream_cycles "$DC_BEFORE"
 else
   pass "9: 'aqe learning dream' unavailable — skipping"; ACT_SKIPPED=$((ACT_SKIPPED+1))
 fi
