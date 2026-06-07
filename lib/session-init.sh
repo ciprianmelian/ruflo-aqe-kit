@@ -116,12 +116,21 @@ DAEMON_RUNNING=0
 if echo "$DAEMON_STATUS_OUT" | grep -q $'Status: \xe2\x97\x8f RUNNING'; then DAEMON_RUNNING=1; fi
 if [[ "$DAEMON_RUNNING" -eq 0 ]] && echo "$DAEMON_STATUS_OUT" | grep -qE 'Status:.*RUNNING'; then DAEMON_RUNNING=1; fi
 
+# AQE-DAEMON-ROOT-PIN-V1: pin AQE_PROJECT_ROOT for the daemon + its worker pass.
+# The daemon (and the AQE work / claude --print sessions it spawns) resolves storage
+# via findProjectRoot(), whose topmost-.agentic-qe rule hijacks to ~/.agentic-qe when
+# that dir exists above the project — leaking every project's experiences into the HOME
+# brain regardless of the daemon's cwd. Exporting AQE_PROJECT_ROOT (honored before the
+# walk-up) pins all spawned AQE storage to THIS project. Mirrors the .mcp.json + hooks
+# pins (fix-aqe AQE-MCP-ROOT-PIN-V1 / AQE-PROJECT-ROOT-PIN-V1).
+export AQE_PROJECT_ROOT="$TARGET_DIR"
+
 case "$RUFLO_DAEMON_MODE" in
   auto)
     if [[ "$DAEMON_RUNNING" -eq 1 ]]; then
       pass "daemon already running"
     else
-      info "daemon stopped — starting (RUFLO_DAEMON_MODE=auto)"
+      info "daemon stopped — starting (RUFLO_DAEMON_MODE=auto, AQE_PROJECT_ROOT pinned)"
       if ruflo daemon start >/tmp/ruflo-session-daemon-start.log 2>&1; then
         pass "daemon started"
       else

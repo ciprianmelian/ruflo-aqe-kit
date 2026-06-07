@@ -31,6 +31,9 @@ set -uo pipefail
 #       the kernel's findProjectRoot() resolves deterministically (honored before any
 #       cwd walk-up). Hardens SQLite-side resolution + future-proofs for the upstream
 #       RVF fix. (RVF stores still bypass findProjectRoot — see #8.)
+#   (7b) AQE-MCP-ROOT-PIN-V1 — same pin in .mcp.json's agentic-qe server env, so the
+#       long-lived `aqe-mcp` server stops resolving to ~/.agentic-qe via findProjectRoot's
+#       topmost-.agentic-qe hijack (settings.json only covers hooks, not the MCP process).
 #   (8) RVF-STRAY-SWEEP-V1 — advisory listing of RVF-only stray .agentic-qe dirs the
 #       cwd-relative RVF path resolution scatters across subfolders. Removal is gated
 #       behind `fix-learning --cleanup --confirm`. Core helper in common.sh.
@@ -260,6 +263,46 @@ NODE
     else
       warn "settings.json became invalid — restoring backup"; cp "$SETTINGS.fixaqe-bak" "$SETTINGS"
     fi
+  fi
+fi
+
+# ── Step 2b: AQE-MCP-ROOT-PIN-V1 (.mcp.json agentic-qe env) ─────────────────
+# The AQE MCP server (`aqe-mcp`, launched from .mcp.json) resolves its store via
+# findProjectRoot(), whose "topmost .agentic-qe wins" rule HIJACKS to ~/.agentic-qe
+# whenever that dir exists higher up the tree than the project — so the long-lived
+# MCP server writes every project's experiences into the HOME brain regardless of
+# cwd (verified: aqe-mcp held ~/.agentic-qe/memory.db open with cwd=project). The
+# settings.json pin (Step 2) only covers Claude Code HOOKS; the MCP server reads its
+# env from .mcp.json. Pin AQE_PROJECT_ROOT there too — findProjectRoot honors it
+# BEFORE the walk-up, defeating the hijack. Takes effect on the next MCP (re)spawn.
+header "2b" "AQE MCP root pin (AQE-MCP-ROOT-PIN-V1)"
+MCP_JSON="$TARGET_DIR/.mcp.json"
+if [[ ! -f "$MCP_JSON" ]]; then
+  warn "no .mcp.json — skipping AQE MCP root pin (run AQE/ruflo init first)"
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  info "[dry-run] would pin AQE_PROJECT_ROOT in .mcp.json agentic-qe server env"
+else
+  [[ -e "$MCP_JSON.fixaqe-bak" ]] || cp "$MCP_JSON" "$MCP_JSON.fixaqe-bak"
+  RES="$(TARGET_DIR="$TARGET_DIR" node -e '
+    const fs=require("fs"),F=process.argv[1];
+    let s; try{s=JSON.parse(fs.readFileSync(F,"utf8"))}catch(e){console.log("INVALID_JSON");process.exit(0)}
+    const srv=(s.mcpServers||{});
+    // pin the AQE server (named "agentic-qe", or any whose command is aqe-mcp)
+    const keys=Object.keys(srv).filter(k=>/^agentic-qe$/.test(k)||/aqe-mcp/.test(srv[k]&&srv[k].command||""));
+    if(!keys.length){console.log("NO_AQE_SERVER");process.exit(0)}
+    let changed=false;const PROJ=process.env.TARGET_DIR;
+    for(const k of keys){const sv=srv[k];sv.env=sv.env||{};if(sv.env.AQE_PROJECT_ROOT!==PROJ){sv.env.AQE_PROJECT_ROOT=PROJ;changed=true;}}
+    if(changed){fs.writeFileSync(F,JSON.stringify(s,null,2)+"\n");console.log("CHANGED")}else{console.log("UNCHANGED")}
+  ' "$MCP_JSON" 2>/dev/null)"
+  if node -e "JSON.parse(require('fs').readFileSync('$MCP_JSON','utf8'))" 2>/dev/null; then
+    case "$RES" in
+      CHANGED)      fix "Pinned AQE_PROJECT_ROOT in .mcp.json agentic-qe env (AQE-MCP-ROOT-PIN-V1)"; pass "AQE MCP root pinned — stops the ~/.agentic-qe hijack on MCP respawn";;
+      UNCHANGED)    pass "AQE MCP root already pinned (.mcp.json)";;
+      NO_AQE_SERVER) warn "no agentic-qe/aqe-mcp server in .mcp.json — nothing to pin";;
+      *)            warn ".mcp.json AQE pin inconclusive ($RES)";;
+    esac
+  else
+    warn ".mcp.json became invalid — restoring backup"; cp "$MCP_JSON.fixaqe-bak" "$MCP_JSON"
   fi
 fi
 
