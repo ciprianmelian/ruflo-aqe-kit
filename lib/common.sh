@@ -197,3 +197,61 @@ ensure_agentdb_schema() {
   ( cd "$target" && agentdb init ./agentdb.db --dimension 384 >/tmp/agentdb-init-schema.log 2>&1 )
   [[ -s "$db" ]] && echo "INITIALIZED" || echo "FAILED"
 }
+
+# ── Stray RVF-only .agentic-qe sweep (RVF-STRAY-SWEEP-V1) ────────────────────
+# The AQE RVF substrate (shared-rvf-adapter / shared-rvf-dual-writer) resolves its
+# store path from a CWD-RELATIVE default ('.agentic-qe/patterns.rvf' and
+# '.agentic-qe/brain.rvf') instead of findProjectRoot() — the resolver the SQLite
+# memory.db DOES use. So any aqe/hook/worker invoked with cwd != project root drops
+# a stray '.agentic-qe' holding ONLY the .rvf files (never memory.db/config.yaml).
+# Those strays are orphaned (every reader walks up to the real root), gitignored,
+# harmless-but-messy, and silently fragment learning. We classify by the absence of
+# the canonical SQLite markers + presence of an RVF payload — never by location, so
+# a real project root is structurally safe (it always has memory.db/config.yaml).
+#
+# is_stray_aqe_dir <dir> -> exit 0 iff dir is an RVF-only stray.
+is_stray_aqe_dir() {
+  local d="$1"
+  [[ -d "$d" ]] || return 1
+  [[ -e "$d/memory.db" || -e "$d/config.yaml" ]] && return 1   # canonical marker => NOT a stray
+  [[ -n "$(find "$d" -maxdepth 1 -name '*.rvf' -print -quit 2>/dev/null)" ]] || return 1  # no RVF payload
+  return 0
+}
+
+# find_stray_aqe_dirs <target> -> prints one stray dir (absolute) per line. Excludes
+# the canonical root, node_modules, and any vendored agentic-qe source clone.
+find_stray_aqe_dirs() {
+  local target="$1" d
+  while IFS= read -r d; do
+    [[ "$d" == "$target/.agentic-qe" ]] && continue            # canonical root, never a stray
+    is_stray_aqe_dir "$d" && echo "$d"
+  done < <(find "$target" -type d -name '.agentic-qe' \
+             -not -path '*/node_modules/*' \
+             -not -path '*/agentic-qe-src/*' 2>/dev/null)
+}
+
+# sweep_stray_aqe_dirs <target> <mode>   mode: list | remove
+# Sets globals SWEEP_STRAY_COUNT and SWEEP_REMOVED. In remove mode each stray is
+# moved to '<dir>.cleanup-bak' (recoverable); DRY_RUN forces list mode. Prints one
+# human line per stray; callers read the globals for a machine-readable result.
+sweep_stray_aqe_dirs() {
+  local target="$1" mode="${2:-list}" d
+  SWEEP_STRAY_COUNT=0; SWEEP_REMOVED=0
+  [[ "${DRY_RUN:-0}" -eq 1 ]] && mode="list"
+  while IFS= read -r d; do
+    [[ -z "$d" ]] && continue
+    SWEEP_STRAY_COUNT=$((SWEEP_STRAY_COUNT + 1))
+    if [[ "$mode" == "remove" ]]; then
+      rm -rf "$d.cleanup-bak" 2>/dev/null
+      if mv "$d" "$d.cleanup-bak" 2>/dev/null; then
+        SWEEP_REMOVED=$((SWEEP_REMOVED + 1))
+        fix "removed stray RVF .agentic-qe: ${d#$target/} (moved to .cleanup-bak)"
+        pass "removed stray RVF store: ${d#$target/}"
+      else
+        warn "could not remove stray: ${d#$target/}"
+      fi
+    else
+      warn "stray RVF .agentic-qe (RVF-only, no memory.db/config.yaml): ${d#$target/}"
+    fi
+  done < <(find_stray_aqe_dirs "$target")
+}

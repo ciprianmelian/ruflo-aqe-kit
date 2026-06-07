@@ -188,6 +188,16 @@ else
   warn "intelligence-snapshot.json not found"
 fi
 
+# Stray RVF .agentic-qe advisory (RVF-STRAY-SWEEP-V1): the cwd-relative RVF path
+# resolution scatters RVF-only .agentic-qe dirs across subfolders. Read-only here —
+# removal is gated behind `fix-learning --cleanup --confirm`.
+sweep_stray_aqe_dirs "$TARGET_DIR" list >/dev/null 2>&1 || true
+if [[ "${SWEEP_STRAY_COUNT:-0}" -gt 0 ]]; then
+  warn "$SWEEP_STRAY_COUNT stray RVF .agentic-qe dir(s) (cwd-relative scatter) — clean with: bin/ruflo-kit fix-learning $TARGET_DIR --cleanup --confirm"
+else
+  pass "no stray RVF .agentic-qe dirs (root store is the only one)"
+fi
+
 # ── Step 6: Verify AgentDB controllers ───────────────────────────────────────
 
 echo -e "\n${CYAN}[7/9]${NC} AgentDB controller check"
