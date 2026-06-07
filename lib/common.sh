@@ -148,3 +148,31 @@ assert_vector_dim_ok() {
   [[ "${badblob:-0}" -ne 0 ]] && { echo "BLOB_MISMATCH:$badblob"; return; }
   echo "OK"
 }
+
+# ── .claude/helpers module-type pin (fix the "require is not defined" hook crash)
+# When a project's root package.json declares "type":"module", Node treats the
+# kit/CLI-generated CommonJS helpers (router.js, memory.js, session.js,
+# statusline.js — required by hook-handler.cjs) as ES modules, so their
+# `require.main === module` / `module.exports` throw "require is not defined" on
+# every PreCompact / SessionEnd hook. Pin the helper dir to CommonJS with a local
+# package.json, and relocate the ONE genuinely-ESM helper (github-safe.js, which
+# uses import/export) to github-safe.mjs so it stays an ES module under the pin.
+#
+# Surgical: acts ONLY on "type":"module" projects (a commonjs/absent root already
+# loads the .js helpers as CJS, so there is nothing to fix and we touch nothing).
+# Idempotent; honors DRY_RUN. Echoes one status token:
+#   NO_DIR | NOT_ESM_PROJECT | DRYRUN | PINNED | ALREADY
+pin_helpers_module_type() {
+  local target="$1" hdir="$1/.claude/helpers"
+  [[ -d "$hdir" ]] || { echo "NO_DIR"; return; }
+  grep -qE '"type"[[:space:]]*:[[:space:]]*"module"' "$target/package.json" 2>/dev/null \
+    || { echo "NOT_ESM_PROJECT"; return; }
+  local need_pkg=0 need_mjs=0
+  [[ -f "$hdir/package.json" ]] && grep -q '"type"[[:space:]]*:[[:space:]]*"commonjs"' "$hdir/package.json" 2>/dev/null || need_pkg=1
+  [[ -f "$hdir/github-safe.js" ]] && grep -qE '^[[:space:]]*(import |export )' "$hdir/github-safe.js" 2>/dev/null && need_mjs=1
+  if [[ "$need_pkg" -eq 0 && "$need_mjs" -eq 0 ]]; then echo "ALREADY"; return; fi
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then echo "DRYRUN"; return; fi
+  [[ "$need_pkg" -eq 1 ]] && printf '{\n  "type": "commonjs"\n}\n' > "$hdir/package.json"
+  [[ "$need_mjs" -eq 1 ]] && mv -f "$hdir/github-safe.js" "$hdir/github-safe.mjs"
+  echo "PINNED"
+}

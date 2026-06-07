@@ -96,6 +96,17 @@ else
     cp "$src" "$dst" && { node --check "$dst" 2>/dev/null && { fix "Installed .claude/helpers/$h"; pass "installed $h"; } || { warn "$h failed node --check"; }; }
   done
 
+  # HELPER-MODULE-PIN-V1: in a "type":"module" project, the CJS helpers load as ES
+  # modules and the PreCompact/SessionEnd hooks crash with "require is not defined".
+  # Pin .claude/helpers/ to commonjs + relocate the ESM github-safe.js -> .mjs.
+  case "$(pin_helpers_module_type "$TARGET_DIR")" in
+    PINNED)          fix "Pinned .claude/helpers to commonjs (+github-safe.mjs)"; pass "helper module-type pinned (commonjs) — fixes hook 'require is not defined' in ESM projects" ;;
+    ALREADY)         pass "helper module-type already pinned (commonjs)" ;;
+    NOT_ESM_PROJECT) pass "project root is commonjs — no helper pin needed" ;;
+    DRYRUN)          info "[dry-run] would pin .claude/helpers to commonjs (+github-safe.mjs)" ;;
+    NO_DIR)          : ;;  # no .claude/helpers yet (run AQE/ruflo init first)
+  esac
+
   if [[ ! -f "$SETTINGS" ]]; then
     warn "no .claude/settings.json — cannot wire hooks (run AQE/ruflo init first)"
   elif [[ "$DRY_RUN" -eq 1 ]]; then
