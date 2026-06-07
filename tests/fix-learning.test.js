@@ -176,6 +176,7 @@ describe('fix-learning: retry + persistence (issue #4 robustness)', () => {
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
         FIXLEARN_BACKOFF: '0',                 // instant retries in tests
+        FIXLEARN_HARVEST: '0',                 // don't invoke the real harvest tool in unit tests
         STUB_STATE_DIR: state,
         STUB_AQE_DB: path.join(d, '.agentic-qe', 'memory.db'),
         ...env,
