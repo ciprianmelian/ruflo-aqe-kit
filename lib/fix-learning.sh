@@ -118,6 +118,15 @@ header "fix-learning" "populate + unlock the self-learning loop"
 kit_banner
 echo ""
 
+# Pre-flight: a running daemon holds the DBs (its writers lock the AQE store, so
+# the dream step fails "database is locked") and caches state in memory, so the
+# results of this run won't show until the daemon + Claude Code restart.
+if command -v ruflo >/dev/null 2>&1 && ruflo daemon status 2>/dev/null | grep -qiE 'RUNNING'; then
+  warn "ruflo daemon is RUNNING: it locks the AQE DB (the 'dream' step will fail locked) and caches state."
+  warn "  → for a clean run: 'ruflo daemon stop' first, then after this completes restart the daemon + Claude Code, then verify-learning."
+  echo ""
+fi
+
 ACT_RUN=0; ACT_SKIPPED=0; ACT_FAILED=0
 REQUIRED_FAILED=0   # only steps 3,4,6,10 flip CI exit
 

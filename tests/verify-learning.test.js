@@ -23,8 +23,27 @@ function sqlite(db, sql) {
   const r = spawnSync('sqlite3', [db, sql], { encoding: 'utf8' });
   if (r.status !== 0) throw new Error(`sqlite3 failed: ${r.stderr || r.stdout}`);
 }
-function runVerify(target, extra = []) {
-  return spawnSync('bash', [VERIFY, target, ...extra], { encoding: 'utf8', timeout: 20000 });
+// Deterministic stubs for the two CLIs the probes consult: `aqe ruvector status`
+// (the authoritative #4 oracle) and `ruflo daemon status` (the advisory). This
+// decouples tests from the ambient global flag store / a live daemon.
+function stubBin({ hnsw = 'true', daemon = 'stopped' } = {}) {
+  const b = fs.mkdtempSync(path.join(os.tmpdir(), 'vlbin-'));
+  fs.writeFileSync(path.join(b, 'aqe'),
+    `#!/usr/bin/env bash\nif [ "$1" = ruvector ] && [ "$2" = status ]; then echo "  useNativeHNSW: ${hnsw} (set)"; fi\nexit 0\n`);
+  fs.writeFileSync(path.join(b, 'ruflo'),
+    `#!/usr/bin/env bash\nif [ "$1" = daemon ] && [ "$2" = status ]; then echo "Status: ${daemon}"; fi\nexit 0\n`);
+  fs.chmodSync(path.join(b, 'aqe'), 0o755);
+  fs.chmodSync(path.join(b, 'ruflo'), 0o755);
+  return b;
+}
+function runVerify(target, extra = [], stub = {}) {
+  const b = stubBin(stub);
+  const r = spawnSync('bash', [VERIFY, target, ...extra], {
+    encoding: 'utf8', timeout: 20000,
+    env: { ...process.env, PATH: `${b}:${process.env.PATH}` },
+  });
+  fs.rmSync(b, { recursive: true, force: true });
+  return r;
 }
 function mkTarget() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-'));
@@ -84,12 +103,26 @@ describe('verify-learning: hollow detection (issue #4 #2/#3/#4)', () => {
     expect(runVerify(d).status).toBe(1);
   });
 
-  it('--json emits a pure JSON object with verdict "hollow" and 3 fails', () => {
-    const r = runVerify(d, ['--json']);
+  it('--json verdict "hollow" with 2 fails (#2 controllers, #3 lora) when HNSW flag is on', () => {
+    // useNativeHNSW is ON by default in the ruvector flags store, so #4 must NOT
+    // fail merely because config.yaml lacks the key (the original false-positive).
+    const r = runVerify(d, ['--json'], { hnsw: 'true' });
     expect(r.status).toBe(1);
     const j = parseJson(r.stdout);
     expect(j.verdict).toBe('hollow');
-    expect(j.fail).toBe(3); // #2 controllers, #3 lora, #4 hnsw
+    expect(j.fail).toBe(2);
+  });
+
+  it('#4 FAILS only when useNativeHNSW is EXPLICITLY false (then 3 fails)', () => {
+    const r = runVerify(d, ['--json'], { hnsw: 'false' });
+    expect(parseJson(r.stdout).fail).toBe(3);
+    expect(runVerify(d, [], { hnsw: 'false' }).stdout).toMatch(/HNSW native backend DISABLED/);
+  });
+
+  it('warns (non-fatal) when the ruflo daemon is RUNNING', () => {
+    const r = runVerify(d, [], { daemon: 'RUNNING' });
+    expect(r.stdout).toMatch(/daemon is RUNNING/);
+    expect(r.status).toBe(1); // still hollow; the daemon note never changes the verdict
   });
 
   it('--json stdout is a single clean JSON line (no ANSI/probe leakage)', () => {

@@ -122,19 +122,23 @@ probe_lora_backend() {
   fi
 }
 
-# #4 HNSW unindexed: AQE has vectors but the index is not configured to use the
-# native HNSW backend, so semantic recall is unindexed. FAIL.
+# #4 native HNSW backend. The authoritative flag lives in the ruvector FLAGS
+# STORE (read via `aqe ruvector status`), NOT config.yaml — and it is ON by
+# default. So `config.yaml` lacking the key is NOT evidence of a problem (the
+# old probe false-FAILed on every project). We FAIL only when the flag is
+# EXPLICITLY false; config.yaml is a weak fallback used only when aqe can't be
+# queried. RUVECTOR_HNSW (true|false|"") is resolved once in the run section.
 probe_hnsw_native() {
-  local vec flag=0
-  vec="$(count_tbl "$AQE_DB" vectors)"
-  [[ -f "$AQE_CONFIG" ]] && flag="$(grep -c 'useNativeHNSW' "$AQE_CONFIG" 2>/dev/null || echo 0)"
-  flag="$(num_or_zero "$flag")"
-  if [[ "$vec" -gt 0 && "$flag" -eq 0 ]]; then
-    bad "HNSW UNINDEXED: AQE vectors=$vec but learning.hnswConfig.useNativeHNSW unset in config.yaml — run: ruflo-kit fix-learning $TARGET_DIR"
-  elif [[ "$vec" -gt 0 ]]; then
-    ok "HNSW native flag set (AQE vectors=$vec)"
+  local vec; vec="$(count_tbl "$AQE_DB" vectors)"
+  if [[ "${RUVECTOR_HNSW:-}" == "false" ]]; then
+    bad "HNSW native backend DISABLED: useNativeHNSW=false (ruvector flags) — run: aqe ruvector flags --set useNativeHNSW=true && aqe learning repair"
+  elif [[ "${RUVECTOR_HNSW:-}" == "true" ]]; then
+    if [[ "$vec" -gt 0 ]]; then ok "native HNSW enabled (useNativeHNSW=true, AQE vectors=$vec)"
+    else note "native HNSW enabled (no AQE vectors yet)"; fi
+  elif grep -q 'useNativeHNSW' "$AQE_CONFIG" 2>/dev/null; then
+    ok "useNativeHNSW codified in config.yaml (AQE vectors=$vec)"
   else
-    note "no AQE vectors yet (#4 n/a)"
+    note "native HNSW flag indeterminate (aqe ruvector status unavailable; AQE vectors=$vec)"
   fi
 }
 
@@ -180,8 +184,26 @@ probe_router_info() {
   note "router live: model-router totalDecisions=$td, AQE routing_outcomes=$ro (#7)"
 }
 
+# Daemon advisory (non-fatal). A RUNNING ruflo daemon holds DB locks (so
+# fix-learning's dream step fails "database is locked") and caches state in
+# memory — so a just-run fix-learning may not be reflected until the daemon AND
+# Claude Code are restarted. Surfaced as a WARN so the "still hollow after a fix"
+# case is self-explaining.
+probe_daemon_advisory() {
+  command -v ruflo >/dev/null 2>&1 || return 0
+  if ruflo daemon status 2>/dev/null | grep -qiE 'RUNNING'; then
+    soft "ruflo daemon is RUNNING — it locks the DBs (fix-learning 'dream' fails locked) and caches state; restart the daemon + Claude Code after a fix, then re-verify"
+  fi
+}
+
 # ── run ─────────────────────────────────────────────────────────────────────
 RUFLO_ME=0; RUFLO_STRUCT=0; LORA_TA=0
+# Authoritative native-HNSW flag from the ruvector flags store (true|false|""),
+# resolved ONCE. This is the source of truth for #4 — config.yaml is not.
+RUVECTOR_HNSW=""
+if command -v aqe >/dev/null 2>&1; then
+  RUVECTOR_HNSW="$(aqe ruvector status 2>/dev/null | grep -iE 'useNativeHNSW' | grep -oiE 'true|false' | head -1 | tr 'A-Z' 'a-z')"
+fi
 if [[ "$JSON" -eq 0 ]]; then
   header "verify-learning" "ruflo + AQE self-learning loop liveness (read-only)"
   kit_banner
@@ -194,6 +216,7 @@ probe_dimension_guard
 probe_graph_edges
 probe_sona
 probe_router_info
+probe_daemon_advisory
 
 VERDICT="live"
 [[ "$WARN" -gt 0 ]] && VERDICT="partial"

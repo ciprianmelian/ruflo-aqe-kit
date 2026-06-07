@@ -15,8 +15,24 @@ const path = require('path');
 const REPO = path.resolve(__dirname, '..');
 const FIX = path.join(REPO, 'lib', 'fix-learning.sh');
 
+// Stub ruflo so the daemon pre-flight (`ruflo daemon status`) is deterministic
+// and never depends on a real running daemon. In --dry-run the chain commands
+// are only printed (never executed), so a stub suffices.
+function stubBin() {
+  const b = fs.mkdtempSync(path.join(os.tmpdir(), 'flbin-'));
+  fs.writeFileSync(path.join(b, 'ruflo'),
+    '#!/usr/bin/env bash\nif [ "$1" = daemon ] && [ "$2" = status ]; then echo "Status: stopped"; fi\nexit 0\n');
+  fs.chmodSync(path.join(b, 'ruflo'), 0o755);
+  return b;
+}
 function run(target, extra = []) {
-  return spawnSync('bash', [FIX, target, ...extra], { encoding: 'utf8', timeout: 20000 });
+  const b = stubBin();
+  const r = spawnSync('bash', [FIX, target, ...extra], {
+    encoding: 'utf8', timeout: 20000,
+    env: { ...process.env, PATH: `${b}:${process.env.PATH}` },
+  });
+  fs.rmSync(b, { recursive: true, force: true });
+  return r;
 }
 function mkTarget() {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'fl-'));
