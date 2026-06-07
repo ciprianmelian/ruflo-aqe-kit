@@ -11,6 +11,8 @@
 #   bin/ruflo-kit fix-aqe     /path/to/codebase     # codify AQE hardening
 #   bin/ruflo-kit fix-statusbar /path/to/codebase   # restore the statusline
 #   bin/ruflo-kit upgrade     /path/to/codebase     # major ruflo version bump
+#   bin/ruflo-kit verify-learning /path/to/codebase # read-only loop liveness (CI exit 1 if hollow)
+#   bin/ruflo-kit fix-learning /path/to/codebase    # populate/unlock a hollow learning loop
 #   bin/ruflo-kit bench       /path/to/codebase     # self-improvement bench (read-only)
 #   bin/ruflo-kit harvest     /path/to/codebase     # replay AQE experiences
 #   bin/ruflo-kit version                           # kit + ruflo + aqe versions
@@ -47,6 +49,8 @@ Commands:
   fix-aqe        Codify AQE-side hardening + install .claude helpers/commands
   fix-statusbar  Restore the rich ruflo + Agentic QE v3 statusline
   upgrade        Major-version ruflo migration (stop daemon, bump, re-activate)
+  verify-learning Read-only learning-loop liveness probes (CI-friendly exit code)
+  fix-learning   Populate + unlock a hollow self-learning loop (idempotent, --dry-run)
   bench          Run the self-improvement bench (read-only)
   harvest        Replay AQE experiences into the ruflo substrate
   version        Show kit git sha + detected ruflo / agentic-qe versions
@@ -66,6 +70,8 @@ case "$cmd" in
   session|session-init) exec bash "$KIT_DIR/lib/session-init.sh" "$@" ;;
   health)        exec bash "$KIT_DIR/lib/health.sh"         "$@" ;;
   upgrade)       exec bash "$KIT_DIR/lib/upgrade.sh"        "$@" ;;
+  verify-learning) exec bash "$KIT_DIR/lib/verify-learning.sh" "$@" ;;
+  fix-learning)  exec bash "$KIT_DIR/lib/fix-learning.sh"   "$@" ;;
   bench)
     # tools/ operate on the target's runtime DBs via cwd → cd into the target.
     t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true

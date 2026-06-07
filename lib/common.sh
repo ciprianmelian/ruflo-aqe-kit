@@ -118,3 +118,33 @@ ruvector_search_roots() {
   printf '%s\n' "$HOME/.npm/_npx" "$HOME/node_modules/@ruvector" \
     ${groot:+"$groot/ruflo/node_modules" "$groot/@ruvector"}
 }
+
+# ── Vector dimension guard (issue #4 gap #6 — defensive assertion) ───────────
+# Issue #4 claimed AQE `vectors` were 1536-dim vs a 384-dim system. Ground-truth
+# disproved it: `dimensions=384`, blob `length(embedding)=1536 bytes = 384 × 4`
+# float32. So this is NOT a fix — it's a guard that asserts the invariant the
+# whole stack relies on: the declared dimension equals the embedder dimension AND
+# the BLOB byte-length equals dimensions × 4. A real future regression (a 1536-dim
+# embedder swapped under a 384-dim index, or a truncated blob) trips it loudly.
+#
+#   assert_vector_dim_ok <db> <table> <embedding_col> <dim_col> <expected_dim>
+# Echoes exactly one token (no exit — caller decides severity):
+#   OK | EMPTY | NO_TABLE | DIM_MISMATCH:<first-offending-dim> | BLOB_MISMATCH:<rows>
+# Pure read-only (sqlite3 -readonly). Self-contained (inlines the table check) so
+# it works from common.sh without depending on health.sh's table_exists.
+assert_vector_dim_ok() {
+  local db="$1" tbl="$2" col="$3" dimc="$4" exp="$5"
+  [[ -f "$db" ]] || { echo "NO_TABLE"; return; }
+  sqlite3 -readonly "$db" \
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$tbl' LIMIT 1;" \
+    2>/dev/null | grep -q 1 || { echo "NO_TABLE"; return; }
+  local n; n="$(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM $tbl;" 2>/dev/null || echo 0)"
+  [[ "${n:-0}" -eq 0 ]] && { echo "EMPTY"; return; }
+  local baddim
+  baddim="$(sqlite3 -readonly "$db" "SELECT $dimc FROM $tbl WHERE $dimc<>$exp LIMIT 1;" 2>/dev/null)"
+  [[ -n "$baddim" ]] && { echo "DIM_MISMATCH:$baddim"; return; }
+  local badblob
+  badblob="$(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM $tbl WHERE length($col)<>$dimc*4;" 2>/dev/null || echo 0)"
+  [[ "${badblob:-0}" -ne 0 ]] && { echo "BLOB_MISMATCH:$badblob"; return; }
+  echo "OK"
+}
