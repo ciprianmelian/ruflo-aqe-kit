@@ -31,6 +31,18 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
 
   const Database = require(path.join(aqeBase, 'node_modules', 'better-sqlite3'));
   const db = new Database(srcDb, { readonly: true, fileMustExist: true });
+  // Fresh/hollow AQE store: captured_experiences may not exist yet (no AQE
+  // post-task/post-edit hooks have fired). Treat as "nothing to harvest" and exit
+  // cleanly instead of FATAL-ing — fix-learning step 11 and SessionEnd rely on this
+  // graceful path on fresh projects (else every fresh-project harvest "fails").
+  const hasSrc = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='captured_experiences' LIMIT 1"
+  ).get();
+  if (!hasSrc) {
+    db.close();
+    process.stdout.write(JSON.stringify({ trained: 0, skills: 0, episodes: 0, note: 'no captured_experiences table (fresh AQE store — nothing to harvest)' }) + '\n');
+    return;
+  }
   const rows = db.prepare(
     'SELECT rowid, id, task, agent, domain, success, quality, result_json, embedding ' +
     'FROM captured_experiences WHERE success=1 AND quality>=0.7 AND embedding IS NOT NULL ORDER BY rowid'
