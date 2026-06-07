@@ -179,11 +179,50 @@ for (const g of (s.hooks.PostToolUse || [])) {
     }
   }
 }
+// AQE-HOOK-REPOINT-V1: the kit mandates the GLOBAL `aqe` binary for hook commands
+// (issue #4 wiring-smell #1), mirroring the global-ruflo MCP treatment. `npx agentic-qe`
+// cold-start + ONNX model load routinely BLOWS the 3-5s hook timeouts and the failure is
+// swallowed (continueOnError) — a root cause of the "hooks fire but tables never populate"
+// symptom. Repoint every `npx agentic-qe hooks …` → `aqe hooks …` ONLY when the kit found a
+// global aqe (AQE_PRESENT injected at wire time); otherwise leave npx (the portable fallback).
+// Idempotent: matches the `npx` prefix, so a second run is a no-op. We KEEP continueOnError:true
+// (a flaky hook must never block the user's Write/Edit) — using the fast global binary, not
+// flipping the gate, is what stops the timeout-driven swallow. This also catches PT_FIXED above
+// (it carries the npx prefix), keeping a single source of truth.
+const AQE_PRESENT = process.env.AQE_PRESENT === '1';
+if (AQE_PRESENT) {
+  for (const ev of Object.keys(s.hooks)) {
+    for (const g of (s.hooks[ev] || [])) {
+      for (const h of (g.hooks || [])) {
+        if (typeof h.command === 'string' && h.command.includes('npx agentic-qe hooks')) {
+          h.command = h.command.replace(/npx agentic-qe hooks/g, 'aqe hooks');  // AQE-HOOK-REPOINT-V1
+          changed = true;
+        }
+      }
+    }
+  }
+  s.permissions = s.permissions || {}; s.permissions.allow = s.permissions.allow || [];
+  if (!s.permissions.allow.includes('Bash(aqe:*)')) { s.permissions.allow.push('Bash(aqe:*)'); changed = true; }
+}
+// AQE-HARVEST-DRIFT-V1: older settings carried a stale RELATIVE harvest command
+// (`[ -f scripts/aqe-harvest.cjs ] && node scripts/aqe-harvest.cjs`) that never runs from a
+// target cwd and scatters learning across project boundaries (issue #4 wiring-smell #2).
+// Replace any non-KITDIR-absolute harvest invocation with the canonical HARVEST built above.
+for (const g of (s.hooks.SessionEnd || [])) {
+  for (const h of (g.hooks || [])) {
+    if (typeof h.command === 'string'
+        && h.command.includes('aqe-harvest.cjs')
+        && !h.command.includes(process.env.KITDIR || ' ')) {
+      h.command = HARVEST; changed = true;  // AQE-HARVEST-DRIFT-V1
+    }
+  }
+}
 const en = Array.isArray(s.enabledMcpjsonServers) ? s.enabledMcpjsonServers : [];
 if (!en.includes('claude-flow')) { s.enabledMcpjsonServers = en.concat(['claude-flow']); changed = true; }
 if (changed) { fs.writeFileSync(F, JSON.stringify(s, null, 2) + '\n'); console.log('CHANGED'); } else { console.log('UNCHANGED'); }
 NODE
-    RES="$(KITDIR="$KIT_DIR" node "$WIRE" "$SETTINGS" 2>/dev/null)"; rm -f "$WIRE"
+    AQE_PRESENT="$( { [[ -n "${AQE_ROOT:-}" ]] || command -v aqe >/dev/null 2>&1; } && echo 1 || echo 0 )"
+    RES="$(KITDIR="$KIT_DIR" AQE_PRESENT="$AQE_PRESENT" node "$WIRE" "$SETTINGS" 2>/dev/null)"; rm -f "$WIRE"
     if node -e "JSON.parse(require('fs').readFileSync('$SETTINGS','utf8'))" 2>/dev/null; then
       case "$RES" in
         CHANGED) fix "Wired RAG + dual-train hooks + enabledMcpjsonServers into settings.json"; pass "settings.json hooks wired";;
@@ -500,6 +539,37 @@ else
     new="$(grep -E '^[[:space:]]*confidenceThreshold:' "$AQE_CONFIG" | head -1 | sed -E 's/.*confidenceThreshold:[[:space:]]*//; s/[[:space:]#].*$//')"
     if [[ "$new" == "$AQE_CONF_THRESHOLD" ]]; then fix "Set AQE routing confidenceThreshold $cur → $AQE_CONF_THRESHOLD"; pass "confidenceThreshold $cur → $AQE_CONF_THRESHOLD"
     else warn "confidenceThreshold edit did not take — restoring"; cp "$AQE_CONFIG.fixaqe-bak" "$AQE_CONFIG"; fi
+  fi
+
+  # AQE-NATIVE-HNSW-V1: codify learning.hnswConfig.useNativeHNSW=true so AQE indexes
+  # its vectors with the native RuVector HNSW (issue #4 gap #4 — vectors present but
+  # unindexed). This only CODIFIES the config so it survives `aqe init` regen; the
+  # RUNTIME activation/index-rebuild is fix-learning Step 6 (aqe ruvector flags …).
+  # The key's presence is its own idempotency sentinel; insert as a 4-space sibling
+  # under the existing 2-space `hnswConfig:` block via a YAML-safe node edit.
+  if grep -q 'useNativeHNSW' "$AQE_CONFIG"; then
+    pass "useNativeHNSW already codified"
+  elif ! grep -qE '^[[:space:]]*hnswConfig:' "$AQE_CONFIG"; then
+    warn "no learning.hnswConfig block in config.yaml — skipping useNativeHNSW codify"
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] would set learning.hnswConfig.useNativeHNSW: true"
+  else
+    [[ -e "$AQE_CONFIG.fixaqe-bak" ]] || cp "$AQE_CONFIG" "$AQE_CONFIG.fixaqe-bak"
+    node -e '
+      const fs=require("fs"),F=process.argv[1];
+      const lines=fs.readFileSync(F,"utf8").split("\n");
+      const out=[];
+      for (const l of lines) {
+        out.push(l);
+        if (/^\s{2}hnswConfig:\s*$/.test(l)) out.push("    useNativeHNSW: true  # AQE-NATIVE-HNSW-V1");
+      }
+      fs.writeFileSync(F, out.join("\n"));
+    ' "$AQE_CONFIG"
+    if grep -q 'useNativeHNSW: true' "$AQE_CONFIG"; then
+      fix "Codified learning.hnswConfig.useNativeHNSW=true (AQE-NATIVE-HNSW-V1)"; pass "useNativeHNSW codified"
+    else
+      warn "useNativeHNSW insert did not take — restoring"; cp "$AQE_CONFIG.fixaqe-bak" "$AQE_CONFIG"
+    fi
   fi
 fi
 
