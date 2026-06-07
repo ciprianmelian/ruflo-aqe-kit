@@ -87,21 +87,27 @@ soft() { [[ "$JSON" -eq 0 ]] && warn "$1"; WARN=$((WARN+1)); }
 note() { [[ "$JSON" -eq 0 ]] && info "$1"; INFO=$((INFO+1)); }
 
 # ── probes ──────────────────────────────────────────────────────────────────
-# #2 ruflo controllers hollow: memory_entries populated but the 6 structured
-# learning tables all empty = "enabled but unfed". FAIL.
-probe_ruflo_controllers() {
-  local me struct=0 t
+# #2 structured learning store. The reflexion/skill rows live in agentdb.db (the
+# kit's harvest sink, written via the agentdb Node API: reflexion.storeEpisode +
+# skills.createSkill) — NOT .swarm/memory.db, whose structured tables are hollow
+# BY DESIGN (claude-flow's flat coordination store; ruflo ships no CLI that writes
+# the structured schema). So measure the CANONICAL store — agentdb.db episodes +
+# skills — and treat .swarm/memory.db's memory_entries as the flat-activity signal
+# that says structured learning SHOULD have something to harvest. FAIL only when
+# there's flat activity but nothing harvested into the reflexion store.
+probe_reflexion_store() {
+  local epi ski me struct
+  epi="$(count_tbl "$AGENTDB" episodes)"
+  ski="$(count_tbl "$AGENTDB" skills)"
   me="$(count_tbl "$SWARM_DB" memory_entries)"
-  for t in episodes skills patterns causal_edges reasoning_patterns learning_experiences; do
-    struct=$((struct + $(count_tbl "$SWARM_DB" "$t")))
-  done
+  struct=$((epi + ski))
   RUFLO_ME="$me"; RUFLO_STRUCT="$struct"
-  if [[ "$me" -gt 0 && "$struct" -eq 0 ]]; then
-    bad "ruflo controllers HOLLOW: memory_entries=$me but episodes/skills/patterns/causal_edges/reasoning_patterns/learning_experiences all 0 — run: ruflo-kit fix-learning $TARGET_DIR"
-  elif [[ "$struct" -gt 0 ]]; then
-    ok "ruflo controllers populated (structured rows=$struct, memory_entries=$me)"
+  if [[ "$struct" -gt 0 ]]; then
+    ok "reflexion store populated (agentdb.db: $epi episodes, $ski skills)"
+  elif [[ "$me" -gt 0 ]]; then
+    bad "reflexion store HOLLOW: agentdb.db has 0 episodes/skills despite $me flat memory_entries — structured learning not harvested. Run: ruflo-kit harvest $TARGET_DIR (or fix-learning)"
   else
-    note "ruflo coordination store empty (fresh target)"
+    note "reflexion store empty (fresh target — nothing to harvest yet)"
   fi
 }
 
@@ -209,7 +215,7 @@ if [[ "$JSON" -eq 0 ]]; then
   kit_banner
   echo ""
 fi
-probe_ruflo_controllers
+probe_reflexion_store
 probe_lora_backend
 probe_hnsw_native
 probe_dimension_guard

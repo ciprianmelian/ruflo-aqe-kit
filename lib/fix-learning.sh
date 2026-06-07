@@ -234,6 +234,30 @@ fi
 # 10 — real MicroLoRA adaptation (#3). Skip if the trainer is already engaged.
 step 10 1 '[[ "$(lora_adaptations)" -gt 0 ]]' -- "${RUFLO[@]}" neural train -p coordination -e 50 --wasm --flash --contrastive
 
+# 11 — harvest: replay AQE experiences into the agentdb reflexion store (#2). This
+# is the ONLY path that populates structured episodes/skills (in agentdb.db, the
+# canonical store) — ruflo's hooks write flat memory_entries, never the structured
+# schema. The harvest (agentdb Node API: reflexion.storeEpisode + skills.createSkill)
+# is idempotent via .swarm/harvest-state.json and self-checkpoints agentdb.db.
+# Persistence-checked against agentdb.db episodes so an over-report is visible.
+HARVEST_TOOL="$KIT_TOOLS/aqe-harvest.cjs"
+if [[ "${FIXLEARN_HARVEST:-1}" -ne 1 ]]; then
+  pass "11: harvest disabled (FIXLEARN_HARVEST=0) — skipping"; ACT_SKIPPED=$((ACT_SKIPPED+1))
+elif [[ ! -f "$HARVEST_TOOL" ]]; then
+  pass "11: harvest tool not present — skipping"; ACT_SKIPPED=$((ACT_SKIPPED+1))
+elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+  info "11: [dry-run] node aqe-harvest.cjs (replay AQE experiences → agentdb.db episodes/skills)"; ACT_SKIPPED=$((ACT_SKIPPED+1))
+else
+  EPI_BEFORE="$(count_tbl agentdb.db episodes)"
+  info "11: running: harvest (AQE experiences → agentdb.db reflexion store)"
+  if node "$HARVEST_TOOL" >/tmp/fix-learning-11.log 2>&1; then
+    pass "11: done"; ACT_RUN=$((ACT_RUN+1))
+    persist_check 11 agentdb.db episodes "$EPI_BEFORE"
+  else
+    warn "11: harvest failed (see /tmp/fix-learning-11.log) — continuing"; ACT_FAILED=$((ACT_FAILED+1))
+  fi
+fi
+
 echo ""
 echo "  Summary: $ACT_RUN run, $ACT_SKIPPED skipped, $ACT_FAILED failed"
 info "verify with: bin/ruflo-kit verify-learning $TARGET_DIR"

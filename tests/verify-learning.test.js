@@ -69,16 +69,16 @@ function buildHollow(d) {
     JSON.stringify({ stats: { totalUpdates: 100, totalAdaptations: 0 } }));
 }
 
-// Healthy fixture: structured tables populated, lora engaged, useNativeHNSW set,
-// graph + sona non-empty → verdict must NOT be hollow.
+// Healthy fixture: reflexion store (agentdb.db) populated, lora engaged,
+// useNativeHNSW set, graph + sona non-empty → verdict must NOT be hollow.
 function buildHealthy(d) {
   sqlite(path.join(d, '.swarm', 'memory.db'),
     'CREATE TABLE memory_entries(id INTEGER); INSERT INTO memory_entries VALUES (1),(2),(3);' +
-    'CREATE TABLE episodes(id INTEGER); INSERT INTO episodes VALUES (1),(2);' +
-    'CREATE TABLE skills(id INTEGER); CREATE TABLE patterns(id INTEGER);' +
-    'CREATE TABLE causal_edges(id INTEGER); CREATE TABLE reasoning_patterns(id INTEGER);' +
-    'CREATE TABLE learning_experiences(id INTEGER);' +
     'CREATE TABLE graph_edges(id INTEGER); INSERT INTO graph_edges VALUES (1);');
+  // #2 reads the canonical reflexion store (agentdb.db episodes+skills), NOT .swarm.
+  sqlite(path.join(d, 'agentdb.db'),
+    'CREATE TABLE episodes(id INTEGER); INSERT INTO episodes VALUES (1),(2);' +
+    'CREATE TABLE skills(id INTEGER); INSERT INTO skills VALUES (1);');
   sqlite(path.join(d, '.agentic-qe', 'memory.db'),
     'CREATE TABLE vectors(dimensions INTEGER, embedding BLOB); INSERT INTO vectors VALUES (384, zeroblob(1536));' +
     'CREATE TABLE sona_patterns(id INTEGER); INSERT INTO sona_patterns VALUES (1);' +
@@ -144,6 +144,42 @@ describe('verify-learning: healthy loop', () => {
     expect(r.status).toBe(0);
     expect(parseJson(r.stdout).verdict).not.toBe('hollow');
     expect(parseJson(r.stdout).fail).toBe(0);
+  });
+});
+
+// #2 measures the CANONICAL reflexion store (agentdb.db), NOT .swarm/memory.db
+// (which is hollow by design). This guards the gap-#2 store-divergence fix.
+describe('verify-learning: #2 reads agentdb.db, not .swarm', () => {
+  function base(d) {
+    sqlite(path.join(d, '.swarm', 'memory.db'),
+      'CREATE TABLE memory_entries(id INTEGER); INSERT INTO memory_entries VALUES (1),(2);' +
+      'CREATE TABLE graph_edges(id INTEGER); INSERT INTO graph_edges VALUES (1);');
+    sqlite(path.join(d, '.agentic-qe', 'memory.db'),
+      'CREATE TABLE vectors(dimensions INTEGER, embedding BLOB); INSERT INTO vectors VALUES (384, zeroblob(1536));' +
+      'CREATE TABLE sona_patterns(id INTEGER); INSERT INTO sona_patterns VALUES (1);' +
+      'CREATE TABLE routing_outcomes(id INTEGER);');
+    fs.writeFileSync(path.join(d, '.agentic-qe', 'config.yaml'), 'learning:\n  hnswConfig:\n    useNativeHNSW: true\n');
+    fs.writeFileSync(path.join(d, '.swarm', 'lora-weights.json'), JSON.stringify({ stats: { totalUpdates: 5, totalAdaptations: 9 } }));
+  }
+
+  it('OK when agentdb.db has episodes even though .swarm structured tables are empty', () => {
+    const d = mkTarget(); base(d);
+    sqlite(path.join(d, 'agentdb.db'), 'CREATE TABLE episodes(id INTEGER); INSERT INTO episodes VALUES (1),(2),(3); CREATE TABLE skills(id INTEGER);');
+    const r = runVerify(d);
+    expect(r.stdout).toMatch(/reflexion store populated \(agentdb\.db: 3 episodes/);
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  it('HOLLOW (points at harvest) when agentdb.db is absent but flat activity exists — .swarm episodes are NOT counted', () => {
+    const d = mkTarget(); base(d);
+    // Put episodes in the WRONG store (.swarm/memory.db) — must be IGNORED for #2.
+    spawnSync('sqlite3', [path.join(d, '.swarm', 'memory.db'),
+      'CREATE TABLE episodes(id INTEGER); INSERT INTO episodes VALUES (1),(2);'], { encoding: 'utf8' });
+    // No agentdb.db created → the canonical reflexion store is genuinely empty.
+    const r = runVerify(d);
+    expect(r.stdout).toMatch(/reflexion store HOLLOW.*ruflo-kit harvest/);
+    expect(r.status).toBe(1);
+    fs.rmSync(d, { recursive: true, force: true });
   });
 });
 
