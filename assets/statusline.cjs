@@ -179,7 +179,15 @@ function _ra_hooks() {
 
 function getStatuslineData() {
   const cached = readCache();
-  if (cached) return cached;
+  if (cached) {
+    // Backfill cheap local-only fields an older cache writer may have omitted,
+    // so the Tests / ADRs chips never show a stale 0 across a version upgrade
+    // (the CLI JSON omits test counts entirely). No-op once a current writer has
+    // cached them; both are bounded local dir-walks, no network.
+    if (!cached.tests || cached.tests.testFiles === undefined) { try { cached.tests = getLocalTestCount(); } catch (e) {} }
+    if (!cached.adrs || cached.adrs.count === undefined) { try { cached.adrs = getLocalADRCount(); } catch (e) {} }
+    return cached;
+  }
 
   try {
     const raw = execSync(
@@ -192,6 +200,9 @@ function getStatuslineData() {
     const data = JSON.parse(raw.slice(jsonStart));
     // Overlay real ADR count from both local directories (fast, no network).
     data.adrs = getLocalADRCount();
+    // Overlay real test-file count — the CLI JSON omits it, so without this the
+    // Tests chip is a permanent 0 even on repos with hundreds of tests.
+    try { data.tests = getLocalTestCount(); } catch (e) {}
     try { data.agentdb = _ra_agentdb(); } catch (e) {}
     try { data.swarmdb = _ra_swarmdb(); } catch (e) {}
     try { const ri = _ra_intelligence(); data.system = Object.assign({}, data.system, { ruflo: ri }); if (ri.pct > 0) data.system.intelligencePct = ri.pct; } catch (e) {}
@@ -212,7 +223,9 @@ function getLocalADRCount() {
   const adrDirs = [
     path.join(CWD, 'v3', 'implementation', 'adrs'),
     path.join(CWD, 'v3', 'docs', 'adr'),
+    path.join(CWD, 'docs', 'adr'),     // singular — the conventional MADR/adr-tools layout
     path.join(CWD, 'docs', 'adrs'),
+    path.join(CWD, 'docs', 'decisions'),
     path.join(CWD, '.claude-flow', 'adrs'),
   ];
   let total = 0;
@@ -229,16 +242,15 @@ function getLocalADRCount() {
   return { count: total, implemented: total, compliance: 0 };
 }
 
-// Minimal local fallback when the CLI is not installed or times out.
-// Returns a structure that matches the CLI JSON schema so the renderer works.
-function buildLocalFallback() {
-  const memMB = Math.floor(process.memoryUsage().heapUsed / 1024 / 1024);
-  const adrs = getLocalADRCount();
-
-  // Test file count (pure directory walk, no file reads)
+// Count test files via a pure directory walk (no file reads). Used by BOTH the
+// primary-data overlay and the local fallback so the Tests chip is never a
+// false 0 — `ruflo hooks statusline --json` does not report test counts, so the
+// previous code (countTests only in the fallback) always showed 0 whenever the
+// CLI succeeded, even with hundreds of tests on disk (monorepos, .spec.ts, etc).
+function getLocalTestCount() {
   let testFiles = 0;
   function countTests(dir, depth) {
-    if ((depth || 0) > 4) return;
+    if ((depth || 0) > 5) return;
     try {
       if (!fs.existsSync(dir)) return;
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -250,7 +262,19 @@ function buildLocalFallback() {
       }
     } catch { /* ignore */ }
   }
-  for (const d of ['tests', 'test', '__tests__', 'src', 'v3']) countTests(path.join(CWD, d));
+  // Cover monorepo layouts (packages/*) in addition to the common roots.
+  for (const d of ['tests', 'test', '__tests__', 'src', 'v3', 'packages', 'apps']) {
+    countTests(path.join(CWD, d), 0);
+  }
+  return { testFiles, testCases: testFiles * 4 };
+}
+
+// Minimal local fallback when the CLI is not installed or times out.
+// Returns a structure that matches the CLI JSON schema so the renderer works.
+function buildLocalFallback() {
+  const memMB = Math.floor(process.memoryUsage().heapUsed / 1024 / 1024);
+  const adrs = getLocalADRCount();
+  const { testFiles } = getLocalTestCount();
 
   return {
     user: { name: 'user', gitBranch: '', modelName: 'Claude Code' },
