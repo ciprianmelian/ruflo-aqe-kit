@@ -149,6 +149,10 @@ describe('fix-aqe: AQE-PROJECT-ROOT-PIN-V1 pins env.AQE_PROJECT_ROOT', () => {
     d = fs.mkdtempSync(path.join(os.tmpdir(), 'fxaqe-'));
     fs.mkdirSync(path.join(d, '.claude'), { recursive: true });
     fs.writeFileSync(path.join(d, '.claude', 'settings.json'), '{}\n');
+    // .mcp.json with an agentic-qe (aqe-mcp) server lacking the root pin
+    fs.writeFileSync(path.join(d, '.mcp.json'), JSON.stringify({
+      mcpServers: { 'agentic-qe': { command: 'aqe-mcp', args: [], env: { NODE_ENV: 'production' } } },
+    }) + '\n');
     // fake global prefix: `npm root -g` -> this dir; it carries agentic-qe/package.json
     // with NO dist/, so every fix-aqe dist step finds its target absent and skips —
     // the REAL global agentic-qe is never touched.
@@ -191,5 +195,62 @@ describe('fix-aqe: AQE-PROJECT-ROOT-PIN-V1 pins env.AQE_PROJECT_ROOT', () => {
   it('reports the stray advisory step (RVF-STRAY-SWEEP-V1)', () => {
     const r = runFixAqe();
     expect(r.stdout).toMatch(/Stray RVF \.agentic-qe advisory/);
+  });
+
+  // AQE-MCP-ROOT-PIN-V1 — the pin that actually stops the aqe-mcp -> ~/.agentic-qe hijack
+  it('pins AQE_PROJECT_ROOT in the .mcp.json agentic-qe server env, preserving other env', () => {
+    const r = runFixAqe();
+    expect(r.status).toBe(0);
+    const m = JSON.parse(fs.readFileSync(path.join(d, '.mcp.json'), 'utf8'));
+    expect(m.mcpServers['agentic-qe'].env.AQE_PROJECT_ROOT).toBe(d);
+    expect(m.mcpServers['agentic-qe'].env.NODE_ENV).toBe('production');
+  });
+
+  it('pins a server identified by command aqe-mcp even under a different key name', () => {
+    fs.writeFileSync(path.join(d, '.mcp.json'), JSON.stringify({
+      mcpServers: { 'aqe': { command: 'aqe-mcp', args: [] } },
+    }) + '\n');
+    runFixAqe();
+    const m = JSON.parse(fs.readFileSync(path.join(d, '.mcp.json'), 'utf8'));
+    expect(m.mcpServers['aqe'].env.AQE_PROJECT_ROOT).toBe(d);
+  });
+
+  it('is idempotent on .mcp.json (second run reports already pinned)', () => {
+    runFixAqe();
+    const r2 = runFixAqe();
+    expect(r2.stdout).toMatch(/AQE MCP root already pinned/);
+  });
+});
+
+// ── verify-learning: root-hijack advisory (probe_root_hijack) ────────────────
+describe('verify-learning: warns when ~/.agentic-qe hijacks the project root', () => {
+  const VERIFY = path.join(REPO, 'lib', 'verify-learning.sh');
+  let home;
+
+  beforeEach(() => { home = fs.mkdtempSync(path.join(os.tmpdir(), 'fakehome-')); });
+  afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
+
+  // Run verify-learning against a target UNDER a fake $HOME, toggling whether the
+  // hijack target ~/.agentic-qe exists.
+  function runVerify(target, withHomeAqe) {
+    if (withHomeAqe) fs.mkdirSync(path.join(home, '.agentic-qe'), { recursive: true });
+    return spawnSync('bash', [VERIFY, target], {
+      encoding: 'utf8', timeout: 30000,
+      env: { ...process.env, HOME: home },
+    });
+  }
+
+  it('WARNS when ~/.agentic-qe sits above the project', () => {
+    const proj = path.join(home, 'proj');
+    fs.mkdirSync(path.join(proj, '.agentic-qe'), { recursive: true });
+    const r = runVerify(proj, /* withHomeAqe */ true);
+    expect(r.stdout).toMatch(/root-hijack target present/);
+  });
+
+  it('is SILENT when ~/.agentic-qe does not exist', () => {
+    const proj = path.join(home, 'proj');
+    fs.mkdirSync(path.join(proj, '.agentic-qe'), { recursive: true });
+    const r = runVerify(proj, /* withHomeAqe */ false);
+    expect(r.stdout).not.toMatch(/root-hijack target present/);
   });
 });

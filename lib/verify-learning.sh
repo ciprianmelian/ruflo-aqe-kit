@@ -202,6 +202,19 @@ probe_daemon_advisory() {
   fi
 }
 
+# Root-resolution hijack advisory (non-fatal). findProjectRoot() takes the TOPMOST
+# .agentic-qe walking up from cwd; if ~/.agentic-qe exists ABOVE the project, every
+# AQE process NOT pinned with AQE_PROJECT_ROOT (the MCP server `aqe-mcp`, the daemon,
+# ad-hoc `aqe` calls) resolves there instead of the project — silently writing this
+# project's learning into the HOME brain (cross-project leak; cwd does not help).
+probe_root_hijack() {
+  local home_aqe="$HOME/.agentic-qe"
+  [[ -d "$home_aqe" ]] || return 0
+  case "$TARGET_DIR/" in "$HOME/"*) ;; *) return 0 ;; esac   # only when target lives UNDER $HOME
+  [[ "$TARGET_DIR" == "$HOME" ]] && return 0                  # target IS home — not a hijack
+  soft "root-hijack target present: ~/.agentic-qe sits ABOVE this project → findProjectRoot routes unpinned AQE processes (aqe-mcp, daemon) to the HOME brain. Ensure the AQE_PROJECT_ROOT pins are applied (ruflo-kit fix-aqe $TARGET_DIR) and consider removing ~/.agentic-qe"
+}
+
 # ── run ─────────────────────────────────────────────────────────────────────
 RUFLO_ME=0; RUFLO_STRUCT=0; LORA_TA=0
 # Authoritative native-HNSW flag from the ruvector flags store (true|false|""),
@@ -223,6 +236,7 @@ probe_graph_edges
 probe_sona
 probe_router_info
 probe_daemon_advisory
+probe_root_hijack
 
 VERDICT="live"
 [[ "$WARN" -gt 0 ]] && VERDICT="partial"
