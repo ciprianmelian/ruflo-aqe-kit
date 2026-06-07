@@ -176,3 +176,24 @@ pin_helpers_module_type() {
   [[ "$need_mjs" -eq 1 ]] && mv -f "$hdir/github-safe.js" "$hdir/github-safe.mjs"
   echo "PINNED"
 }
+
+# ── Standalone agentdb MCP: durable on-disk schema (fix #1 ephemerality) ──────
+# The agentdb stdio MCP server (sql.js backend) boots with an IN-MEMORY schema
+# that is lost on every session restart unless ./agentdb.db already holds the
+# schema on disk — so `db_stats`/`agentdb_stats` error after each restart until
+# `agentdb_init` (the MCP tool) is re-run. That MCP tool only writes the server's
+# memory, never the file, so the fix evaporates every session (issue #4 gap #1,
+# confirmed ephemeral in the field). The durable fix is the CLI `agentdb init`,
+# which writes the agentdb-native schema (agentdb_config, dimension 384) to the
+# on-disk file so it survives restarts. Idempotent: skips a non-empty db (and
+# `agentdb init` itself preserves existing rows). Echoes:
+#   INITIALIZED | PRESENT | NO_CLI | NO_DIR | DRYRUN | FAILED
+ensure_agentdb_schema() {
+  local target="$1" db="$1/agentdb.db"
+  [[ -d "$target" ]] || { echo "NO_DIR"; return; }
+  [[ -s "$db" ]] && { echo "PRESENT"; return; }            # 0-byte/missing is the ephemeral symptom
+  command -v agentdb >/dev/null 2>&1 || { echo "NO_CLI"; return; }
+  [[ "${DRY_RUN:-0}" -eq 1 ]] && { echo "DRYRUN"; return; }
+  ( cd "$target" && agentdb init ./agentdb.db --dimension 384 >/tmp/agentdb-init-schema.log 2>&1 )
+  [[ -s "$db" ]] && echo "INITIALIZED" || echo "FAILED"
+}

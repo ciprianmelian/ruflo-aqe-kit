@@ -32,7 +32,7 @@ echo "============================================"
 
 # ── Step 1: Apply patches ────────────────────────────────────────────────────
 
-echo -e "\n${CYAN}[1/7]${NC} Applying ruflo patches"
+echo -e "\n${CYAN}[1/9]${NC} Applying ruflo patches"
 
 if [[ -f "$KIT_LIB/fix-ruflo.sh" ]]; then
   # Run fix-ruflo.sh silently, only show fixes
@@ -46,7 +46,7 @@ fi
 
 # ── Step 2: Repair statusbar (ruflo + Agentic QE v3) ─────────────────────────
 
-echo -e "\n${CYAN}[2/7]${NC} Statusbar coexistence check"
+echo -e "\n${CYAN}[2/9]${NC} Statusbar coexistence check"
 
 if [[ -f "$KIT_LIB/fix-statusbar.sh" ]]; then
   STATUS_FIXES=$(bash "$KIT_LIB/fix-statusbar.sh" "$TARGET_DIR" 2>&1 | grep -c "✓" || true)
@@ -57,9 +57,27 @@ else
   ((ERRORS++)) || true
 fi
 
-# ── Step 3: Verify MCP server is running ─────────────────────────────────────
+# ── Step 3: .claude/helpers module-type pin ──────────────────────────────────
+# HELPER-MODULE-PIN-V1: in a "type":"module" project, Node loads the CJS helpers
+# (router.js, hook-handler.cjs's deps) as ES modules → every PreCompact/SessionEnd
+# hook crashes "require is not defined". fix-aqe applies this at init, but `aqe/
+# ruflo init` regenerate the .js helpers, so re-heal it every session (cheap,
+# idempotent, only acts on ESM projects).
 
-echo -e "\n${CYAN}[3/7]${NC} MCP server check"
+echo -e "\n${CYAN}[3/9]${NC} Helper module-type pin (ESM-project hook crash guard)"
+
+case "$(pin_helpers_module_type "$TARGET_DIR")" in
+  PINNED)          pass "pinned .claude/helpers → commonjs (+github-safe.mjs) — fixes 'require is not defined' hook crash" ;;
+  ALREADY)         pass "helper module-type already pinned (commonjs)" ;;
+  NOT_ESM_PROJECT) pass "project root is commonjs — no helper pin needed" ;;
+  NO_DIR)          warn ".claude/helpers not present yet (run: bin/ruflo-kit init)" ;;
+  DRYRUN)          info "[dry-run] would pin .claude/helpers → commonjs (+github-safe.mjs)" ;;
+  *)               : ;;
+esac
+
+# ── Step 4: Verify MCP server is running ─────────────────────────────────────
+
+echo -e "\n${CYAN}[4/9]${NC} MCP server check"
 
 MCP_PID=$(ps aux | grep "ruflo mcp start" | grep -v grep | awk '{print $2}' | head -1)
 if [[ -n "$MCP_PID" ]]; then
@@ -88,7 +106,7 @@ fi
 # unattended, 24/7 token spend.
 RUFLO_DAEMON_MODE="${RUFLO_DAEMON_MODE:-off}"
 
-echo -e "\n${CYAN}[4/7]${NC} Daemon mode (${RUFLO_DAEMON_MODE})"
+echo -e "\n${CYAN}[5/9]${NC} Daemon mode (${RUFLO_DAEMON_MODE})"
 
 # `ruflo daemon status` always exits 0 with an ASCII box. Grep for the
 # canonical "Status: ● RUNNING" line (U+25CF filled circle) and fall back
@@ -133,7 +151,7 @@ esac
 
 # ── Step 5: Verify persistent storage ────────────────────────────────────────
 
-echo -e "\n${CYAN}[5/7]${NC} Persistent storage check"
+echo -e "\n${CYAN}[6/9]${NC} Persistent storage check"
 
 MEMORY_DB="$TARGET_DIR/.swarm/memory.db"
 HNSW_INDEX="$TARGET_DIR/.swarm/hnsw.index"
@@ -172,7 +190,18 @@ fi
 
 # ── Step 6: Verify AgentDB controllers ───────────────────────────────────────
 
-echo -e "\n${CYAN}[6/7]${NC} AgentDB controller check"
+echo -e "\n${CYAN}[7/9]${NC} AgentDB controller check"
+
+# Durable on-disk schema for the standalone agentdb MCP store (issue #4 gap #1):
+# without it, db_stats/agentdb_stats error after every session restart (the schema
+# lives only in the server's memory). Idempotent — only inits a 0-byte/missing db.
+case "$(ensure_agentdb_schema "$TARGET_DIR")" in
+  INITIALIZED) pass "agentdb.db schema initialized on disk (durable across restarts — was ephemeral)" ;;
+  PRESENT)     pass "agentdb.db on-disk schema present (db_stats survives restart)" ;;
+  NO_CLI)      warn "agentdb CLI not found — cannot persist schema; install: npm i -g agentdb" ;;
+  FAILED)      warn "agentdb init did not write a schema (see /tmp/agentdb-init-schema.log)" ;;
+  *)           : ;;
+esac
 
 # Use npx to query the MCP server
 CONTROLLERS=$(npx ruflo@latest memory list --namespace pattern --limit 1 2>&1)
@@ -244,7 +273,7 @@ fi
 
 # ── Step 7: RuVector native binaries ─────────────────────────────────────────
 
-echo -e "\n${CYAN}[7/7]${NC} RuVector native binary check"
+echo -e "\n${CYAN}[8/9]${NC} RuVector native binary check"
 
 # Platform-correct native-binary tag (darwin-arm64 / linux-arm64-gnu / …) and
 # search roots (npx cache + global-ruflo nested node_modules). Both come from
@@ -263,6 +292,28 @@ GRAPH_BIN=$(_find_native "ruvector-graph*.node")
 [[ -n "$SONA_BIN" ]] && pass "SONA native: $ARCH" || warn "SONA native not found for $ARCH (WASM fallback active)"
 [[ -n "$ATTENTION_BIN" ]] && pass "Attention native: $ARCH" || warn "Attention native not found for $ARCH (WASM fallback active)"
 [[ -n "$GRAPH_BIN" ]] && pass "GNN native: found" || warn "GNN native not found (WASM fallback active)"
+
+# ── Step 9: Self-learning loop liveness (read-only diagnostic) ────────────────
+# Surfaces the issue #4 "enabled-but-hollow" class: controllers report active but
+# the structured stores are empty / the neural trainer is in JS fallback / HNSW
+# is unindexed. Read-only; NON-FATAL (a fresh project is legitimately hollow —
+# it populates from real agent activity over time), so it never flips the session
+# exit code, it just points at fix-learning.
+
+echo -e "\n${CYAN}[9/9]${NC} Self-learning loop liveness (read-only)"
+
+if [[ -f "$KIT_LIB/verify-learning.sh" ]]; then
+  VL_JSON="$(bash "$KIT_LIB/verify-learning.sh" "$TARGET_DIR" --json 2>/dev/null | tail -1)"
+  VL_VERDICT="$(node -e "try{process.stdout.write((JSON.parse(process.argv[1]).verdict)||'unknown')}catch(e){process.stdout.write('unknown')}" "$VL_JSON" 2>/dev/null || echo unknown)"
+  case "$VL_VERDICT" in
+    live)    pass "learning loop live" ;;
+    partial) warn "learning loop partial (non-fatal) — detail: bin/ruflo-kit verify-learning $TARGET_DIR" ;;
+    hollow)  warn "learning loop HOLLOW — run: bin/ruflo-kit fix-learning $TARGET_DIR (stop daemon + live Claude Code first)" ;;
+    *)       info "learning-loop verdict unavailable (verify-learning could not run)" ;;
+  esac
+else
+  warn "verify-learning.sh not found"
+fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
