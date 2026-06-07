@@ -106,6 +106,23 @@ cleanup_pass() {
   else
     info "$found stray store(s) found — re-run with --cleanup --confirm to remove"
   fi
+
+  # RVF-only stray .agentic-qe dirs (cwd-relative RVF path scatter — RVF-STRAY-SWEEP-V1).
+  # These hold ONLY .rvf files (no memory.db/config.yaml), so the *.db sweep above
+  # misses them. sweep_stray_aqe_dirs classifies by the absence of canonical SQLite
+  # markers, so the project root is structurally safe. Confirm-gated, recoverable
+  # (moved to .cleanup-bak); DRY_RUN forces list mode inside the helper.
+  echo ""
+  if [[ "$confirm" -eq 1 ]]; then
+    sweep_stray_aqe_dirs "$TARGET_DIR" remove
+    if [[ "${SWEEP_STRAY_COUNT:-0}" -eq 0 ]]; then pass "no stray RVF .agentic-qe dirs"
+    else pass "RVF-dir cleanup: $SWEEP_REMOVED/$SWEEP_STRAY_COUNT removed (moved to .cleanup-bak)"; fi
+  else
+    sweep_stray_aqe_dirs "$TARGET_DIR" list
+    [[ "${SWEEP_STRAY_COUNT:-0}" -eq 0 ]] \
+      && pass "no stray RVF .agentic-qe dirs" \
+      || info "$SWEEP_STRAY_COUNT stray RVF dir(s) found — re-run with --cleanup --confirm to remove"
+  fi
 }
 
 if [[ "$DO_CLEANUP" -eq 1 ]]; then

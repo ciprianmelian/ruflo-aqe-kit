@@ -27,6 +27,13 @@ set -uo pipefail
 #       generates (`--success` with no value -> success=0 on every trajectory;
 #       no --agent -> agent='unknown'). Rewrites to `--success true` + real
 #       --agent/--description so Task trajectories can promote into patterns.
+#   (7) AQE-PROJECT-ROOT-PIN-V1 — pin settings.json env.AQE_PROJECT_ROOT=<target> so
+#       the kernel's findProjectRoot() resolves deterministically (honored before any
+#       cwd walk-up). Hardens SQLite-side resolution + future-proofs for the upstream
+#       RVF fix. (RVF stores still bypass findProjectRoot — see #8.)
+#   (8) RVF-STRAY-SWEEP-V1 — advisory listing of RVF-only stray .agentic-qe dirs the
+#       cwd-relative RVF path resolution scatters across subfolders. Removal is gated
+#       behind `fix-learning --cleanup --confirm`. Core helper in common.sh.
 #
 # Idempotent (sentinels / cmp / membership / value checks), reversible (.bak).
 # Full rationale: docs/_INSTRUCTIONS.md Patches 21-22, 35, 41, 46.
@@ -230,10 +237,20 @@ for (const g of (s.hooks.SessionEnd || [])) {
 }
 const en = Array.isArray(s.enabledMcpjsonServers) ? s.enabledMcpjsonServers : [];
 if (!en.includes('claude-flow')) { s.enabledMcpjsonServers = en.concat(['claude-flow']); changed = true; }
+// AQE-PROJECT-ROOT-PIN-V1: pin AQE_PROJECT_ROOT so the kernel's findProjectRoot()
+// resolves deterministically — it honors this env BEFORE any cwd walk-up, anchoring
+// every findProjectRoot consumer (memory.db, workers, code-intel) regardless of the
+// hook/worker cwd. CAVEAT: the RVF pattern store + brain dual-writer currently use a
+// CWD-RELATIVE '.agentic-qe' and do NOT call findProjectRoot, so this pin does not by
+// itself stop RVF stray dirs (that needs the RVF-STRAY sweep below + the upstream fix
+// that routes RVF through findProjectRoot). It future-proofs for that fix and hardens
+// all SQLite-side resolution today. TARGET_DIR injected at wire time.
+const PROJ = process.env.TARGET_DIR;
+if (PROJ) { s.env = s.env || {}; if (s.env.AQE_PROJECT_ROOT !== PROJ) { s.env.AQE_PROJECT_ROOT = PROJ; changed = true; } }
 if (changed) { fs.writeFileSync(F, JSON.stringify(s, null, 2) + '\n'); console.log('CHANGED'); } else { console.log('UNCHANGED'); }
 NODE
     AQE_PRESENT="$( { [[ -n "${AQE_ROOT:-}" ]] || command -v aqe >/dev/null 2>&1; } && echo 1 || echo 0 )"
-    RES="$(KITDIR="$KIT_DIR" AQE_PRESENT="$AQE_PRESENT" node "$WIRE" "$SETTINGS" 2>/dev/null)"; rm -f "$WIRE"
+    RES="$(KITDIR="$KIT_DIR" AQE_PRESENT="$AQE_PRESENT" TARGET_DIR="$TARGET_DIR" node "$WIRE" "$SETTINGS" 2>/dev/null)"; rm -f "$WIRE"
     if node -e "JSON.parse(require('fs').readFileSync('$SETTINGS','utf8'))" 2>/dev/null; then
       case "$RES" in
         CHANGED) fix "Wired RAG + dual-train hooks + enabledMcpjsonServers into settings.json"; pass "settings.json hooks wired";;
@@ -636,6 +653,19 @@ else
     if node --check "$DEN6" 2>/dev/null; then fix "Lowered dream minConceptsRequired 10 → $AQE_DREAM_MINCONCEPTS (AQE-DREAM-MINCONCEPTS-V1)"; pass "minConceptsRequired → $AQE_DREAM_MINCONCEPTS"
     else warn "min-concepts patch produced invalid JS — restoring"; cp "$DEN6.minconcepts-bak" "$DEN6"; fi
   fi
+fi
+
+# ── Step 7: stray RVF .agentic-qe advisory (RVF-STRAY-SWEEP-V1) ──────────────
+# Non-destructive here: list any RVF-only stray .agentic-qe dirs the cwd-relative RVF
+# path resolution scattered across subfolders (vendor/*, docs/, .claude/). Removal is
+# gated behind `fix-learning --cleanup --confirm` (so deletion always needs an explicit
+# opt-in). See common.sh sweep_stray_aqe_dirs + AQE-PROJECT-ROOT-PIN-V1 above.
+header "7" "Stray RVF .agentic-qe advisory (RVF-STRAY-SWEEP-V1)"
+sweep_stray_aqe_dirs "$TARGET_DIR" list
+if [[ "${SWEEP_STRAY_COUNT:-0}" -eq 0 ]]; then
+  pass "no stray RVF .agentic-qe dirs (root store is the only one)"
+else
+  info "$SWEEP_STRAY_COUNT stray RVF dir(s) — remove with: bin/ruflo-kit fix-learning $TARGET_DIR --cleanup --confirm"
 fi
 
 echo -e "\n============================================"
