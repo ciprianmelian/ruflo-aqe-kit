@@ -202,8 +202,9 @@ probe_daemon_advisory() {
   fi
 }
 
-# Root-resolution hijack advisory (non-fatal). findProjectRoot() takes the TOPMOST
-# .agentic-qe walking up from cwd; if ~/.agentic-qe exists ABOVE the project, every
+# Root-resolution hijack advisory (non-fatal). ≤3.10.3 findProjectRoot() took the TOPMOST
+# .agentic-qe walking up from cwd; 3.10.4 takes NEAREST + honors AQE_PROJECT_ROOT first.
+# On ≤3.10.3, if ~/.agentic-qe exists ABOVE the project, every
 # AQE process NOT pinned with AQE_PROJECT_ROOT (the MCP server `aqe-mcp`, the daemon,
 # ad-hoc `aqe` calls) resolves there instead of the project — silently writing this
 # project's learning into the HOME brain (cross-project leak; cwd does not help).
@@ -212,6 +213,13 @@ probe_root_hijack() {
   [[ -d "$home_aqe" ]] || return 0
   case "$TARGET_DIR/" in "$HOME/"*) ;; *) return 0 ;; esac   # only when target lives UNDER $HOME
   [[ "$TARGET_DIR" == "$HOME" ]] && return 0                  # target IS home — not a hijack
+  # aqe 3.10.4 picks NEAREST + honors AQE_PROJECT_ROOT first, so the ancestor ~/.agentic-qe
+  # can no longer hijack root resolution. Only raise the strong warning on ≤3.10.3 or unknown.
+  local ver; ver="$(aqe_installed_version)"
+  if [[ -n "$ver" ]] && ! aqe_semver_lt "$ver" "3.10.4"; then
+    soft "ancestor ~/.agentic-qe present but harmless on aqe $ver (≥3.10.4 nearest-wins prevents the hijack; AQE_PROJECT_ROOT pins make it moot) — leftover housekeeping; remove it if you like"
+    return 0
+  fi
   soft "root-hijack target present: ~/.agentic-qe sits ABOVE this project → findProjectRoot routes unpinned AQE processes (aqe-mcp, daemon) to the HOME brain. Ensure the AQE_PROJECT_ROOT pins are applied (ruflo-kit fix-aqe $TARGET_DIR) and consider removing ~/.agentic-qe"
 }
 
