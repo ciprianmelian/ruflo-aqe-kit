@@ -76,6 +76,7 @@ This one script calls `fix-ruflo.sh` (step 5), `fix-statusbar.sh` (step 6) and `
 - The **AQE-PROMOTE-V1** patch lives *inside* the global package at `<global agentic-qe>/dist/cli/chunks/*.js` (the chunk matching `GROUP BY domain HAVING COUNT`; `fix-aqe.sh` locates it dynamically). Any `npm i -g agentic-qe` **overwrites `dist/`**, so the patch is lost → re-run `fix-aqe.sh`.
 - The minted `qe_patterns` row is dropped when the AQE DB re-inits → re-run `aqe learning extract` to re-mint it.
 - `bin/ruflo-kit upgrade` never runs `agentic-qe` install, `aqe init`, or `fix-aqe.sh` — it only upgrades ruflo. AQE upgrades are entirely the sequence above.
+- **3.10.4 note (#516):** the `AQE_PROJECT_ROOT` pins (kept at the MCP + daemon spawn points) and the `RVF-STRAY-SWEEP-V1` cleanup exist to contain a ≤3.10.3 project-root hijack — a stray `~/.agentic-qe` captured root resolution to `$HOME`, and RVF also minted cwd-relative strays. `agentic-qe@3.10.4` fixed both at the source (nearest-wins `findProjectRoot` + RVF honoring `AQE_PROJECT_ROOT`); the kit keeps the pins as the **canonical** anchor and the sweep as **legacy cleanup**. Full record: `_INSTRUCTIONS.md` Patch 51.
 
 **Verify:** `aqe --version` reports the new version; `bin/ruflo-kit fix-aqe <target>` re-run reports items as "already present"; statusline shows ruflo + Agentic QE v3.
 
