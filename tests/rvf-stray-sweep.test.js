@@ -3,12 +3,13 @@
  * lib/common.sh, and the AQE-PROJECT-ROOT-PIN-V1 settings.json env pin in
  * lib/fix-aqe.sh.
  *
- * Background: the AQE RVF substrate resolves its store path from a CWD-RELATIVE
- * '.agentic-qe' default instead of findProjectRoot(), so an aqe/hook/worker run
- * with cwd != project root scatters stray '.agentic-qe' dirs that hold ONLY .rvf
- * files (never memory.db/config.yaml). The sweep classifies by the ABSENCE of the
- * canonical SQLite markers — never by location — so the project root is
- * structurally safe.
+ * Background (≤3.10.3): the AQE RVF substrate resolved its store path from a
+ * CWD-RELATIVE '.agentic-qe' default instead of findProjectRoot(), so an aqe/hook/worker
+ * run with cwd != project root scattered stray '.agentic-qe' dirs that hold ONLY .rvf
+ * files (never memory.db/config.yaml). Fixed upstream in aqe 3.10.4 (RVF now routes
+ * through AQE_PROJECT_ROOT ?? findProjectRoot); the sweep stays valid for cleaning up
+ * historical strays. The sweep classifies by the ABSENCE of the canonical SQLite markers
+ * — never by location — so the project root is structurally safe.
  *
  * Safety: the sweep tests run entirely in throwaway temp dirs. The fix-aqe pin
  * test sandboxes the global-dist steps by stubbing `npm root -g` to an empty temp
@@ -231,20 +232,36 @@ describe('verify-learning: warns when ~/.agentic-qe hijacks the project root', (
   afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
 
   // Run verify-learning against a target UNDER a fake $HOME, toggling whether the
-  // hijack target ~/.agentic-qe exists.
-  function runVerify(target, withHomeAqe) {
+  // hijack target ~/.agentic-qe exists. `aqeVersion` stubs the installed `aqe --version`
+  // the probe reads (prepended on PATH) so the version-gated branch is deterministic and
+  // independent of the host's actual aqe install.
+  function runVerify(target, withHomeAqe, aqeVersion) {
     if (withHomeAqe) fs.mkdirSync(path.join(home, '.agentic-qe'), { recursive: true });
+    let env = { ...process.env, HOME: home };
+    if (aqeVersion !== undefined) {
+      const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'stubbin-'));
+      fs.writeFileSync(path.join(bin, 'aqe'),
+        `#!/bin/sh\n[ "$1" = "--version" ] && echo "${aqeVersion}"\n`, { mode: 0o755 });
+      env.PATH = `${bin}:${env.PATH}`;
+    }
     return spawnSync('bash', [VERIFY, target], {
-      encoding: 'utf8', timeout: 30000,
-      env: { ...process.env, HOME: home },
+      encoding: 'utf8', timeout: 30000, env,
     });
   }
 
-  it('WARNS when ~/.agentic-qe sits above the project', () => {
+  it('WARNS strongly when ~/.agentic-qe sits above the project on aqe ≤3.10.3', () => {
     const proj = path.join(home, 'proj');
     fs.mkdirSync(path.join(proj, '.agentic-qe'), { recursive: true });
-    const r = runVerify(proj, /* withHomeAqe */ true);
+    const r = runVerify(proj, /* withHomeAqe */ true, '3.10.3');
     expect(r.stdout).toMatch(/root-hijack target present/);
+  });
+
+  it('softens to an info advisory on aqe ≥3.10.4 (nearest-wins, no hijack)', () => {
+    const proj = path.join(home, 'proj');
+    fs.mkdirSync(path.join(proj, '.agentic-qe'), { recursive: true });
+    const r = runVerify(proj, /* withHomeAqe */ true, '3.10.4');
+    expect(r.stdout).not.toMatch(/root-hijack target present/);
+    expect(r.stdout).toMatch(/harmless on aqe 3\.10\.4/);
   });
 
   it('is SILENT when ~/.agentic-qe does not exist', () => {

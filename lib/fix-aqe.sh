@@ -30,12 +30,14 @@ set -uo pipefail
 #   (7) AQE-PROJECT-ROOT-PIN-V1 — pin settings.json env.AQE_PROJECT_ROOT=<target> so
 #       the kernel's findProjectRoot() resolves deterministically (honored before any
 #       cwd walk-up). Hardens SQLite-side resolution + future-proofs for the upstream
-#       RVF fix. (RVF stores still bypass findProjectRoot — see #8.)
+#       RVF fix. (≤3.10.3 RVF stores bypassed findProjectRoot — see #8; fixed
+#       upstream in aqe 3.10.4: nearest-wins + RVF anchored to AQE_PROJECT_ROOT ?? findProjectRoot.)
 #   (7b) AQE-MCP-ROOT-PIN-V1 — same pin in .mcp.json's agentic-qe server env, so the
 #       long-lived `aqe-mcp` server stops resolving to ~/.agentic-qe via findProjectRoot's
 #       topmost-.agentic-qe hijack (settings.json only covers hooks, not the MCP process).
 #   (8) RVF-STRAY-SWEEP-V1 — advisory listing of RVF-only stray .agentic-qe dirs the
-#       cwd-relative RVF path resolution scatters across subfolders. Removal is gated
+#       ≤3.10.3 cwd-relative RVF path resolution scattered across subfolders; 3.10.4
+#       anchors RVF so the advisory now surfaces historical strays. Removal is gated
 #       behind `fix-learning --cleanup --confirm`. Core helper in common.sh.
 #
 # Idempotent (sentinels / cmp / membership / value checks), reversible (.bak).
@@ -243,11 +245,12 @@ if (!en.includes('claude-flow')) { s.enabledMcpjsonServers = en.concat(['claude-
 // AQE-PROJECT-ROOT-PIN-V1: pin AQE_PROJECT_ROOT so the kernel's findProjectRoot()
 // resolves deterministically — it honors this env BEFORE any cwd walk-up, anchoring
 // every findProjectRoot consumer (memory.db, workers, code-intel) regardless of the
-// hook/worker cwd. CAVEAT: the RVF pattern store + brain dual-writer currently use a
-// CWD-RELATIVE '.agentic-qe' and do NOT call findProjectRoot, so this pin does not by
-// itself stop RVF stray dirs (that needs the RVF-STRAY sweep below + the upstream fix
-// that routes RVF through findProjectRoot). It future-proofs for that fix and hardens
-// all SQLite-side resolution today. TARGET_DIR injected at wire time.
+// hook/worker cwd. CAVEAT (≤3.10.3): the RVF pattern store + brain dual-writer used a
+// CWD-RELATIVE '.agentic-qe' and did NOT call findProjectRoot, so on those versions this
+// pin did not by itself stop RVF stray dirs (that needed the RVF-STRAY sweep below + the
+// upstream fix that routes RVF through findProjectRoot). Fixed upstream in aqe 3.10.4:
+// nearest-wins + RVF anchored to AQE_PROJECT_ROOT ?? findProjectRoot, so the pin DOES
+// reach RVF now. It hardens all SQLite-side resolution today. TARGET_DIR injected at wire time.
 const PROJ = process.env.TARGET_DIR;
 if (PROJ) { s.env = s.env || {}; if (s.env.AQE_PROJECT_ROOT !== PROJ) { s.env.AQE_PROJECT_ROOT = PROJ; changed = true; } }
 if (changed) { fs.writeFileSync(F, JSON.stringify(s, null, 2) + '\n'); console.log('CHANGED'); } else { console.log('UNCHANGED'); }
@@ -268,10 +271,11 @@ fi
 
 # ── Step 2b: AQE-MCP-ROOT-PIN-V1 (.mcp.json agentic-qe env) ─────────────────
 # The AQE MCP server (`aqe-mcp`, launched from .mcp.json) resolves its store via
-# findProjectRoot(), whose "topmost .agentic-qe wins" rule HIJACKS to ~/.agentic-qe
-# whenever that dir exists higher up the tree than the project — so the long-lived
-# MCP server writes every project's experiences into the HOME brain regardless of
-# cwd (verified: aqe-mcp held ~/.agentic-qe/memory.db open with cwd=project). The
+# findProjectRoot(), whose (≤3.10.3) "topmost .agentic-qe wins" rule HIJACKED to
+# ~/.agentic-qe whenever that dir existed higher up the tree than the project — so the
+# long-lived MCP server wrote every project's experiences into the HOME brain regardless
+# of cwd (verified: aqe-mcp held ~/.agentic-qe/memory.db open with cwd=project). 3.10.4
+# picks NEAREST + honors AQE_PROJECT_ROOT first; the pin remains recommended config. The
 # settings.json pin (Step 2) only covers Claude Code HOOKS; the MCP server reads its
 # env from .mcp.json. Pin AQE_PROJECT_ROOT there too — findProjectRoot honors it
 # BEFORE the walk-up, defeating the hijack. Takes effect on the next MCP (re)spawn.
@@ -699,8 +703,9 @@ else
 fi
 
 # ── Step 7: stray RVF .agentic-qe advisory (RVF-STRAY-SWEEP-V1) ──────────────
-# Non-destructive here: list any RVF-only stray .agentic-qe dirs the cwd-relative RVF
-# path resolution scattered across subfolders (vendor/*, docs/, .claude/). Removal is
+# Non-destructive here: list any RVF-only stray .agentic-qe dirs the ≤3.10.3 cwd-relative
+# RVF path resolution scattered across subfolders (vendor/*, docs/, .claude/); 3.10.4
+# anchors RVF, so this advisory now surfaces historical strays. Removal is
 # gated behind `fix-learning --cleanup --confirm` (so deletion always needs an explicit
 # opt-in). See common.sh sweep_stray_aqe_dirs + AQE-PROJECT-ROOT-PIN-V1 above.
 header "7" "Stray RVF .agentic-qe advisory (RVF-STRAY-SWEEP-V1)"

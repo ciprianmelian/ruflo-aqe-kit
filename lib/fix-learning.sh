@@ -107,7 +107,7 @@ cleanup_pass() {
     info "$found stray store(s) found — re-run with --cleanup --confirm to remove"
   fi
 
-  # RVF-only stray .agentic-qe dirs (cwd-relative RVF path scatter — RVF-STRAY-SWEEP-V1).
+  # RVF-only stray .agentic-qe dirs (≤3.10.3 cwd-relative scatter / historical cleanup — RVF-STRAY-SWEEP-V1).
   # These hold ONLY .rvf files (no memory.db/config.yaml), so the *.db sweep above
   # misses them. sweep_stray_aqe_dirs classifies by the absence of canonical SQLite
   # markers, so the project root is structurally safe. Confirm-gated, recoverable

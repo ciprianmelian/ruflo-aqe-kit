@@ -89,6 +89,16 @@ run() { if [[ "${DRY_RUN:-0}" -eq 1 ]]; then info "[dry-run] $*"; else eval "$@"
 # Timestamped-once backup before mutating a file: backup <file> [suffix]
 backup() { local f="$1" sfx="${2:-bak}"; [[ -f "$f" && ! -e "$f.$sfx" ]] && cp "$f" "$f.$sfx"; return 0; }
 
+# Dotted numeric semver compare (3 components, no external deps beyond sort -V):
+# aqe_semver_lt <a> <b> -> exit 0 iff a < b. Equal versions are NOT less-than.
+aqe_semver_lt() {
+  local a="$1" b="$2"
+  [[ "$a" != "$b" ]] || return 1
+  [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -1)" == "$a" ]]
+}
+# Installed aqe version (dotted string, whitespace-stripped; empty if aqe unavailable).
+aqe_installed_version() { aqe --version 2>/dev/null | tr -d '[:space:]'; }
+
 # RuVector native-binary platform tag, matching @ruvector's NAPI naming.
 # Use node's view (process.platform/arch), NOT `uname -m`: under Rosetta on
 # Apple Silicon `uname -m` says x86_64 while node says arm64, and `uname` can't
@@ -199,11 +209,13 @@ ensure_agentdb_schema() {
 }
 
 # ── Stray RVF-only .agentic-qe sweep (RVF-STRAY-SWEEP-V1) ────────────────────
-# The AQE RVF substrate (shared-rvf-adapter / shared-rvf-dual-writer) resolves its
-# store path from a CWD-RELATIVE default ('.agentic-qe/patterns.rvf' and
+# The AQE RVF substrate (shared-rvf-adapter / shared-rvf-dual-writer): on ≤3.10.3 it
+# resolved its store path from a CWD-RELATIVE default ('.agentic-qe/patterns.rvf' and
 # '.agentic-qe/brain.rvf') instead of findProjectRoot() — the resolver the SQLite
-# memory.db DOES use. So any aqe/hook/worker invoked with cwd != project root drops
+# memory.db DOES use. So any aqe/hook/worker invoked with cwd != project root dropped
 # a stray '.agentic-qe' holding ONLY the .rvf files (never memory.db/config.yaml).
+# Fixed upstream in aqe 3.10.4: RVF now routes through the same AQE_PROJECT_ROOT ??
+# findProjectRoot resolver; this helper is retained for historical-stray cleanup.
 # Those strays are orphaned (every reader walks up to the real root), gitignored,
 # harmless-but-messy, and silently fragment learning. We classify by the absence of
 # the canonical SQLite markers + presence of an RVF payload — never by location, so

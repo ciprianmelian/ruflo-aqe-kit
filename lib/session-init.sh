@@ -118,9 +118,10 @@ if [[ "$DAEMON_RUNNING" -eq 0 ]] && echo "$DAEMON_STATUS_OUT" | grep -qE 'Status
 
 # AQE-DAEMON-ROOT-PIN-V1: pin AQE_PROJECT_ROOT for the daemon + its worker pass.
 # The daemon (and the AQE work / claude --print sessions it spawns) resolves storage
-# via findProjectRoot(), whose topmost-.agentic-qe rule hijacks to ~/.agentic-qe when
-# that dir exists above the project — leaking every project's experiences into the HOME
-# brain regardless of the daemon's cwd. Exporting AQE_PROJECT_ROOT (honored before the
+# via findProjectRoot(), whose (≤3.10.3) topmost-.agentic-qe rule hijacked to ~/.agentic-qe
+# when that dir existed above the project — leaking every project's experiences into the HOME
+# brain regardless of the daemon's cwd (3.10.4 picks NEAREST + honors AQE_PROJECT_ROOT first;
+# the pin stays recommended). Exporting AQE_PROJECT_ROOT (honored before the
 # walk-up) pins all spawned AQE storage to THIS project. Mirrors the .mcp.json + hooks
 # pins (fix-aqe AQE-MCP-ROOT-PIN-V1 / AQE-PROJECT-ROOT-PIN-V1).
 export AQE_PROJECT_ROOT="$TARGET_DIR"
@@ -197,12 +198,13 @@ else
   warn "intelligence-snapshot.json not found"
 fi
 
-# Stray RVF .agentic-qe advisory (RVF-STRAY-SWEEP-V1): the cwd-relative RVF path
-# resolution scatters RVF-only .agentic-qe dirs across subfolders. Read-only here —
+# Stray RVF .agentic-qe advisory (RVF-STRAY-SWEEP-V1): the ≤3.10.3 cwd-relative RVF path
+# resolution scattered RVF-only .agentic-qe dirs across subfolders (3.10.4 anchors RVF, so
+# any remaining dirs are historical strays). Read-only here —
 # removal is gated behind `fix-learning --cleanup --confirm`.
 sweep_stray_aqe_dirs "$TARGET_DIR" list >/dev/null 2>&1 || true
 if [[ "${SWEEP_STRAY_COUNT:-0}" -gt 0 ]]; then
-  warn "$SWEEP_STRAY_COUNT stray RVF .agentic-qe dir(s) (cwd-relative scatter) — clean with: bin/ruflo-kit fix-learning $TARGET_DIR --cleanup --confirm"
+  warn "$SWEEP_STRAY_COUNT stray RVF .agentic-qe dir(s) (≤3.10.3 cwd-relative scatter / historical) — clean with: bin/ruflo-kit fix-learning $TARGET_DIR --cleanup --confirm"
 else
   pass "no stray RVF .agentic-qe dirs (root store is the only one)"
 fi
