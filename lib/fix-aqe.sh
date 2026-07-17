@@ -113,6 +113,7 @@ else
   # Pin .claude/helpers/ to commonjs + relocate the ESM github-safe.js -> .mjs.
   case "$(pin_helpers_module_type "$TARGET_DIR")" in
     PINNED)          fix "Pinned .claude/helpers to commonjs (+github-safe.mjs)"; pass "helper module-type pinned (commonjs) — fixes hook 'require is not defined' in ESM projects" ;;
+    MJS_ONLY)        fix "Relocated ESM github-safe.js -> github-safe.mjs (commonjs root)"; pass "github-safe relocated to .mjs — fixes 'Cannot use import statement' under a commonjs root" ;;
     ALREADY)         pass "helper module-type already pinned (commonjs)" ;;
     NOT_ESM_PROJECT) pass "project root is commonjs — no helper pin needed" ;;
     DRYRUN)          info "[dry-run] would pin .claude/helpers to commonjs (+github-safe.mjs)" ;;
@@ -235,7 +236,7 @@ for (const g of (s.hooks.SessionEnd || [])) {
   for (const h of (g.hooks || [])) {
     if (typeof h.command === 'string'
         && h.command.includes('aqe-harvest.cjs')
-        && !h.command.includes(process.env.KITDIR || ' ')) {
+        && !h.command.includes(process.env.KITDIR || ' ')) {
       h.command = HARVEST; changed = true;  // AQE-HARVEST-DRIFT-V1
     }
   }
