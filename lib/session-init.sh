@@ -68,6 +68,7 @@ echo -e "\n${CYAN}[3/9]${NC} Helper module-type pin (ESM-project hook crash guar
 
 case "$(pin_helpers_module_type "$TARGET_DIR")" in
   PINNED)          pass "pinned .claude/helpers → commonjs (+github-safe.mjs) — fixes 'require is not defined' hook crash" ;;
+  MJS_ONLY)        pass "relocated ESM github-safe.js → github-safe.mjs (commonjs root; fixes 'Cannot use import statement' crash)" ;;
   ALREADY)         pass "helper module-type already pinned (commonjs)" ;;
   NOT_ESM_PROJECT) pass "project root is commonjs — no helper pin needed" ;;
   NO_DIR)          warn ".claude/helpers not present yet (run: bin/ruflo-kit init)" ;;
