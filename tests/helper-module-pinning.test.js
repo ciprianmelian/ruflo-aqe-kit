@@ -95,17 +95,28 @@ describe('pin_helpers_module_type: ESM project (the bug)', () => {
 });
 
 describe('pin_helpers_module_type: surgical (no false touches)', () => {
-  it('NOT_ESM_PROJECT on a commonjs-root project (touches nothing)', () => {
+  it('MJS_ONLY on a commonjs-root project: relocates ESM github-safe.js, no pkg pin', () => {
     const { d, h } = mkProject('commonjs');
-    expect(pin(d).out).toBe('NOT_ESM_PROJECT');
+    expect(pin(d).out).toBe('MJS_ONLY');
+    // ESM-syntax github-safe.js crashes under a CJS root too — rename is the fix.
     expect(fs.existsSync(path.join(h, 'package.json'))).toBe(false);
-    expect(fs.existsSync(path.join(h, 'github-safe.js'))).toBe(true);
+    expect(fs.existsSync(path.join(h, 'github-safe.js'))).toBe(false);
+    expect(fs.existsSync(path.join(h, 'github-safe.mjs'))).toBe(true);
     fs.rmSync(d, { recursive: true, force: true });
   });
 
-  it('NOT_ESM_PROJECT when there is no root package.json', () => {
-    const { d } = mkProject(null);
+  it('NOT_ESM_PROJECT on a commonjs-root project with nothing to relocate', () => {
+    const { d, h } = mkProject('commonjs');
+    fs.rmSync(path.join(h, 'github-safe.js'));
     expect(pin(d).out).toBe('NOT_ESM_PROJECT');
+    expect(fs.existsSync(path.join(h, 'package.json'))).toBe(false);
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  it('MJS_ONLY when there is no root package.json but an ESM github-safe.js exists', () => {
+    const { d, h } = mkProject(null);
+    expect(pin(d).out).toBe('MJS_ONLY');
+    expect(fs.existsSync(path.join(h, 'github-safe.mjs'))).toBe(true);
     fs.rmSync(d, { recursive: true, force: true });
   });
 
