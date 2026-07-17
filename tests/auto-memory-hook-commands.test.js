@@ -25,9 +25,23 @@ const os = require('os');
 
 const MODULE = path.resolve(__dirname, '../.claude/helpers/auto-memory-hook.mjs');
 
+// The hook derives PROJECT_ROOT from its OWN file path (join(__dirname,'../..')),
+// not from cwd — so spawning the repo copy from a tmp cwd still operates on the
+// REAL repo (and, since #2545, resolves the real memory package via the
+// .claude-flow/memory-package.json sidecar and writes into the real bridge
+// store). True isolation requires running a COPY of the module inside the
+// fixture so PROJECT_ROOT itself lands in tmpDir.
+function installSandboxedHook(dir) {
+  const helpers = path.join(dir, '.claude', 'helpers');
+  fs.mkdirSync(helpers, { recursive: true });
+  const sandboxed = path.join(helpers, 'auto-memory-hook.mjs');
+  fs.copyFileSync(MODULE, sandboxed);
+  return sandboxed;
+}
+
 function spawnHook(command, cwd) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [MODULE, command], {
+    const child = spawn(process.execPath, [installSandboxedHook(cwd), command], {
       cwd,
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -112,7 +126,9 @@ describe('auto-memory-hook import — memory package unavailable', () => {
   it('prints a graceful skip message', async () => {
     const { stdout } = await spawnHook('import', tmpDir);
     // Expected: skipping message when package not found
-    expect(stdout).toMatch(/skipping|not available|Memory package not available/i);
+    // 3.14-era helper said "not available"; the 3.32.2 helper (#2545 sidecar
+    // resolution) says "not resolvable from <root> — … DISABLED". Accept both.
+    expect(stdout).toMatch(/skipping|not available|not resolvable/i);
   }, 15000);
 
   it('does not write the store file when package is absent', async () => {
@@ -129,7 +145,7 @@ describe('auto-memory-hook sync — empty store', () => {
     // Store file absent → backend.count() === 0
     const { stdout } = await spawnHook('sync', tmpDir);
     // Either "No entries" or "skipping" (if package unavailable)
-    expect(stdout).toMatch(/No entries|skipping|not available/i);
+    expect(stdout).toMatch(/No entries|skipping|not available|not resolvable/i);
   }, 15000);
 });
 
