@@ -15,6 +15,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
   - [A6. Self-improvement bench](#a6-self-improvement-bench)
   - [A7. Security scan](#a7-security-scan)
   - [A8. Daemon & token cost](#a8-daemon--token-cost)
+  - [A9. ruvnet-brain (MCP-only knowledge base)](#a9-ruvnet-brain-mcp-only-knowledge-base)
 - [B. Troubleshooting](#b-troubleshooting)
 - [C. Architecture (plain English)](#c-architecture-plain-english)
 - [D. See also](#d-see-also)
@@ -61,6 +62,8 @@ This one script calls `fix-ruflo.sh` (step 5), `fix-statusbar.sh` (step 6) and `
 
 **Why not npx:** the MCP server launches from the **global** `ruflo` binary. `npx ruflo@latest` reconciles its cache on every call and would revert the alpha.10 AgentDB pin — so upgrades go through `npm i -g` + this script, never npx.
 
+**AgentDB pin layout (hoisted vs nested — as of ruflo 3.32.2).** Modern ruflo (≥3.3x) **hoists `agentdb@alpha.17` to `ruflo/node_modules/agentdb`**, but Step 3b keeps **`agentdb@3.0.0-alpha.10` in the nested `@claude-flow/memory/node_modules/agentdb` slot**. Node resolves the nearest `node_modules` first, so the nested alpha.10 **shadows** the hoisted alpha.17 *for the memory layer only* — the two coexist. Why not just adopt the hoisted alpha.17: it **permanently removed 8 controller classes** (`SemanticRouter`, `GNNService`, `RVFOptimizer`, `GuardedVectorBackend`, `MutationGuard`, `AttestationLog`, `HierarchicalMemory`, `MemoryConsolidation`), and ruflo's rewritten `ControllerRegistry` (ADR-053/055) **degrades per-controller instead of crashing** — so an un-pinned alpha.17 would *look* healthy while silently missing those controllers. Both versions pass the core smokes; alpha.10 is the one that boots the advanced controllers (the `GuardedBackend` proof-engine boot is the tell). alpha.17 also moved `better-sqlite3` peerDep → optionalDependencies, so Patch 49's global better-sqlite3 install is now belt-and-suspenders. Full A/B record: `_INSTRUCTIONS.md` Patch 52. **Restart-gated:** the live `agentdb_controllers` count only reflects the pin *after* a Claude Code restart (running MCP caches the old dist).
+
 ### A3b. Upgrade AQE
 
 *Use when:* moving to a newer `agentic-qe` release. **This is a manual 5-step sequence — there is no upgrade automation for AQE** (the `upgrade` command is ruflo-only). Unlike AgentDB, AQE is **unpinned / free-floating @latest**, so there is no version pin to defend — but a reinstall *does* drop two local patches you must restore. Run AFTER closing the Claude Code session (it restarts the live `aqe-mcp` server).
@@ -77,6 +80,7 @@ This one script calls `fix-ruflo.sh` (step 5), `fix-statusbar.sh` (step 6) and `
 - The minted `qe_patterns` row is dropped when the AQE DB re-inits → re-run `aqe learning extract` to re-mint it.
 - `bin/ruflo-kit upgrade` never runs `agentic-qe` install, `aqe init`, or `fix-aqe.sh` — it only upgrades ruflo. AQE upgrades are entirely the sequence above.
 - **3.10.4 note (#516):** the `AQE_PROJECT_ROOT` pins (kept at the MCP + daemon spawn points) and the `RVF-STRAY-SWEEP-V1` cleanup exist to contain a ≤3.10.3 project-root hijack — a stray `~/.agentic-qe` captured root resolution to `$HOME`, and RVF also minted cwd-relative strays. `agentic-qe@3.10.4` fixed both at the source (nearest-wins `findProjectRoot` + RVF honoring `AQE_PROJECT_ROOT`); the kit keeps the pins as the **canonical** anchor and the sweep as **legacy cleanup**. Full record: `_INSTRUCTIONS.md` Patch 51.
+- **3.12.2 note (current):** the global is now `agentic-qe@3.12.2`. The 3.12.2 schema migrations (`qe_trajectories.metadata_json` column + a `qe_pattern_nulls` backfill) applied cleanly and were verified — **531 trajectories intact**. `fix-aqe.sh` also relocated its dream-lockfix CLI-chunk lookup from a content-hashed filename to an INSERT-anchor match (the hash changed `IJ4BUSJN → XNNYHQLW` in 3.12.2), and re-asserts `daemonAutoStart: false` (`AQE-DAEMON-AUTOSTART-OFF-V1`, see [A8](#a8-daemon--token-cost)). Full record: `_INSTRUCTIONS.md` Patch 52 / 54.
 
 **Verify:** `aqe --version` reports the new version; `bin/ruflo-kit fix-aqe <target>` re-run reports items as "already present"; statusline shows ruflo + Agentic QE v3.
 
@@ -116,6 +120,8 @@ Run only the one that drifted, or run them in this order if several did:
 4. Also diagnose the AQE router's confidence: `bin/ruflo-kit bench <target> --aqe-confidence`
 5. Re-run across sessions — a single run can only *disprove*; the verdict needs a trend over runs.
 6. Pair with `bin/ruflo-kit harvest <target>` (also wired to SessionEnd) to replay AQE experiences into the ruflo substrate between bench runs.
+7. For a **statistically framed** verdict, run the gate-#4 instrument directly: `node tools/improvement-eval.cjs` — multi-seed runs with a permutation-test *p*-value, Cohen's *d* effect size, and a hard **2σ / 3-run** pass gate (`--selftest` validates the instrument itself). It is the measurement tool for the R&D gate; the gate stays **OPEN** until there are ≥3 cross-session runs. See [whats-genuinely-left-rnd.md](./whats-genuinely-left-rnd.md).
+8. Drift guard: `.github/workflows/nightly-drift.yml` runs a nightly **real-latest** install of ruflo + aqe, the fix scripts, and `health` on **macOS + Ubuntu**, so an upstream bump that moves an anchor or resets a pin is caught before a live session hits it.
 
 **Reading the verdict ladder** (the bench is deliberately hard to turn green):
 - `NOT-IMPROVING (blocked)` — reward is constant; improvement is impossible by construction.
@@ -162,9 +168,29 @@ Stale `daemon-state.json` files can read `running: true` with no live process �
 
 **No launchd supervisor here.** `ruflo daemon install-supervisor` *would* install a launchd/systemd unit that respawns the daemon on login/reboot — this kit does **not** use it. If you ever ran it, `stop` is not enough; run `ruflo daemon uninstall-supervisor`. (Verified clean on this machine: nothing in `~/Library/LaunchAgents`, `launchctl list`.)
 
+**The AQE side has its own daemon — pinned OFF (`AQE-DAEMON-AUTOSTART-OFF-V1`).** AQE's `.agentic-qe/config.yaml` carries a `daemonAutoStart` flag; `fix-aqe.sh` pins it **`false`**. This matters because upstream **`aqe doctor --fix` honored a `true` value and resurrected the billed AQE daemon three times in one session** — so the kit re-asserts `false` on every `fix-aqe` run. This is the AQE-side complement to the `RUFLO_DAEMON_MODE` gate above; both must be off for a truly quiet background.
+
+**Upstream is catching up (recheck on upgrade).** ruflo **#2661** landed daemon governance in the 3.27+ line — opt-in AI workers, a global budget ledger, and a circuit breaker. That is the right long-term home for cost control, but the kit's **daemon-off default is retained as belt-and-suspenders** until the governance is verified on the pinned version. Don't remove the local gates just because upstream added a budget knob.
+
 **Hard guardrails (your real safety net, independent of process hygiene):** in the Anthropic Console set a **monthly spend limit + usage alerts**, and use a **separate API key for automation** so it can be monitored and revoked independently of your interactive key.
 
-**Verify:** `ruflo daemon status` → `Status: ○ STOPPED` when you expect it off; `flowps` shows no `claude --print` / `daemon start` processes.
+**Verify:** `ruflo daemon status` → `Status: ○ STOPPED` when you expect it off; `flowps` shows no `claude --print` / `daemon start` processes; `.agentic-qe/config.yaml` shows `daemonAutoStart: false`.
+
+---
+
+### A9. ruvnet-brain (MCP-only knowledge base)
+
+*Use when:* you want the agent to have an on-demand knowledge base to query, **without** adding any always-on background cost.
+
+**What it is:** a knowledge-brain wired as an **MCP server only** — no hooks, no `launchd` unit, no plugin, nothing that spawns billed work. `lib/fix-brain.sh` registers a `search_ruvnet` server in `.mcp.json`, backed by a **1.7 GB Ed25519-verified knowledge base** cached at `~/.cache/ruvnet-brain/kb`. It is a **read surface** the agent queries on demand; unlike the daemon ([A8](#a8-daemon--token-cost)) it has **zero always-on cost** and no session-lifecycle coupling — which is the entire design rationale (`BRAIN-MCP-V1`).
+
+1. Register + (opt-in) fetch the KB: `bin/ruflo-kit fix-brain <target> --download` (the `--download` pulls the 1.7 GB KB; omit it to register the server against an already-cached KB).
+2. Health probe: `bin/ruflo-kit fix-brain <target>` re-runs idempotently — it confirms the `search_ruvnet` server answers and the KB Ed25519 signature verifies.
+3. From Claude Code, query via the `search_ruvnet` MCP tool after a restart (Claude Code launches the MCP server lazily on first call).
+
+**Why MCP-only (not a hook or daemon):** anything that fires on a hook or a timer can spawn billed `claude --print` work unattended — the exact trap Tier 13 closed. A pure MCP read surface can only run when the agent explicitly calls it, so it stays free at rest. Full record: `_INSTRUCTIONS.md` Patch 53.
+
+**Verify:** `.mcp.json` contains a `search_ruvnet` server entry; `~/.cache/ruvnet-brain/kb` exists and verifies; the health probe reports OK.
 
 ---
 
