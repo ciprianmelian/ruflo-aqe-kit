@@ -293,6 +293,23 @@ if [[ -f "$MCP_JSON" ]] && command -v jq >/dev/null 2>&1; then
   esac
 fi
 
+# ruvnet-brain MCP (BRAIN-MCP-V1, MCP-only): if registered, confirm the KB dir +
+# reader deps are present (warn only — never fatal); if not registered, hint at
+# fix-brain. Reuses the same resolution as lib/fix-brain.sh (env/default).
+if [[ -f "$MCP_JSON" ]] && command -v jq >/dev/null 2>&1 \
+   && [[ "$(jq -r '.mcpServers["ruvnet-brain"].command // ""' "$MCP_JSON" 2>/dev/null)" == "node" ]]; then
+  BRAIN_KB="${RUVNET_BRAIN_KB:-${RUVNET_BRAIN_HOME:-$HOME/.cache/ruvnet-brain}/kb}"
+  if [[ ! -f "$BRAIN_KB/forge-mcp-all.mjs" ]]; then
+    warn "ruvnet-brain registered but KB MISSING at $BRAIN_KB — run: bin/ruflo-kit fix-brain $TARGET_DIR --download"
+  elif [[ ! -d "$BRAIN_KB/node_modules/@ruvector" || ! -f "$BRAIN_KB/node_modules/@xenova/transformers/package.json" ]]; then
+    warn "ruvnet-brain KB present but reader deps missing — run: bin/ruflo-kit fix-brain $TARGET_DIR"
+  else
+    pass "ruvnet-brain MCP registered + KB/reader present (search_ruvnet ready)"
+  fi
+else
+  info "ruvnet-brain MCP not registered — optional source-grounding brain: bin/ruflo-kit fix-brain $TARGET_DIR"
+fi
+
 # ── Step 7: RuVector native binaries ─────────────────────────────────────────
 
 echo -e "\n${CYAN}[8/9]${NC} RuVector native binary check"
