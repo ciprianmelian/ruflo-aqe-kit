@@ -99,6 +99,42 @@ aqe_semver_lt() {
 # Installed aqe version (dotted string, whitespace-stripped; empty if aqe unavailable).
 aqe_installed_version() { aqe --version 2>/dev/null | tr -d '[:space:]'; }
 
+# ── Dist-defect gate (agentic-kit adoption: patch only what's confirmed broken) ─
+# Version gates (aqe_semver_lt) answer "is the installed release old enough to
+# still carry bug X?" — but a release NUMBER is only a proxy for the bug. The
+# stronger pattern, ported from agentic-kit's upstreamCveCounterFabricated()
+# (statusline.mjs): grep the INSTALLED dist for the LITERAL defect and patch only
+# when the bug is actually present in the code we're about to modify. Fail-safe —
+# an unreadable/absent/changed target reads as NOT-broken, so the kit never patches
+# what it cannot confirm is broken (worst case: upstream's own unmodified
+# behavior), and the stopgap self-retires the moment upstream ships the fix, with
+# no release-number tracking required. Pairs WITH the version gate, not instead of
+# it (cheap version pre-check, then confirm the literal bug before mutating).
+#
+#   dist_defect_present <file> <grep -E pattern>
+# Echoes exactly one token (no exit — caller decides severity):
+#   PRESENT | ABSENT | NO_FILE
+# Read-only. Pure bash + grep, no eval.
+dist_defect_present() {
+  local file="$1" pattern="$2"
+  [[ -f "$file" ]] || { echo "NO_FILE"; return; }
+  if grep -Eq -- "$pattern" "$file" 2>/dev/null; then echo "PRESENT"; else echo "ABSENT"; fi
+}
+
+# defect_gate <file> <grep -E pattern> [label] -> exit 0 iff the defect is
+# CONFIRMED present in dist (caller should patch), 1 otherwise. Logs the decision
+# with the self-retirement rationale so `defect_gate f p && apply_patch` naturally
+# no-ops the day upstream fixes the bug. Makes no changes itself, so it is
+# DRY_RUN-safe by construction (the read-only probe runs identically in dry-run).
+defect_gate() {
+  local file="$1" pattern="$2"
+  local label="${3:-$file}"   # separate line: $file must be assigned before it's referenced
+  case "$(dist_defect_present "$file" "$pattern")" in
+    PRESENT) info "defect confirmed in dist — patching: $label"; return 0 ;;
+    *)       info "defect not found — skipping (self-retired): $label"; return 1 ;;
+  esac
+}
+
 # RuVector native-binary platform tag, matching @ruvector's NAPI naming.
 # Use node's view (process.platform/arch), NOT `uname -m`: under Rosetta on
 # Apple Silicon `uname -m` says x86_64 while node says arm64, and `uname` can't
