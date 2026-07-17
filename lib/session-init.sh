@@ -352,7 +352,7 @@ fi
 echo ""
 echo "  Next steps (in Claude Code):"
 echo "    1. Verify: agentdb_controllers → active: 23/23 (all 7 advanced controllers on)"
-echo "    2. Search: memory_search 'audio recording' → should find audit data"
+echo "    2. Search: memory_search 'audit' → should find audit data"
 echo "    3. Activate intelligence: use hooks_intelligence_trajectory-start"
 echo "       during swarm work to begin SONA learning"
 echo ""
