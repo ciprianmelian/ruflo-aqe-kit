@@ -9,6 +9,7 @@
 #   bin/ruflo-kit health      /path/to/codebase     # growth-delta health check
 #   bin/ruflo-kit fix-ruflo   /path/to/codebase     # repair ruflo MCP/AgentDB
 #   bin/ruflo-kit fix-aqe     /path/to/codebase     # codify AQE hardening
+#   bin/ruflo-kit fix-brain   /path/to/codebase     # register ruvnet-brain MCP server
 #   bin/ruflo-kit fix-statusbar /path/to/codebase   # restore the statusline
 #   bin/ruflo-kit upgrade     /path/to/codebase     # major ruflo version bump
 #   bin/ruflo-kit verify-learning /path/to/codebase # read-only loop liveness (CI exit 1 if hollow)
@@ -47,6 +48,7 @@ Commands:
   health         Growth-delta health check (CI-friendly exit code)
   fix-ruflo      Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup
   fix-aqe        Codify AQE-side hardening + install .claude helpers/commands
+  fix-brain      Register the vendored ruvnet-brain search_ruvnet MCP server (MCP-only; --download to fetch the KB)
   fix-statusbar  Restore the rich ruflo + Agentic QE v3 statusline
   upgrade        Major-version ruflo migration (stop daemon, bump, re-activate)
   verify-learning Read-only learning-loop liveness probes (CI-friendly exit code)
@@ -66,6 +68,7 @@ case "$cmd" in
   init)          exec bash "$KIT_DIR/lib/init.sh"           "$@" ;;
   fix-ruflo)     exec bash "$KIT_DIR/lib/fix-ruflo.sh"      "$@" ;;
   fix-aqe)       exec bash "$KIT_DIR/lib/fix-aqe.sh"        "$@" ;;
+  fix-brain)     exec bash "$KIT_DIR/lib/fix-brain.sh"      "$@" ;;
   fix-statusbar) exec bash "$KIT_DIR/lib/fix-statusbar.sh"  "$@" ;;
   session|session-init) exec bash "$KIT_DIR/lib/session-init.sh" "$@" ;;
   health)        exec bash "$KIT_DIR/lib/health.sh"         "$@" ;;
