@@ -80,7 +80,7 @@ This one script calls `fix-ruflo.sh` (step 5), `fix-statusbar.sh` (step 6) and `
 - The minted `qe_patterns` row is dropped when the AQE DB re-inits → re-run `aqe learning extract` to re-mint it.
 - `bin/ruflo-kit upgrade` never runs `agentic-qe` install, `aqe init`, or `fix-aqe.sh` — it only upgrades ruflo. AQE upgrades are entirely the sequence above.
 - **3.10.4 note (#516):** the `AQE_PROJECT_ROOT` pins (kept at the MCP + daemon spawn points) and the `RVF-STRAY-SWEEP-V1` cleanup exist to contain a ≤3.10.3 project-root hijack — a stray `~/.agentic-qe` captured root resolution to `$HOME`, and RVF also minted cwd-relative strays. `agentic-qe@3.10.4` fixed both at the source (nearest-wins `findProjectRoot` + RVF honoring `AQE_PROJECT_ROOT`); the kit keeps the pins as the **canonical** anchor and the sweep as **legacy cleanup**. Full record: `_INSTRUCTIONS.md` Patch 51.
-- **3.12.2 note (current):** the global is now `agentic-qe@3.12.2`. The 3.12.2 schema migrations (`qe_trajectories.metadata_json` column + a `qe_pattern_nulls` backfill) applied cleanly and were verified — **531 trajectories intact**. `fix-aqe.sh` also relocated its dream-lockfix CLI-chunk lookup from a content-hashed filename to an INSERT-anchor match (the hash changed `IJ4BUSJN → XNNYHQLW` in 3.12.2), and re-asserts `daemonAutoStart: false` (`AQE-DAEMON-AUTOSTART-OFF-V1`, see [A8](#a8-daemon--token-cost)). Full record: `_INSTRUCTIONS.md` Patch 52 / 54.
+- **3.12.2 note (current):** the global is now `agentic-qe@3.12.2`. The 3.12.2 schema migrations (`qe_trajectories.metadata_json` column + a `qe_pattern_nulls` backfill) applied cleanly and were verified — **~530 trajectories intact (point-in-time; they accrue)**. `fix-aqe.sh` also relocated its dream-lockfix CLI-chunk lookup from a content-hashed filename to an INSERT-anchor match (the hash changed `IJ4BUSJN → XNNYHQLW` in 3.12.2), and re-asserts `daemonAutoStart: false` (`AQE-DAEMON-AUTOSTART-OFF-V1`, see [A8](#a8-daemon--token-cost)). Full record: `_INSTRUCTIONS.md` Patch 52 / 54.
 
 **Verify:** `aqe --version` reports the new version; `bin/ruflo-kit fix-aqe <target>` re-run reports items as "already present"; statusline shows ruflo + Agentic QE v3.
 
@@ -182,15 +182,15 @@ Stale `daemon-state.json` files can read `running: true` with no live process �
 
 *Use when:* you want the agent to have an on-demand knowledge base to query, **without** adding any always-on background cost.
 
-**What it is:** a knowledge-brain wired as an **MCP server only** — no hooks, no `launchd` unit, no plugin, nothing that spawns billed work. `lib/fix-brain.sh` registers a `search_ruvnet` server in `.mcp.json`, backed by a **1.7 GB Ed25519-verified knowledge base** cached at `~/.cache/ruvnet-brain/kb`. It is a **read surface** the agent queries on demand; unlike the daemon ([A8](#a8-daemon--token-cost)) it has **zero always-on cost** and no session-lifecycle coupling — which is the entire design rationale (`BRAIN-MCP-V1`).
+**What it is:** a knowledge-brain wired as an **MCP server only** — no hooks, no `launchd` unit, no plugin, nothing that spawns billed work. `lib/fix-brain.sh` registers the **`ruvnet-brain`** server (exposing the `search_ruvnet` tool) in `.mcp.json`, backed by an Ed25519-verified knowledge base (**≈736 MB download → ≈1.7 GB unpacked**) cached at `~/.cache/ruvnet-brain/kb`. It is a **read surface** the agent queries on demand; unlike the daemon ([A8](#a8-daemon--token-cost)) it has **zero always-on cost** and no session-lifecycle coupling — which is the entire design rationale (`BRAIN-MCP-V1`).
 
 1. Register + (opt-in) fetch the KB: `bin/ruflo-kit fix-brain <target> --download` (the `--download` pulls the 1.7 GB KB; omit it to register the server against an already-cached KB).
-2. Health probe: `bin/ruflo-kit fix-brain <target>` re-runs idempotently — it confirms the `search_ruvnet` server answers and the KB Ed25519 signature verifies.
+2. Health probe: `bin/ruflo-kit fix-brain <target>` re-runs idempotently — it confirms the `ruvnet-brain` server answers and the KB Ed25519 signature verifies.
 3. From Claude Code, query via the `search_ruvnet` MCP tool after a restart (Claude Code launches the MCP server lazily on first call).
 
 **Why MCP-only (not a hook or daemon):** anything that fires on a hook or a timer can spawn billed `claude --print` work unattended — the exact trap Tier 13 closed. A pure MCP read surface can only run when the agent explicitly calls it, so it stays free at rest. Full record: `_INSTRUCTIONS.md` Patch 53.
 
-**Verify:** `.mcp.json` contains a `search_ruvnet` server entry; `~/.cache/ruvnet-brain/kb` exists and verifies; the health probe reports OK.
+**Verify:** `.mcp.json` contains a **`ruvnet-brain`** server entry (the server exposes the `search_ruvnet` tool — do not grep for the tool name); `~/.cache/ruvnet-brain/kb` exists and verifies; the health probe reports OK.
 
 ---
 

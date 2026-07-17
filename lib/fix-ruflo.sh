@@ -413,7 +413,8 @@ train_neural_checkpoint() {
   # the fresh-adapter save survives only as an explicit fallback (guarded by
   # `nativeResult?.checkpointPath`) for hosts without native builds — which
   # NATIVE-BUILDS-V1 installs. Patching that dormant fallback buys nothing.
-  local _nf_probe="$(cd "$1/.." 2>/dev/null && pwd)/cli/dist/src/commands/neural.js"
+  local _nf_probe
+  _nf_probe="$(cd "$1/.." 2>/dev/null && pwd)/cli/dist/src/commands/neural.js"
   if [[ -f "$_nf_probe" ]] && [[ "$(dist_defect_present "$_nf_probe" 'nativeResult\?\.checkpointPath')" == "PRESENT" ]]; then
     pass "neural checkpoint patch self-retired — native TrainingPipeline writes trained checkpoints (#2549)"
     return 0
@@ -765,8 +766,8 @@ s = s.split(OLD).join(NEW);
 fs.writeFileSync(target, s);
 REXPATCH
   node "$patcher" "$ht"; local rc=$?; rm -f "$patcher"
-  if [[ $rc -eq 2 ]]; then
-    warn "RUFLO-ROUTE-EXPLORE-V2 anchor not found in hooks-tools.js — verify manually"
+  if [[ $rc -ne 0 ]]; then
+    warn "RUFLO-ROUTE-EXPLORE-V2 anchor not found in hooks-tools.js (dist drift) — NOT applied"
     return 0
   fi
   if node --check "$ht" 2>/dev/null; then
