@@ -53,6 +53,7 @@ Commands:
   fix-ruflo      Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup
   fix-aqe        Codify AQE-side hardening + install .claude helpers/commands
   fix-brain      Register the vendored ruvnet-brain search_ruvnet MCP server (MCP-only; --download to fetch the KB)
+  dashboard      On-demand local web dashboard (foreground, read-only, 127.0.0.1; --port N; Ctrl-C stops)
   fix-statusbar  Restore the rich ruflo + Agentic QE v3 statusline
   upgrade        Major-version ruflo migration (stop daemon, bump, re-activate)
   verify-learning Read-only learning-loop liveness probes (CI-friendly exit code)
@@ -85,6 +86,11 @@ case "$cmd" in
     # tools/ operate on the target's runtime DBs via cwd → cd into the target.
     t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/selfimprove-bench.cjs" "$@" ) ;;
+  dashboard)
+    # On-demand LOCAL dashboard (DASHBOARD-V1): foreground, read-only,
+    # 127.0.0.1-only, Ctrl-C to stop. Never detaches, never billed.
+    t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
+    ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/dashboard.cjs" "$@" ) ;;
   harvest)
     t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/aqe-harvest.cjs" "$@" ) ;;
