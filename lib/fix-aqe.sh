@@ -620,6 +620,28 @@ else
     else warn "confidenceThreshold edit did not take — restoring"; cp "$AQE_CONFIG.fixaqe-bak" "$AQE_CONFIG"; fi
   fi
 
+  # AQE-DAEMON-AUTOSTART-OFF-V1: codify workers.daemonAutoStart=false. The stock
+  # config ships true, and `ruflo doctor --fix` (fix-learning step 1) plus the aqe
+  # session hooks HONOR it — observed live 3x in one session: the billed daemon
+  # kept resurrecting despite RUFLO_DAEMON_MODE=off gating our own scripts
+  # (Patch 50 covers only the kit's start sites, not upstream's). Same
+  # value-codify pattern as confidenceThreshold above; daemon use stays possible
+  # via explicit `ruflo daemon start` / RUFLO_DAEMON_MODE=auto.
+  das="$(grep -E '^[[:space:]]*daemonAutoStart:' "$AQE_CONFIG" | head -1 | sed -E 's/.*daemonAutoStart:[[:space:]]*//; s/[[:space:]#].*$//')"
+  if [[ -z "$das" ]]; then
+    pass "no daemonAutoStart key in config.yaml — nothing to pin"
+  elif [[ "$das" == "false" ]]; then
+    pass "daemonAutoStart already false (AQE-DAEMON-AUTOSTART-OFF-V1)"
+  elif [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] would set daemonAutoStart: $das → false"
+  else
+    [[ -e "$AQE_CONFIG.fixaqe-bak" ]] || cp "$AQE_CONFIG" "$AQE_CONFIG.fixaqe-bak"
+    node -e 'const fs=require("fs"),F=process.argv[1];let s=fs.readFileSync(F,"utf8");s=s.replace(/^(\s*daemonAutoStart:\s*)\S+/m,"$1false");fs.writeFileSync(F,s)' "$AQE_CONFIG"
+    ndas="$(grep -E '^[[:space:]]*daemonAutoStart:' "$AQE_CONFIG" | head -1 | sed -E 's/.*daemonAutoStart:[[:space:]]*//; s/[[:space:]#].*$//')"
+    if [[ "$ndas" == "false" ]]; then fix "daemonAutoStart $das → false (AQE-DAEMON-AUTOSTART-OFF-V1 — billed daemon stays opt-in)"; pass "daemonAutoStart pinned false"
+    else warn "daemonAutoStart edit did not take — verify manually"; fi
+  fi
+
   # AQE-NATIVE-HNSW-V1: codify learning.hnswConfig.useNativeHNSW=true so AQE indexes
   # its vectors with the native RuVector HNSW (issue #4 gap #4 — vectors present but
   # unindexed). This only CODIFIES the config so it survives `aqe init` regen; the
