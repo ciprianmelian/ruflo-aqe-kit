@@ -194,7 +194,7 @@ Stale `daemon-state.json` files can read `running: true` with no live process �
 
 **Why MCP-only (not a hook or daemon):** anything that fires on a hook or a timer can spawn billed `claude --print` work unattended — the exact trap Tier 13 closed. A pure MCP read surface can only run when the agent explicitly calls it, so it stays free at rest. Full record: `_INSTRUCTIONS.md` Patch 53.
 
-**Verify:** `.mcp.json` contains a **`ruvnet-brain`** server entry (the server exposes the `search_ruvnet` tool — do not grep for the tool name); `~/.cache/ruvnet-brain/kb` exists and verifies; the health probe reports OK.
+**Verify:** `.mcp.json` contains a **`ruvnet-brain`** server entry (the server exposes the `search_ruvnet` tool — do not grep for the tool name); `~/.cache/ruvnet-brain/kb` exists and verifies; the health probe reports OK. The statusline shows the `🧿 Ruflo Brain` row (`BRAIN-STATUSLINE-V1`, installed by `fix-statusbar`) with repo count, KB size, MCP registration and reader-deps state — if it reads `KB ●missing`, run `fix-brain --download`.
 
 ---
 
