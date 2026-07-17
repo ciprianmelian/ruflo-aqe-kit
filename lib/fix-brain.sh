@@ -241,6 +241,35 @@ else
   else
     warn ".mcp.json became invalid — restoring backup"; [[ -e "$MCP_JSON.fixbrain-bak" ]] && cp "$MCP_JSON.fixbrain-bak" "$MCP_JSON"
   fi
+
+  # settings.json enablement: project-scope MCP servers are gated by the
+  # enabledMcpjsonServers allowlist (MCP-COUNT-PATCH-V1 semantics) — without
+  # this the statusline MCP chip counts ruvnet-brain as registered-but-disabled
+  # (●3/4) and older Claude Code builds may not load it at all. Mirrors
+  # fix-aqe's claude-flow enablement; idempotent membership check.
+  BRAIN_SETTINGS="$TARGET_DIR/.claude/settings.json"
+  if [[ -f "$BRAIN_SETTINGS" ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      info "[dry-run] would ensure enabledMcpjsonServers includes ruvnet-brain"
+    else
+      RESEN="$(node -e '
+        const fs=require("fs"),F=process.argv[1];
+        let s;try{s=JSON.parse(fs.readFileSync(F,"utf8"))}catch(e){console.log("INVALID_JSON");process.exit(0)}
+        const arr=Array.isArray(s.enabledMcpjsonServers)?s.enabledMcpjsonServers:null;
+        if(!arr){console.log("NO_ALLOWLIST");process.exit(0)}
+        if(arr.includes("ruvnet-brain")){console.log("UNCHANGED");process.exit(0)}
+        arr.push("ruvnet-brain");
+        fs.writeFileSync(F,JSON.stringify(s,null,2)+"\n");console.log("CHANGED");
+      ' "$BRAIN_SETTINGS" 2>/dev/null)"
+      case "$RESEN" in
+        CHANGED)      fix "enabledMcpjsonServers += ruvnet-brain (MCP chip 4/4)"; pass "ruvnet-brain enabled in settings.json";;
+        UNCHANGED)    pass "ruvnet-brain already in enabledMcpjsonServers";;
+        NO_ALLOWLIST) pass "no enabledMcpjsonServers allowlist — all project servers load (nothing to do)";;
+        INVALID_JSON) warn ".claude/settings.json is not valid JSON — cannot enable ruvnet-brain";;
+        *)            warn "settings.json enablement inconclusive ($RESEN)";;
+      esac
+    fi
+  fi
 fi
 
 # ── Step 4: health probe (node-loads the MCP server; optional handshake) ─────
