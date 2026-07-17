@@ -22,7 +22,7 @@ These are genuine R&D questions (algorithm + measurement design), not missing wi
 
 | Was a gap | Now | Where |
 |---|---|---|
-| Reward = gameable prose-sentiment / constant `0.8` | Objective outcome oracle (`is_error`, Bash exits, test FAIL/pass, recovery) | `_derive-outcome.cjs` (`DERIVE-OUTCOME-V1`) |
+| Reward = gameable prose-sentiment / constant `0.8` | Objective outcome oracle (`is_error`, Bash exits, test FAIL/pass, recovery), now graded two-regime | `_derive-outcome.cjs` (`DERIVE-OUTCOME-V1 → V2`) |
 | Constant subagent-trainer reward | Varied reward via `deriveOutcome(...)` | `ruflo-train-subagent.cjs:86-88` |
 | Hardcoded `post-route --success true` Stop hook | Outcome-derived boolean + graded store writer | `aqe-post-route.cjs`; wired `fix-aqe.sh:147-149` |
 | "Router B store not CLI-writable" | THIS wrapper writes `routing-outcomes.json` (WS2b); dist re-rank reads it | `aqe-post-route.cjs:130`; `RUFLO-SEMRANK-V1` |
@@ -56,6 +56,8 @@ Measured: **~90% of real turns succeed**, so the derived `success` boolean is po
 ### Gate 3 — Longitudinal proof (the measurement gate)
 
 The verdict is currently NEUTRAL because we lack the evidence to claim IMPROVING. The bench (`selfimprove-bench.cjs`) is built for exactly this and now has the integrity instrumentation, but the runs haven't been done.
+
+**The instrument now exists (2026-07-17):** `tools/improvement-eval.cjs` (Patch 54) is the statistical harness this gate needs — multi-seed runs, a permutation-test *p*-value, Cohen's *d* effect size, and a hard **2σ / 3-run** pass gate (`--selftest` validates the harness itself). It is the measurement tool, **not** the evidence: the gate stays **OPEN** until the instrument has been run across **≥3 cross-session runs** under the same scorer with the control arm. Having the ruler does not close the gate; taking the measurements does.
 
 **What's genuinely needed:**
 - **≥3 runs under the SAME scorer** (`scorerVersion='norm-v1'`, enforced at `selfimprove-bench.cjs:196,202-209`) showing accuracy trend up — a scorer change is a redefinition, NOT learning (a prior audit caught a phantom +8.3pp that was purely normalization).

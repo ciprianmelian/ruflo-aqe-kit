@@ -68,6 +68,7 @@ echo -e "\n${CYAN}[3/9]${NC} Helper module-type pin (ESM-project hook crash guar
 
 case "$(pin_helpers_module_type "$TARGET_DIR")" in
   PINNED)          pass "pinned .claude/helpers → commonjs (+github-safe.mjs) — fixes 'require is not defined' hook crash" ;;
+  MJS_ONLY)        pass "relocated ESM github-safe.js → github-safe.mjs (commonjs root; fixes 'Cannot use import statement' crash)" ;;
   ALREADY)         pass "helper module-type already pinned (commonjs)" ;;
   NOT_ESM_PROJECT) pass "project root is commonjs — no helper pin needed" ;;
   NO_DIR)          warn ".claude/helpers not present yet (run: bin/ruflo-kit init)" ;;
@@ -292,6 +293,23 @@ if [[ -f "$MCP_JSON" ]] && command -v jq >/dev/null 2>&1; then
   esac
 fi
 
+# ruvnet-brain MCP (BRAIN-MCP-V1, MCP-only): if registered, confirm the KB dir +
+# reader deps are present (warn only — never fatal); if not registered, hint at
+# fix-brain. Reuses the same resolution as lib/fix-brain.sh (env/default).
+if [[ -f "$MCP_JSON" ]] && command -v jq >/dev/null 2>&1 \
+   && [[ "$(jq -r '.mcpServers["ruvnet-brain"].command // ""' "$MCP_JSON" 2>/dev/null)" == "node" ]]; then
+  BRAIN_KB="${RUVNET_BRAIN_KB:-${RUVNET_BRAIN_HOME:-$HOME/.cache/ruvnet-brain}/kb}"
+  if [[ ! -f "$BRAIN_KB/forge-mcp-all.mjs" ]]; then
+    warn "ruvnet-brain registered but KB MISSING at $BRAIN_KB — run: bin/ruflo-kit fix-brain $TARGET_DIR --download"
+  elif [[ ! -d "$BRAIN_KB/node_modules/@ruvector" || ! -f "$BRAIN_KB/node_modules/@xenova/transformers/package.json" ]]; then
+    warn "ruvnet-brain KB present but reader deps missing — run: bin/ruflo-kit fix-brain $TARGET_DIR"
+  else
+    pass "ruvnet-brain MCP registered + KB/reader present (search_ruvnet ready)"
+  fi
+else
+  info "ruvnet-brain MCP not registered — optional source-grounding brain: bin/ruflo-kit fix-brain $TARGET_DIR"
+fi
+
 # ── Step 7: RuVector native binaries ─────────────────────────────────────────
 
 echo -e "\n${CYAN}[8/9]${NC} RuVector native binary check"
@@ -352,7 +370,7 @@ fi
 echo ""
 echo "  Next steps (in Claude Code):"
 echo "    1. Verify: agentdb_controllers → active: 23/23 (all 7 advanced controllers on)"
-echo "    2. Search: memory_search 'audio recording' → should find audit data"
+echo "    2. Search: memory_search 'audit' → should find audit data"
 echo "    3. Activate intelligence: use hooks_intelligence_trajectory-start"
 echo "       during swarm work to begin SONA learning"
 echo ""

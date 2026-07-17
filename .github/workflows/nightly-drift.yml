@@ -1,0 +1,80 @@
+name: nightly-drift
+
+# Installs the REAL latest ruflo + agentic-qe globals (with our pinned
+# agentdb@3.0.0-alpha.10 + better-sqlite3) and runs the kit's own repair +
+# health scripts against them — so upstream drift is caught the day it ships
+# (e.g. a dist reshaping that breaks fix-ruflo, an agentdb controller regression,
+# or a semver bump that trips a version gate). A red run here means "upstream
+# changed under us", not "this repo broke". Modeled on vendor/agentic-kit's
+# nightly.yml, adapted to this bash kit. Self-contained; needs no secrets.
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  drift:
+    name: drift (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        node: [22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The kit's own devDependencies (vitest) for the test gate below.
+      - name: Install kit dev deps
+        run: npm ci || npm install
+
+      # Deliberately `npm i -g`, not pnpm: this reproduces the kit's TARGET
+      # environment — ruflo/agentic-qe installed globally, whose trees fix-ruflo
+      # heals with npm. agentdb is pinned to 3.0.0-alpha.10 (the version at which
+      # all 23 AgentDB controllers activate; alpha.12+ regressed them — see
+      # CLAUDE.md "AgentDB controllers"). better-sqlite3 supplies the native
+      # binding fix-ruflo expects.
+      #
+      # --allow-scripts is REQUIRED on npm >=11.17 (GitHub runners ship it): it
+      # blocks package install scripts by default, so the native builds
+      # (better-sqlite3, hnswlib-node, argon2, onnxruntime-node, sharp, …) are
+      # skipped without this allowlist and fix-ruflo would then have to rebuild
+      # every one. The flag is GLOBAL-install-only (project installs reject it,
+      # EALLOWSCRIPTS). List curated from vendor/agentic-kit heal.mjs ALLOW_SCRIPTS.
+      - name: Install latest ruflo + agentic-qe globals (pinned agentdb, native scripts allowed)
+        run: >
+          npm i -g
+          --allow-scripts=ruflo,agentic-qe,@claude-flow/cli,better-sqlite3,hnswlib-node,agentdb,agentic-flow,argon2,onnxruntime-node,sharp,protobufjs,@google/genai,tldjs,vibium
+          ruflo@latest agentic-qe@latest agentdb@3.0.0-alpha.10 better-sqlite3
+
+      # A throwaway target the fix scripts operate on, kept OUT of the checkout so
+      # the kit's own tree is never mutated. `init` lays down .claude + .agentic-qe;
+      # if it is unavailable the fix scripts still run against a bare dir.
+      - name: Init a throwaway target
+        run: |
+          TARGET="${RUNNER_TEMP}/drift-target"
+          mkdir -p "$TARGET"
+          echo "DRIFT_TARGET=$TARGET" >> "$GITHUB_ENV"
+          bin/ruflo-kit init "$TARGET" || echo "init unavailable — fix scripts run against a bare target"
+
+      # fix-ruflo exits non-zero when it hits unhealable ERRORS (lib/fix-ruflo.sh
+      # `exit 1 if ERRORS>0`). fix-aqe is idempotent hardening. A red here is the
+      # signal we want: the latest upstream dist no longer heals cleanly.
+      - name: fix-ruflo (fails on unhealable errors)
+        run: bin/ruflo-kit fix-ruflo "$DRIFT_TARGET"
+
+      - name: fix-aqe
+        run: bin/ruflo-kit fix-aqe "$DRIFT_TARGET"
+
+      # health exits 1 on a regression (lib/health.sh `exit 1 if REGRESSED>0`).
+      - name: health (fails on regression)
+        run: bin/ruflo-kit health "$DRIFT_TARGET"
+
+      # The kit's own unit suite must stay green against the freshly-installed
+      # globals — bash helpers, node instruments, and the fix-script sentinels.
+      - name: Kit unit tests
+        run: npm test -- --run

@@ -4,11 +4,14 @@
 #
 # Clone this repo once, then run it against ANY codebase path:
 #
+#   bin/ruflo-kit status      /path/to/codebase     # one-screen truth (disk-derived; --json)
+#   bin/ruflo-kit sync        /path/to/codebase     # one-verb heal (fix cascade; --dry-run)
 #   bin/ruflo-kit init        /path/to/codebase     # first-time bootstrap
 #   bin/ruflo-kit session     /path/to/codebase     # per-session maintenance
 #   bin/ruflo-kit health      /path/to/codebase     # growth-delta health check
 #   bin/ruflo-kit fix-ruflo   /path/to/codebase     # repair ruflo MCP/AgentDB
 #   bin/ruflo-kit fix-aqe     /path/to/codebase     # codify AQE hardening
+#   bin/ruflo-kit fix-brain   /path/to/codebase     # register ruvnet-brain MCP server
 #   bin/ruflo-kit fix-statusbar /path/to/codebase   # restore the statusline
 #   bin/ruflo-kit upgrade     /path/to/codebase     # major ruflo version bump
 #   bin/ruflo-kit verify-learning /path/to/codebase # read-only loop liveness (CI exit 1 if hollow)
@@ -42,11 +45,15 @@ usage() {
   cat <<EOF
 
 Commands:
+  status         One-screen truth (versions, sentinels, daemon, learning); --json
+  sync           One-verb heal — run the fix cascade in order; --dry-run
   init           First-time bootstrap of a codebase (ruflo + AQE + AgentDB)
   session        Per-session maintenance (patches, daemon, verification)
   health         Growth-delta health check (CI-friendly exit code)
   fix-ruflo      Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup
   fix-aqe        Codify AQE-side hardening + install .claude helpers/commands
+  fix-brain      Register the vendored ruvnet-brain search_ruvnet MCP server (MCP-only; --download to fetch the KB)
+  dashboard      On-demand local web dashboard (foreground, read-only, 127.0.0.1; --port N; Ctrl-C stops)
   fix-statusbar  Restore the rich ruflo + Agentic QE v3 statusline
   upgrade        Major-version ruflo migration (stop daemon, bump, re-activate)
   verify-learning Read-only learning-loop liveness probes (CI-friendly exit code)
@@ -61,11 +68,14 @@ Run a command with -h for its own flags. Docs: $KIT_DIR/docs/
 EOF
 }
 
-cmd="${1:-help}"; shift 2>/dev/null || true
+cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
+  status)        exec bash "$KIT_DIR/lib/status.sh"         "$@" ;;
+  sync)          exec bash "$KIT_DIR/lib/sync.sh"           "$@" ;;
   init)          exec bash "$KIT_DIR/lib/init.sh"           "$@" ;;
   fix-ruflo)     exec bash "$KIT_DIR/lib/fix-ruflo.sh"      "$@" ;;
   fix-aqe)       exec bash "$KIT_DIR/lib/fix-aqe.sh"        "$@" ;;
+  fix-brain)     exec bash "$KIT_DIR/lib/fix-brain.sh"      "$@" ;;
   fix-statusbar) exec bash "$KIT_DIR/lib/fix-statusbar.sh"  "$@" ;;
   session|session-init) exec bash "$KIT_DIR/lib/session-init.sh" "$@" ;;
   health)        exec bash "$KIT_DIR/lib/health.sh"         "$@" ;;
@@ -76,6 +86,11 @@ case "$cmd" in
     # tools/ operate on the target's runtime DBs via cwd → cd into the target.
     t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/selfimprove-bench.cjs" "$@" ) ;;
+  dashboard)
+    # On-demand LOCAL dashboard (DASHBOARD-V1): foreground, read-only,
+    # 127.0.0.1-only, Ctrl-C to stop. Never detaches, never billed.
+    t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
+    ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/dashboard.cjs" "$@" ) ;;
   harvest)
     t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/aqe-harvest.cjs" "$@" ) ;;
@@ -94,6 +109,14 @@ case "$cmd" in
     echo "Updating kit at $KIT_DIR …"
     git -C "$KIT_DIR" pull --ff-only && echo "Now at $(git -C "$KIT_DIR" rev-parse --short HEAD)."
     echo "Reminder: after any global ruflo bump, run 'ruflo-kit fix-ruflo <target>' + restart the daemon (see docs Patch 44)." ;;
-  ""|help|-h|--help) usage ;;
+  "")
+    # Bare invocation: lead with a compact status hint (against $(pwd)), then usage.
+    if [ -f "$KIT_DIR/lib/status.sh" ]; then
+      echo "ruflo-kit — current state ($(pwd)):"
+      bash "$KIT_DIR/lib/status.sh" "$(pwd)" --hints 2>/dev/null || true
+      echo ""
+    fi
+    usage ;;
+  help|-h|--help) usage ;;
   *) echo "ruflo-kit: unknown command '$cmd'"; echo; usage; exit 1 ;;
 esac
