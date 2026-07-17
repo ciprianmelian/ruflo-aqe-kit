@@ -60,6 +60,7 @@ Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` di
 | `upgrade <target>` | `lib/upgrade.sh` | Upgrade global ruflo, wipe + rehydrate the npx cache, re-run fix-ruflo, then `init --reactivate`. Flags: `--dry-run`. Run AFTER closing the session. |
 | `verify-learning <target>` | `lib/verify-learning.sh` | READ-ONLY learning-loop liveness probes (committed rows only, never MCP self-reports); verdict live/partial/hollow, CI exit 1 on hollow. |
 | `fix-learning <target>` | `lib/fix-learning.sh` | Populate/unlock the learning loop (extract → consolidate → dream → train → harvest) with lock-retry + persist-assertions. Never starts the daemon. Flags: `--cleanup --confirm`. |
+| `dashboard <target>` | `tools/dashboard.cjs` | On-demand **local web dashboard** (DASHBOARD-V1): live status cards + health/bench history at `http://127.0.0.1:7431`. Foreground (Ctrl-C stops), read-only, localhost-only, $0 — never detaches. Flags: `--port N`. |
 | `bench <target>` | `tools/selfimprove-bench.cjs` | READ-ONLY routing-improvement instrument. Flags: `--json`, `--quiet`, `--aqe-confidence`. |
 | `harvest <target>` | `tools/aqe-harvest.cjs` | Batch-replay AQE experiences into the ruflo substrate (SONA LoRA + AgentDB). |
 | *(node)* `tools/improvement-eval.cjs` | — | Gate-#4 proof instrument: multi-seed held-out eval, permutation *p* + Cohen's *d* vs the no-train control, hard 2σ/3-run gate. `--selftest`, `--json`. |

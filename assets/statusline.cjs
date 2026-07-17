@@ -510,7 +510,7 @@ function getCostFromStdin() {
 
 // Read package version from the first package.json we find.
 function getPkgVersion() {
-  let ver = '3.10.5';
+  let ver = '3.32.2';   // last-known fallback only — live detection below wins
   try {
     const home = os.homedir();
     // live-detect the GLOBAL ruflo (the kit launches from the global binary, per
