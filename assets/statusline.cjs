@@ -149,6 +149,39 @@ function _ra_swarmdb() {
   if (!hnsw && _ra_tbl(db, 'vector_indexes')) hnsw = _ra_count(db, 'SELECT COALESCE(SUM(total_vectors),0) FROM vector_indexes') > 0;
   return { vectorCount: v, dbSizeKB: Math.floor(kb), hasHnsw: hnsw };
 }
+// BRAIN-STATUSLINE-V1: 🧿 Ruflo Brain chip — the MCP-only ruvnet-brain knowledge
+// base (BRAIN-MCP-V1, Patch 53). Cheap filesystem-only probe: top-level readdir
+// + stat of the KB dir (never walks the 1.7GB tree), one JSON read of .mcp.json.
+// The row is hidden entirely when neither registered nor cached, so non-brain
+// targets see zero clutter. Repo count = distinct <repo> prefixes of *.rvf files.
+function _ra_brain() {
+  const kbDir = process.env.RUVNET_BRAIN_KB
+    || path.join(os.homedir(), '.cache', 'ruvnet-brain', 'kb');
+  let registered = false;
+  try {
+    const mcp = JSON.parse(fs.readFileSync(path.join(CWD, '.mcp.json'), 'utf8'));
+    registered = !!(mcp.mcpServers && mcp.mcpServers['ruvnet-brain']);
+  } catch (e) {}
+  let kbPresent = false, repos = 0, sizeKB = 0, readerOk = false;
+  try {
+    kbPresent = fs.existsSync(path.join(kbDir, 'forge-mcp-all.mjs'));
+    if (kbPresent) {
+      const repoSet = new Set();
+      for (const n of fs.readdirSync(kbDir)) {
+        if (n.endsWith('.rvf')) repoSet.add(n.split('.')[0]);
+        // Size = all top-level KB content files (rvf + passages + meta), so the
+        // chip matches the documented KB size; deps (node_modules) excluded.
+        try {
+          const st = fs.statSync(path.join(kbDir, n));
+          if (st.isFile()) sizeKB += st.size / 1024;
+        } catch (e) {}
+      }
+      repos = repoSet.size;
+      readerOk = fs.existsSync(path.join(kbDir, 'node_modules', '@xenova', 'transformers', 'package.json'));
+    }
+  } catch (e) {}
+  return { registered, kbPresent, repos, sizeKB: Math.floor(sizeKB), readerOk };
+}
 function _ra_aqevec() {
   const db = path.join(CWD, '.agentic-qe', 'memory.db');
   let v = 0;
@@ -186,6 +219,7 @@ function getStatuslineData() {
     // cached them; both are bounded local dir-walks, no network.
     if (!cached.tests || cached.tests.testFiles === undefined) { try { cached.tests = getLocalTestCount(); } catch (e) {} }
     if (!cached.adrs || cached.adrs.count === undefined) { try { cached.adrs = getLocalADRCount(); } catch (e) {} }
+    if (!cached.brain) { try { cached.brain = _ra_brain(); } catch (e) {} }
     return cached;
   }
 
@@ -205,6 +239,7 @@ function getStatuslineData() {
     try { data.tests = getLocalTestCount(); } catch (e) {}
     try { data.agentdb = _ra_agentdb(); } catch (e) {}
     try { data.swarmdb = _ra_swarmdb(); } catch (e) {}
+    try { data.brain = _ra_brain(); } catch (e) {}
     try { const ri = _ra_intelligence(); data.system = Object.assign({}, data.system, { ruflo: ri }); if (ri.pct > 0) data.system.intelligencePct = ri.pct; } catch (e) {}
     try { data.integration = Object.assign({}, data.integration, { mcpServers: _ra_mcp() }); } catch (e) {}
     try { if (!data.hooks || data.hooks.total === undefined) data.hooks = _ra_hooks(); } catch (e) {}
@@ -275,8 +310,11 @@ function buildLocalFallback() {
   const memMB = Math.floor(process.memoryUsage().heapUsed / 1024 / 1024);
   const adrs = getLocalADRCount();
   const { testFiles } = getLocalTestCount();
+  let brain = null;
+  try { brain = _ra_brain(); } catch (e) {}
 
   return {
+    brain,
     user: { name: 'user', gitBranch: '', modelName: 'Claude Code' },
     v3Progress: { domainsCompleted: 0, totalDomains: 5, dddProgress: 0, patternsLearned: 0, sessionsCompleted: 0 },
     security: { status: 'NONE', cvesFixed: 0, totalCves: 0 },
@@ -472,7 +510,7 @@ function getCostFromStdin() {
 
 // Read package version from the first package.json we find.
 function getPkgVersion() {
-  let ver = '3.10.5';
+  let ver = '3.32.2';   // last-known fallback only — live detection below wins
   try {
     const home = os.homedir();
     // live-detect the GLOBAL ruflo (the kit launches from the global binary, per
@@ -788,6 +826,32 @@ function generateStatusline() {
     c.cyan + 'Vectors' + c.reset + ' ' + swVectorColor + '●' + swVectorCount + swHnswInd + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
     c.cyan + 'Size' + c.reset + ' ' + c.brightWhite + swSizeDisp + c.reset
   );
+
+  // Line 4c: Ruflo Brain (BRAIN-STATUSLINE-V1) — the MCP-only knowledge base
+  // (search_ruvnet). Rendered ONLY when the brain is registered in .mcp.json or
+  // the KB cache exists; non-brain targets keep their current line count.
+  const brain = d.brain || {};
+  if (brain.registered || brain.kbPresent) {
+    const bSize = brain.sizeKB >= 1048576
+      ? (brain.sizeKB / 1048576).toFixed(1) + 'GB'
+      : Math.floor(brain.sizeKB / 1024) + 'MB';
+    const kbChip = brain.kbPresent
+      ? c.brightGreen + '●' + brain.repos + ' repos' + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
+        c.cyan + 'Size' + c.reset + ' ' + c.brightWhite + bSize + c.reset
+      : c.brightYellow + '●missing' + c.reset + ' ' + c.dim + '(fix-brain --download)' + c.reset;
+    const mcpChip = brain.registered
+      ? c.brightGreen + '●registered' + c.reset
+      : c.dim + '○unregistered' + c.reset;
+    const readerChip = brain.kbPresent
+      ? (brain.readerOk ? c.brightGreen + '●ok' + c.reset : c.brightYellow + '●missing' + c.reset)
+      : c.dim + '○n/a' + c.reset;
+    lines.push(
+      c.brightCyan + '🧿 Ruflo Brain' + c.reset + '  ' +
+      c.cyan + 'KB' + c.reset + ' ' + kbChip + '  ' + c.dim + '│' + c.reset + '  ' +
+      c.cyan + 'MCP' + c.reset + ' ' + mcpChip + '  ' + c.dim + '│' + c.reset + '  ' +
+      c.cyan + 'Reader' + c.reset + ' ' + readerChip
+    );
+  }
 
 
   // Line 6: Agentic QE v3 footer (AQE-FOOTER-V2 — enriched with vec + MB chips)

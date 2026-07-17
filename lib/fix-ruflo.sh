@@ -383,7 +383,13 @@ const block = [
 s = s.replace(uniq, block + uniq);
 fs.writeFileSync(F, s);
 PJS
-  node "$patcher" "$intel"; rm -f "$patcher"
+  node "$patcher" "$intel"; local rc=$?; rm -f "$patcher"
+  # rc=2 = ANCHOR_NOT_FOUND: file untouched, node --check would pass trivially —
+  # claiming success here is the false-✓ bug (Integrity Rule). Warn instead.
+  if [[ $rc -ne 0 ]]; then
+    warn "SONA-TRAIN-V1 anchor not found in intelligence.js (dist drift) — re-anchor needed, NOT applied"
+    return 0
+  fi
   if node --check "$intel" 2>/dev/null; then
     fix "Wired endTrajectory -> LoRAAdapter.train() so SONA actually learns (SONA-TRAIN-V1)"
   else
@@ -402,6 +408,17 @@ PJS
 train_neural_checkpoint() {
   [[ "$DRY_RUN" -ne 1 ]] || return 0
   local cfroot nf
+  # Self-retire (#2549, ruflo >=3.19): `neural train` now routes through the native
+  # @ruvector/ruvllm TrainingPipeline, whose checkpoints ARE the trained weights;
+  # the fresh-adapter save survives only as an explicit fallback (guarded by
+  # `nativeResult?.checkpointPath`) for hosts without native builds — which
+  # NATIVE-BUILDS-V1 installs. Patching that dormant fallback buys nothing.
+  local _nf_probe
+  _nf_probe="$(cd "$1/.." 2>/dev/null && pwd)/cli/dist/src/commands/neural.js"
+  if [[ -f "$_nf_probe" ]] && [[ "$(dist_defect_present "$_nf_probe" 'nativeResult\?\.checkpointPath')" == "PRESENT" ]]; then
+    pass "neural checkpoint patch self-retired — native TrainingPipeline writes trained checkpoints (#2549)"
+    return 0
+  fi
   cfroot="$(cd "$1/.." 2>/dev/null && pwd)" || return 0   # .../node_modules/@claude-flow
   nf="$cfroot/cli/dist/src/commands/neural.js"
   [[ -f "$nf" ]] || return 0
@@ -424,7 +441,11 @@ const repl = [
 s = s.replace(uniq, repl);
 fs.writeFileSync(F, s);
 PJS
-  node "$patcher" "$nf"; rm -f "$patcher"
+  node "$patcher" "$nf"; local rc=$?; rm -f "$patcher"
+  if [[ $rc -ne 0 ]]; then
+    warn "NEURAL-CKPT-V1 anchor not found in neural.js (dist drift) — NOT applied"
+    return 0
+  fi
   if node --check "$nf" 2>/dev/null; then
     fix "neural train now trains the JS adapter before checkpoint (NEURAL-CKPT-V1)"
   else
@@ -544,7 +565,11 @@ const lineEnd = s.indexOf('\n', idx);
 s = s.slice(0, lineEnd + 1) + inject + s.slice(lineEnd + 1);
 fs.writeFileSync(target, s);
 RSPATCH
-  node "$patcher" "$aj" "$inj"; rm -f "$patcher" "$inj"
+  node "$patcher" "$aj" "$inj"; local rc=$?; rm -f "$patcher" "$inj"
+  if [[ $rc -ne 0 ]]; then
+    warn "RUFLO-REAL-SPAWN-V1 anchor not found in agent.js (dist drift) — NOT applied"
+    return 0
+  fi
   if node --check "$aj" 2>/dev/null; then
     fix "Wired agent spawn --task to execute via Claude Code subscription (claude --print) (RUFLO-REAL-SPAWN-V1)"
   else
@@ -617,7 +642,11 @@ const lineStart = s.lastIndexOf('\n', idx) + 1;
 s = s.slice(0, lineStart) + inject + s.slice(lineStart);
 fs.writeFileSync(target, s);
 SRPATCH
-  node "$patcher" "$ht" "$inj"; rm -f "$patcher" "$inj"
+  node "$patcher" "$ht" "$inj"; local rc=$?; rm -f "$patcher" "$inj"
+  if [[ $rc -ne 0 ]]; then
+    warn "RUFLO-SEMRANK-V1 anchor not found in hooks-tools.js (dist drift) — NOT applied"
+    return 0
+  fi
   if node --check "$ht" 2>/dev/null; then
     fix "Wired semantic-path graded outcome re-rank into Router B (RUFLO-SEMRANK-V1)"
   else
@@ -634,6 +663,84 @@ SRPATCH
 # we take [0] (EXACT current behaviour) and with prob ε we uniformly sample one of the
 # eligible alternatives (indices 1..K-1). Crucially the swap happens AT THE PICK, so the
 # chosen agent propagates into primaryAgent.type (agents[0]) → the CLI `Agent:` line →
+# LoRA consumption seam (RUFLO-LORA-ADAPT-V1): SONA-TRAIN-V1 trains the JS
+# LoRAAdapter B matrix on verdict rewards (totalUpdates grows, weights persist),
+# but NOTHING ever called adapt() — the learned weights were write-only (pacphi
+# F2; verify-learning #3 read totalUpdates=620 / totalAdaptations=0). This wires
+# the consumption point: Router B's route-time query embedding is passed through
+# adapter.adapt() before the HNSW/cosine similarity search, so the trained delta
+# actually shapes routing — and the loop closes end-to-end (AQE experiences →
+# harvest → SONA train → adapt at route → aqe-post-route grades the outcome).
+# The route CLI is one-shot, so the seam persists stats via saveWeights() after
+# a successful adapt (else the counter dies with the process). Guarded: any
+# failure routes on the raw embedding. Self-retires when upstream wires its own
+# consumption (gate: getLoRAAdapter already imported by hooks-tools.js).
+# Idempotent (RUFLO-LORA-ADAPT-V1), reversible (.lora-adapt-bak), rc-checked.
+wire_lora_adapt() {
+  [[ "$DRY_RUN" -ne 1 ]] || return 0
+  local cfroot ht
+  cfroot="$(cd "$1/.." 2>/dev/null && pwd)" || return 0
+  ht="$cfroot/cli/dist/src/mcp-tools/hooks-tools.js"
+  [[ -f "$ht" ]] || return 0
+  grep -q "RUFLO-LORA-ADAPT-V1" "$ht" && { pass "LoRA route-time consumption already wired (RUFLO-LORA-ADAPT-V1)"; return 0; }
+  # Self-retire gate: hooks-tools.js has its OWN getLoRAAdapter() wrapper used by
+  # the intelligence-STATS tools, so gate on actual CONSUMPTION (.adapt( calls),
+  # not on the symbol name.
+  if grep -q "\.adapt(" "$ht"; then
+    pass "LoRA adapt patch self-retired — hooks-tools.js already calls adapt() upstream"
+    return 0
+  fi
+  [[ -f "$ht.lora-adapt-bak" ]] || cp "$ht" "$ht.lora-adapt-bak"
+  local patcher; patcher="$(mktemp)"
+  cat > "$patcher" <<'PJS'
+const fs = require('fs'); const F = process.argv[2];
+let s = fs.readFileSync(F, 'utf8');
+if (s.includes('RUFLO-LORA-ADAPT-V1')) { process.exit(0); }
+const anchor = "        const queryEmbedding = generateSimpleEmbedding(queryText);";
+if (!s.includes(anchor)) { console.error('ANCHOR_NOT_FOUND'); process.exit(2); }
+const uses = ['native.search(queryEmbedding, 5)', 'router.routeWithEmbedding(queryEmbedding, 3)'];
+for (const u of uses) {
+  if (!s.includes(u)) { console.error('ANCHOR_NOT_FOUND'); process.exit(2); }
+}
+const block = [
+anchor,
+"        // RUFLO-LORA-ADAPT-V1: consume the trained LoRA at route time. Training",
+"        // (SONA-TRAIN-V1) moves B, but without a caller of adapt() the learned",
+"        // weights never influenced routing (write-only). Adapt the query embedding",
+"        // so the trained delta shapes similarity; persist stats (one-shot CLI).",
+"        // Guarded: any failure falls back to the raw embedding.",
+"        let routeEmbedding = queryEmbedding;",
+"        try {",
+"            // Reuses this file's module-scope getLoRAAdapter() wrapper (stats tools use it too).",
+"            const _lora = await getLoRAAdapter();",
+"            const _lstats = _lora?.getStats?.();",
+"            if (_lstats && _lstats.totalUpdates > 0) {",
+"                const _ad = _lora.adapt(queryEmbedding);",
+"                if (_ad?.adapted?.length === queryEmbedding.length) {",
+"                    routeEmbedding = _ad.adapted;",
+"                    try { _lora.saveWeights(); } catch { /* stats persist best-effort */ }",
+"                }",
+"            }",
+"        } catch { /* LoRA adapt optional — never break routing */ }",
+].join('\n');
+s = s.replace(anchor, block);
+s = s.split('native.search(queryEmbedding, 5)').join('native.search(routeEmbedding, 5)');
+s = s.split('router.routeWithEmbedding(queryEmbedding, 3)').join('router.routeWithEmbedding(routeEmbedding, 3)');
+fs.writeFileSync(F, s);
+PJS
+  node "$patcher" "$ht"; local rc=$?; rm -f "$patcher"
+  if [[ $rc -ne 0 ]]; then
+    warn "RUFLO-LORA-ADAPT-V1 anchor not found in hooks-tools.js (dist drift) — NOT applied"
+    return 0
+  fi
+  if node --check "$ht" 2>/dev/null; then
+    fix "Wired route-time LoRA consumption: adapt() + stats persist (RUFLO-LORA-ADAPT-V1)"
+  else
+    warn "RUFLO-LORA-ADAPT-V1 produced invalid hooks-tools.js — restoring backup"
+    cp "$ht.lora-adapt-bak" "$ht"
+  fi
+}
+
 # ruflo-route-capture → the reward trains the EXPLORED pick, not the exploited [0].
 #   ε: RUFLO_ROUTE_EPSILON env overrides (0 = fully disabled, regression-safe + Gate 3
 #      control arm); else linear decay 0.15 → 0.05 floor over the first 200 routed tasks,
@@ -737,8 +844,8 @@ s = s.split(OLD).join(NEW);
 fs.writeFileSync(target, s);
 REXPATCH
   node "$patcher" "$ht"; local rc=$?; rm -f "$patcher"
-  if [[ $rc -eq 2 ]]; then
-    warn "RUFLO-ROUTE-EXPLORE-V2 anchor not found in hooks-tools.js — verify manually"
+  if [[ $rc -ne 0 ]]; then
+    warn "RUFLO-ROUTE-EXPLORE-V2 anchor not found in hooks-tools.js (dist drift) — NOT applied"
     return 0
   fi
   if node --check "$ht" 2>/dev/null; then
@@ -830,6 +937,7 @@ force_nested_agentdb() {
     train_neural_checkpoint "$memdir"
     wire_real_spawn "$memdir"
     wire_semantic_rerank "$memdir"
+    wire_lora_adapt "$memdir"
     wire_route_exploration "$memdir"
     ensure_sona_embed_384 "$memdir"
     install_native_builds "$memdir"
@@ -855,6 +963,7 @@ force_nested_agentdb() {
   train_neural_checkpoint "$memdir"
   wire_real_spawn "$memdir"
   wire_semantic_rerank "$memdir"
+  wire_lora_adapt "$memdir"
   wire_route_exploration "$memdir"
   ensure_sona_embed_384 "$memdir"
   install_native_builds "$memdir"
