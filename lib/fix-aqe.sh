@@ -333,7 +333,11 @@ else
   HDL="$AQE_ROOT/dist/cli/commands/hooks-handlers/hooks-dream-learning.js"
   DEN="$AQE_ROOT/dist/learning/dream/dream-engine.js"
   MCPB="$AQE_ROOT/dist/mcp/bundle.js"
-  CLIC="$AQE_ROOT/dist/cli/chunks/chunk-IJ4BUSJN.js"
+  # The cli chunk name is content-hashed and changes on every aqe release
+  # (IJ4BUSJN in 3.10.x, XNNYHQLW in 3.12.2, …) — discover it by its anchor,
+  # same pattern as the AQE-PROMOTE-V1 chunk discovery above.
+  CLIC="$(grep -rl "INSERT INTO dream_cycles" "$AQE_ROOT/dist/cli/chunks/" 2>/dev/null | grep '\.js$' | grep -v '\.bak' | head -1)"
+  [[ -z "$CLIC" ]] && CLIC="$AQE_ROOT/dist/cli/chunks/chunk-IJ4BUSJN.js"   # legacy fallback for the missing-target warn path
 
   # Restore any target already carrying a (stale V1) sentinel from its pristine
   # .dream-lockfix-bak BEFORE re-patching, so V2 applies to a clean base and never
