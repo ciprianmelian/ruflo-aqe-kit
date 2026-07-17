@@ -43,9 +43,10 @@ This one script calls `fix-ruflo.sh` (step 5), `fix-statusbar.sh` (step 6) and `
 
 *Use when:* beginning a Claude Code session, to prime memory and confirm the loop is alive.
 
+0. Quick look first (optional, ~0.6s): bare `ruflo-kit` or `bin/ruflo-kit status <target>` — one screen of disk-derived truth (versions incl. the 3 agentdb slots, sentinels n/N, daemon via pgrep, learning stores). If it looks right, `session` will mostly confirm it.
 1. Run: `bin/ruflo-kit session <target>`
 2. It applies patches (`fix-ruflo.sh`, `fix-statusbar.sh`), checks the MCP server, reports daemon status (**does not auto-start it** — auto-start is opt-in, see [A8](#a8-daemon--token-cost)), verifies persistent storage, and checks the AgentDB controllers and native binaries.
-3. In Claude Code, verify controllers: `agentdb_controllers` → active **23/23**.
+3. In Claude Code, verify controllers: `agentdb_controllers` → active **23/23**. (The count reflects the NESTED alpha.10 shadow, not the hoisted alpha.17 — see [A3](#a3-upgrade-ruflo); it is only verifiable after a Claude Code restart, since a live MCP server caches the old dist.)
 
 **Verify:** the summary prints "All systems ready" (0 issues). Warnings list anything to address.
 
@@ -86,15 +87,18 @@ This one script calls `fix-ruflo.sh` (step 5), `fix-statusbar.sh` (step 6) and `
 
 ### A4. Fix config drift
 
-*Use when:* something that was working has reset (often after `aqe init` or a reinstall). All three are idempotent and safe to re-run; `fix-ruflo.sh` and `fix-aqe.sh` accept `--dry-run` (and `fix-aqe.sh` is reversible via `.bak`); `fix-statusbar.sh` takes no flags.
+*Use when:* something that was working has reset (often after `aqe init` or a reinstall). All fix scripts are idempotent and safe to re-run; `fix-ruflo.sh`, `fix-aqe.sh` and `fix-brain.sh` accept `--dry-run` (and `fix-aqe.sh` is reversible via `.bak`); `fix-statusbar.sh` takes no flags.
 
-Run only the one that drifted, or run them in this order if several did:
+**One-verb path (default):** `bin/ruflo-kit sync <target>` runs fix-ruflo → fix-aqe → fix-statusbar → fix-brain → verify-learning in order and prints a per-stage summary (`--dry-run` propagates to every stage; exit 1 only on a hard fix-stage failure). Not sure anything drifted? `bin/ruflo-kit status <target>` first.
+
+Or run only the one that drifted:
 
 1. ruflo / claude-flow MCP setup drifted (controllers dormant, MCP misconfigured): `bin/ruflo-kit fix-ruflo <target>`
 2. Status bar reverted to the minimal stub: `bin/ruflo-kit fix-statusbar <target>`
 3. AQE-side hardening lost (pattern distillation, `.claude` helpers/hooks): `bin/ruflo-kit fix-aqe <target>`
-4. Restart Claude Code so the MCP server reloads.
-5. If much is broken at once, the heavier option is `bin/ruflo-kit init <target> --reactivate`, which re-runs all three plus re-activation.
+4. Brain KB / `ruvnet-brain` MCP registration drifted: `bin/ruflo-kit fix-brain <target>` (see [A9](#a9-ruvnet-brain-mcp-only-knowledge-base))
+5. Restart Claude Code so the MCP server reloads.
+6. If much is broken at once, the heavier option is `bin/ruflo-kit init <target> --reactivate`, which re-runs the fixes plus re-activation.
 
 **Verify:** each script prints a per-check summary; re-running reports items as "already present".
 
