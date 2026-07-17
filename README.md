@@ -1,6 +1,6 @@
 # ruflo + Agentic QE v3 — Setup & Repair Kit
 
-A cloneable kit that gets [`ruflo`](https://www.npmjs.com/package/ruflo) (the renamed `claude-flow`) and the standalone [`agentic-qe`](https://www.npmjs.com/package/agentic-qe) plugin into a known-good state inside [Claude Code](https://github.com/anthropics/claude-code) — and keeps them there session to session — for **any** codebase you point it at.
+A cloneable kit that gets [`ruflo`](https://www.npmjs.com/package/ruflo) (the renamed `claude-flow`) and the standalone [`agentic-qe`](https://www.npmjs.com/package/agentic-qe) plugin into a known-good state inside [Claude Code](https://github.com/anthropics/claude-code) — and keeps them there session to session — for **any** codebase you point it at. It also wires the optional **ruvnet-brain** knowledge base (an MCP-only `search_ruvnet` tool over ~53 rUv-ecosystem repos — no hooks, no background cost) and keeps the whole stack honest with disk-derived `status`, self-retiring dist patches, and a nightly upstream-drift CI probe.
 
 ## Quickstart
 
@@ -18,6 +18,9 @@ ruflo-kit init /path/to/your/codebase
 
 # every Claude Code session afterwards
 ruflo-kit session /path/to/your/codebase
+
+# day to day: a bare `ruflo-kit` prints one-screen status hints;
+# `ruflo-kit sync <target>` is the one-verb heal when something drifted
 ```
 
 `init` is idempotent: it skips `ruflo init` / `aqe init` if they have already run and only re-applies the patches. Pass `--force` to wipe and re-init, or `--dry-run` to preview without changes.
@@ -50,12 +53,16 @@ Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` di
 | `init <target>` | `lib/init.sh` | One-shot bootstrap: `ruflo init` → `ruflo memory init` → `agentic-qe init` → `.claude` backfill → fix-ruflo → fix-statusbar → fix-aqe → activation table → seed memory → verify. Flags: `--force`, `--reactivate`, `--dry-run`. |
 | `session <target>` | `lib/session-init.sh` | Per-session entry: applies patches, checks MCP + daemon, verifies storage and AgentDB controllers. Run at the start of every Claude Code session. |
 | `health <target>` | `lib/health.sh` | Growth-delta monitor: snapshots ~14 metrics, diffs against the previous run, exits non-zero on regression (CI-friendly). Flags: `--reset`, `--dry-run`, `--json`. |
-| `fix-ruflo <target>` | `lib/fix-ruflo.sh` | Diagnose + repair the ruflo / claude-flow MCP setup; re-pins AgentDB to `alpha.10`. Flags: `--dry-run`. |
-| `fix-aqe <target>` | `lib/fix-aqe.sh` | Re-apply AQE-side dist patches + `.claude` helpers/hooks lost on reinstall. Flags: `--dry-run`. |
-| `fix-statusbar <target>` | `lib/fix-statusbar.sh` | Restore the rich ruflo + Agentic QE v3 status line clobbered by `aqe init`. No flags. |
+| `fix-ruflo <target>` | `lib/fix-ruflo.sh` | Diagnose + repair the ruflo / claude-flow MCP setup; maintains the AgentDB `alpha.10` **nested shadow** (under `@claude-flow/memory`, shadowing the hoisted upstream floor) + the dist sentinels (SONA train/adapt, re-rank, exploration, real spawn). Flags: `--dry-run`. |
+| `fix-aqe <target>` | `lib/fix-aqe.sh` | Re-apply AQE-side dist patches + `.claude` helpers/hooks lost on reinstall (dream-lockfix, promote filter, exit-2 block, daemonAutoStart pin, root pins). Flags: `--dry-run`. |
+| `fix-brain <target>` | `lib/fix-brain.sh` | Register the MCP-only `ruvnet-brain` server (tool: `search_ruvnet`) + verify/install its Ed25519-signed KB (≈736 MB download → ≈1.7 GB unpacked). Flags: `--download`, `--dry-run`. No hooks, no launchd. |
+| `fix-statusbar <target>` | `lib/fix-statusbar.sh` | Restore the rich ruflo + Agentic QE v3 status line clobbered by `aqe init` (incl. the 🧿 Ruflo Brain row). No flags. |
 | `upgrade <target>` | `lib/upgrade.sh` | Upgrade global ruflo, wipe + rehydrate the npx cache, re-run fix-ruflo, then `init --reactivate`. Flags: `--dry-run`. Run AFTER closing the session. |
+| `verify-learning <target>` | `lib/verify-learning.sh` | READ-ONLY learning-loop liveness probes (committed rows only, never MCP self-reports); verdict live/partial/hollow, CI exit 1 on hollow. |
+| `fix-learning <target>` | `lib/fix-learning.sh` | Populate/unlock the learning loop (extract → consolidate → dream → train → harvest) with lock-retry + persist-assertions. Never starts the daemon. Flags: `--cleanup --confirm`. |
 | `bench <target>` | `tools/selfimprove-bench.cjs` | READ-ONLY routing-improvement instrument. Flags: `--json`, `--quiet`, `--aqe-confidence`. |
 | `harvest <target>` | `tools/aqe-harvest.cjs` | Batch-replay AQE experiences into the ruflo substrate (SONA LoRA + AgentDB). |
+| *(node)* `tools/improvement-eval.cjs` | — | Gate-#4 proof instrument: multi-seed held-out eval, permutation *p* + Cohen's *d* vs the no-train control, hard 2σ/3-run gate. `--selftest`, `--json`. |
 | `version` | `bin/ruflo-kit` | Print the kit git sha + detected global `ruflo` / `agentic-qe` versions. |
 | `self-update` | `bin/ruflo-kit` | Fast-forward `git pull` the kit clone (then re-run `fix-ruflo` per Patch 44). |
 
@@ -68,8 +75,10 @@ lib/      *.sh + common.sh   shell implementations (common.sh resolves KIT_DIR v
 assets/   claude-helpers/    hook helpers installed into the target's .claude/helpers/
           claude-commands/   kit-maintained .claude/commands docs
           builds/            prebuilt RuVector native (.node) binaries
-tools/    *.cjs              node tools (bench, harvest)
+tools/    *.cjs              node tools (bench, harvest, improvement-eval)
 docs/     narrative docs     deep rationale, cheatsheet, operations, R&D status
+tests/    *.test.js          vitest suite (npm test -- --run); guards helpers + patch invariants
+.github/  workflows/         CI: shellcheck + nightly upstream-drift probe (real-latest install + heal + health)
 ```
 
 ## Requirements
