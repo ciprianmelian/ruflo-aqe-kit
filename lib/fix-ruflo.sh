@@ -383,7 +383,13 @@ const block = [
 s = s.replace(uniq, block + uniq);
 fs.writeFileSync(F, s);
 PJS
-  node "$patcher" "$intel"; rm -f "$patcher"
+  node "$patcher" "$intel"; local rc=$?; rm -f "$patcher"
+  # rc=2 = ANCHOR_NOT_FOUND: file untouched, node --check would pass trivially —
+  # claiming success here is the false-✓ bug (Integrity Rule). Warn instead.
+  if [[ $rc -ne 0 ]]; then
+    warn "SONA-TRAIN-V1 anchor not found in intelligence.js (dist drift) — re-anchor needed, NOT applied"
+    return 0
+  fi
   if node --check "$intel" 2>/dev/null; then
     fix "Wired endTrajectory -> LoRAAdapter.train() so SONA actually learns (SONA-TRAIN-V1)"
   else
@@ -402,6 +408,16 @@ PJS
 train_neural_checkpoint() {
   [[ "$DRY_RUN" -ne 1 ]] || return 0
   local cfroot nf
+  # Self-retire (#2549, ruflo >=3.19): `neural train` now routes through the native
+  # @ruvector/ruvllm TrainingPipeline, whose checkpoints ARE the trained weights;
+  # the fresh-adapter save survives only as an explicit fallback (guarded by
+  # `nativeResult?.checkpointPath`) for hosts without native builds — which
+  # NATIVE-BUILDS-V1 installs. Patching that dormant fallback buys nothing.
+  local _nf_probe="$(cd "$1/.." 2>/dev/null && pwd)/cli/dist/src/commands/neural.js"
+  if [[ -f "$_nf_probe" ]] && [[ "$(dist_defect_present "$_nf_probe" 'nativeResult\?\.checkpointPath')" == "PRESENT" ]]; then
+    pass "neural checkpoint patch self-retired — native TrainingPipeline writes trained checkpoints (#2549)"
+    return 0
+  fi
   cfroot="$(cd "$1/.." 2>/dev/null && pwd)" || return 0   # .../node_modules/@claude-flow
   nf="$cfroot/cli/dist/src/commands/neural.js"
   [[ -f "$nf" ]] || return 0
@@ -424,7 +440,11 @@ const repl = [
 s = s.replace(uniq, repl);
 fs.writeFileSync(F, s);
 PJS
-  node "$patcher" "$nf"; rm -f "$patcher"
+  node "$patcher" "$nf"; local rc=$?; rm -f "$patcher"
+  if [[ $rc -ne 0 ]]; then
+    warn "NEURAL-CKPT-V1 anchor not found in neural.js (dist drift) — NOT applied"
+    return 0
+  fi
   if node --check "$nf" 2>/dev/null; then
     fix "neural train now trains the JS adapter before checkpoint (NEURAL-CKPT-V1)"
   else
@@ -544,7 +564,11 @@ const lineEnd = s.indexOf('\n', idx);
 s = s.slice(0, lineEnd + 1) + inject + s.slice(lineEnd + 1);
 fs.writeFileSync(target, s);
 RSPATCH
-  node "$patcher" "$aj" "$inj"; rm -f "$patcher" "$inj"
+  node "$patcher" "$aj" "$inj"; local rc=$?; rm -f "$patcher" "$inj"
+  if [[ $rc -ne 0 ]]; then
+    warn "RUFLO-REAL-SPAWN-V1 anchor not found in agent.js (dist drift) — NOT applied"
+    return 0
+  fi
   if node --check "$aj" 2>/dev/null; then
     fix "Wired agent spawn --task to execute via Claude Code subscription (claude --print) (RUFLO-REAL-SPAWN-V1)"
   else
@@ -617,7 +641,11 @@ const lineStart = s.lastIndexOf('\n', idx) + 1;
 s = s.slice(0, lineStart) + inject + s.slice(lineStart);
 fs.writeFileSync(target, s);
 SRPATCH
-  node "$patcher" "$ht" "$inj"; rm -f "$patcher" "$inj"
+  node "$patcher" "$ht" "$inj"; local rc=$?; rm -f "$patcher" "$inj"
+  if [[ $rc -ne 0 ]]; then
+    warn "RUFLO-SEMRANK-V1 anchor not found in hooks-tools.js (dist drift) — NOT applied"
+    return 0
+  fi
   if node --check "$ht" 2>/dev/null; then
     fix "Wired semantic-path graded outcome re-rank into Router B (RUFLO-SEMRANK-V1)"
   else
