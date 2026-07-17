@@ -4,6 +4,8 @@
 #
 # Clone this repo once, then run it against ANY codebase path:
 #
+#   bin/ruflo-kit status      /path/to/codebase     # one-screen truth (disk-derived; --json)
+#   bin/ruflo-kit sync        /path/to/codebase     # one-verb heal (fix cascade; --dry-run)
 #   bin/ruflo-kit init        /path/to/codebase     # first-time bootstrap
 #   bin/ruflo-kit session     /path/to/codebase     # per-session maintenance
 #   bin/ruflo-kit health      /path/to/codebase     # growth-delta health check
@@ -43,6 +45,8 @@ usage() {
   cat <<EOF
 
 Commands:
+  status         One-screen truth (versions, sentinels, daemon, learning); --json
+  sync           One-verb heal — run the fix cascade in order; --dry-run
   init           First-time bootstrap of a codebase (ruflo + AQE + AgentDB)
   session        Per-session maintenance (patches, daemon, verification)
   health         Growth-delta health check (CI-friendly exit code)
@@ -63,8 +67,10 @@ Run a command with -h for its own flags. Docs: $KIT_DIR/docs/
 EOF
 }
 
-cmd="${1:-help}"; shift 2>/dev/null || true
+cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
+  status)        exec bash "$KIT_DIR/lib/status.sh"         "$@" ;;
+  sync)          exec bash "$KIT_DIR/lib/sync.sh"           "$@" ;;
   init)          exec bash "$KIT_DIR/lib/init.sh"           "$@" ;;
   fix-ruflo)     exec bash "$KIT_DIR/lib/fix-ruflo.sh"      "$@" ;;
   fix-aqe)       exec bash "$KIT_DIR/lib/fix-aqe.sh"        "$@" ;;
@@ -97,6 +103,14 @@ case "$cmd" in
     echo "Updating kit at $KIT_DIR …"
     git -C "$KIT_DIR" pull --ff-only && echo "Now at $(git -C "$KIT_DIR" rev-parse --short HEAD)."
     echo "Reminder: after any global ruflo bump, run 'ruflo-kit fix-ruflo <target>' + restart the daemon (see docs Patch 44)." ;;
-  ""|help|-h|--help) usage ;;
+  "")
+    # Bare invocation: lead with a compact status hint (against $(pwd)), then usage.
+    if [ -f "$KIT_DIR/lib/status.sh" ]; then
+      echo "ruflo-kit — current state ($(pwd)):"
+      bash "$KIT_DIR/lib/status.sh" "$(pwd)" --hints 2>/dev/null || true
+      echo ""
+    fi
+    usage ;;
+  help|-h|--help) usage ;;
   *) echo "ruflo-kit: unknown command '$cmd'"; echo; usage; exit 1 ;;
 esac

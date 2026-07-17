@@ -45,6 +45,8 @@ Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` di
 
 | Command | Implementation | What it does |
 |---|---|---|
+| `status <target>` | `lib/status.sh` | One-screen disk-derived truth: versions (3 agentdb slots), dist sentinels n/N, daemon via pgrep, MCP servers + brain KB, learning stores, autostart pin. `--json` is always-valid machine output; bare `ruflo-kit` prints the short hints. Exit 0 always. |
+| `sync <target>` | `lib/sync.sh` | One-verb heal: fix-ruflo → fix-aqe → fix-statusbar → fix-brain → verify-learning, with a per-stage summary table. `--dry-run` propagates to every stage; exits non-zero only on a hard fix-stage failure. |
 | `init <target>` | `lib/init.sh` | One-shot bootstrap: `ruflo init` → `ruflo memory init` → `agentic-qe init` → `.claude` backfill → fix-ruflo → fix-statusbar → fix-aqe → activation table → seed memory → verify. Flags: `--force`, `--reactivate`, `--dry-run`. |
 | `session <target>` | `lib/session-init.sh` | Per-session entry: applies patches, checks MCP + daemon, verifies storage and AgentDB controllers. Run at the start of every Claude Code session. |
 | `health <target>` | `lib/health.sh` | Growth-delta monitor: snapshots ~14 metrics, diffs against the previous run, exits non-zero on regression (CI-friendly). Flags: `--reset`, `--dry-run`, `--json`. |
