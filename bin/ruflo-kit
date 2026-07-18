@@ -7,7 +7,7 @@
 #   bin/ruflo-kit setup       /path/to/codebase     # fresh machine → proved stack (install+init+heal+proof)
 #   bin/ruflo-kit status      /path/to/codebase     # one-screen truth (disk-derived; --json)
 #   bin/ruflo-kit sync        /path/to/codebase     # one-verb heal (fix cascade; --dry-run)
-#   bin/ruflo-kit proof       /path/to/codebase     # 13-probe disk-evidence proof, run twice (x2)
+#   bin/ruflo-kit proof       /path/to/codebase     # 15-probe disk-evidence proof, run twice (x2)
 #   bin/ruflo-kit init        /path/to/codebase     # first-time bootstrap
 #   bin/ruflo-kit session     /path/to/codebase     # per-session maintenance
 #   bin/ruflo-kit health      /path/to/codebase     # growth-delta health check
@@ -53,7 +53,7 @@ Commands:
   init           First-time bootstrap of a codebase (ruflo + AQE + AgentDB)
   session        Per-session maintenance (patches, daemon, verification)
   health         Growth-delta health check (CI-friendly exit code)
-  proof          13-probe disk-evidence proof, run twice (x2) — exit 0 only when PROVED
+  proof          15-probe disk-evidence proof, run twice (x2) — exit 0 only when PROVED
   fix-ruflo      Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup
   fix-aqe        Codify AQE-side hardening + install .claude helpers/commands
   fix-brain      Register the vendored ruvnet-brain search_ruvnet MCP server (MCP-only; --download to fetch the KB)
