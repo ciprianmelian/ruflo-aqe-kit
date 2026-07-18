@@ -58,6 +58,10 @@ BRAIN_HOME="${RUVNET_BRAIN_HOME:-$HOME/.cache/ruvnet-brain}"
 KB_DIR="${RUVNET_BRAIN_KB:-$BRAIN_HOME/kb}"
 MCP_MARKER="$KB_DIR/forge-mcp-all.mjs"                 # the "brain is unpacked" marker install.mjs uses
 SERVER_MJS="$KIT_DIR/vendor/ruvnet-brain/plugin/mcp/server.mjs"   # vendored thin stdio launcher
+# vendor/ is a local-only checkout (gitignored) — on a clean clone/CI fall back
+# to the kit-tracked copy of the same MIT-licensed 2KB launcher (verified
+# byte-identical to upstream at vendor sync; re-sync when upstream changes it).
+[[ -f "$SERVER_MJS" ]] || SERVER_MJS="$KIT_ASSETS/brain/server.mjs"
 MCP_JSON="$TARGET_DIR/.mcp.json"
 
 echo "============================================"
