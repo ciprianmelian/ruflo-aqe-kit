@@ -1,6 +1,6 @@
 # ruflo + Agentic QE v3 — Setup & Repair Kit
 
-A cloneable kit that gets [`ruflo`](https://www.npmjs.com/package/ruflo) (the renamed `claude-flow`) and the standalone [`agentic-qe`](https://www.npmjs.com/package/agentic-qe) plugin into a known-good state inside [Claude Code](https://github.com/anthropics/claude-code) — and keeps them there session to session — for **any** codebase you point it at. It also wires the optional **ruvnet-brain** knowledge base (an MCP-only `search_ruvnet` tool over 50+ rUv-ecosystem repos — the count grows with releases; no hooks, no background cost) and keeps the whole stack honest with disk-derived `status`, a 13-probe **`proof`** verb that runs twice and only says PROVED when both passes agree, self-retiring dist patches, and a nightly upstream-drift CI probe.
+A cloneable kit that gets [`ruflo`](https://www.npmjs.com/package/ruflo) (the renamed `claude-flow`) and the standalone [`agentic-qe`](https://www.npmjs.com/package/agentic-qe) plugin into a known-good state inside [Claude Code](https://github.com/anthropics/claude-code) — and keeps them there session to session — for **any** codebase you point it at. It also wires the optional **ruvnet-brain** knowledge base (an MCP-only `search_ruvnet` tool over 50+ rUv-ecosystem repos — the count grows with releases; no hooks, no background cost) and keeps the whole stack honest with disk-derived `status`, a 15-probe **`proof`** verb that runs twice and only says PROVED when both passes agree, self-retiring dist patches, and a nightly upstream-drift CI probe.
 
 ## Quickstart
 
@@ -21,7 +21,7 @@ ruflo-kit session /path/to/your/codebase
 
 # day to day: a bare `ruflo-kit` prints one-screen status hints;
 # `ruflo-kit sync <target>` is the one-verb heal; `ruflo-kit proof <target>`
-# re-runs the 13-probe x2 evidence check on demand
+# re-runs the 15-probe x2 evidence check on demand
 ```
 
 `setup` is idempotent — a second run on a healthy machine installs nothing, changes nothing, and ends in the same PROVED verdict. (`init` remains available as the bootstrap-only step; `setup` wraps install → init → sync → proof.)
@@ -52,7 +52,7 @@ Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` di
 | Command | Implementation | What it does |
 |---|---|---|
 | `setup <target>` | `lib/setup.sh` | **Fresh machine → proved stack, one verb**: prereqs → global installs (ruflo, agentic-qe, agentdb@pin + better-sqlite3; npm ≥11.17 `--allow-scripts` handled automatically) → `init` → `sync` → opt-in brain KB → daemon policy (never started — billed) → **proof x2**. Exit code = proof verdict. Idempotent. Flags: `--with-brain-kb`, `--refresh-brain-kb`, `--skip-install`, `--json`, `--dry-run`. |
-| `proof <target>` | `lib/proof.sh` | 13-probe disk-evidence check (CLIs, MCP handshakes, 3 agentdb slots vs pins, 23+ controllers, brain, statusline, sentinels, learning verdict, health parse, swarm smoke, store locks) — run **twice**, pass 2 in a scrubbed env; verdict `PROVED` only when both passes agree with zero FAILs. Flags: `--single`, `--json`, `--dry-run`. |
+| `proof <target>` | `lib/proof.sh` | 15-probe disk-evidence check (CLIs, MCP handshakes, 3 agentdb slots vs pins, 23+ controllers, brain, statusline, sentinels, learning verdict, health parse, swarm smoke, store locks, daemon-gates, statusline-truth) — run **twice**, pass 2 in a scrubbed env; verdict `PROVED` only when both passes agree with zero FAILs. Flags: `--single`, `--json`, `--dry-run`. |
 | `status <target>` | `lib/status.sh` | One-screen disk-derived truth: versions (3 agentdb slots), dist sentinels n/N, daemon via pgrep, MCP servers + brain KB, learning stores, autostart pin. `--json` is always-valid machine output; bare `ruflo-kit` prints the short hints. Exit 0 always. |
 | `sync <target>` | `lib/sync.sh` | One-verb heal: fix-ruflo → fix-aqe → fix-statusbar → fix-brain → verify-learning, with a per-stage summary table. `--dry-run` propagates to every stage; exits non-zero only on a hard fix-stage failure. |
 | `init <target>` | `lib/init.sh` | One-shot bootstrap: `ruflo init` → `ruflo memory init` → `agentic-qe init` → `.claude` backfill → fix-ruflo → fix-statusbar → fix-aqe → activation table → seed memory → verify. Flags: `--force`, `--reactivate`, `--dry-run`. |
