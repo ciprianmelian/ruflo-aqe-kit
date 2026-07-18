@@ -52,8 +52,10 @@ function mkTarget() {
   return d;
 }
 
-// Hollow fixture: memory_entries populated, every structured table empty; lora in
-// JS fallback; vectors present but useNativeHNSW unset → #2/#3/#4 must FAIL.
+// Hollow fixture: genuine session evidence exists (eligible captured_experiences
+// + a session record) yet nothing was learned — structured tables empty, lora
+// never applied. #2/#3 must FAIL. (Post-e2e semantics: hollow is judged against
+// the actual harvest source and session records, not kit-seeded flat entries.)
 function buildHollow(d) {
   sqlite(path.join(d, '.swarm', 'memory.db'),
     'CREATE TABLE memory_entries(id INTEGER); INSERT INTO memory_entries VALUES (1),(2),(3);' +
@@ -62,7 +64,14 @@ function buildHollow(d) {
     'CREATE TABLE learning_experiences(id INTEGER); CREATE TABLE graph_edges(id INTEGER);');
   sqlite(path.join(d, '.agentic-qe', 'memory.db'),
     'CREATE TABLE vectors(dimensions INTEGER, embedding BLOB); INSERT INTO vectors VALUES (384, zeroblob(1536));' +
-    'CREATE TABLE sona_patterns(id INTEGER); CREATE TABLE routing_outcomes(id INTEGER);');
+    'CREATE TABLE sona_patterns(id INTEGER); CREATE TABLE routing_outcomes(id INTEGER);' +
+    // The harvest source (tools/aqe-harvest.cjs filter): eligible rows that
+    // SHOULD have produced agentdb.db episodes.
+    'CREATE TABLE captured_experiences(task TEXT, success INTEGER, quality REAL, embedding BLOB);' +
+    "INSERT INTO captured_experiences VALUES ('t1', 1, 0.9, zeroblob(4)), ('t2', 1, 0.8, zeroblob(4));");
+  // A live session routed through the stack → lora ta=0 is a real failure here.
+  fs.mkdirSync(path.join(d, '.claude-flow', 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(d, '.claude-flow', 'sessions', 'session-1.json'), '{"endedAt":"2026-07-18T00:00:00Z"}');
   fs.writeFileSync(path.join(d, '.agentic-qe', 'config.yaml'),
     'learning:\n  hnswConfig:\n    M: 8\n    efConstruction: 100\n');
   fs.writeFileSync(path.join(d, '.swarm', 'lora-weights.json'),
@@ -170,16 +179,74 @@ describe('verify-learning: #2 reads agentdb.db, not .swarm', () => {
     fs.rmSync(d, { recursive: true, force: true });
   });
 
-  it('HOLLOW (points at harvest) when agentdb.db is absent but flat activity exists — .swarm episodes are NOT counted', () => {
+  it('HOLLOW (points at harvest) when agentdb.db is absent but harvestable experiences exist — .swarm episodes are NOT counted', () => {
     const d = mkTarget(); base(d);
     // Put episodes in the WRONG store (.swarm/memory.db) — must be IGNORED for #2.
     spawnSync('sqlite3', [path.join(d, '.swarm', 'memory.db'),
       'CREATE TABLE episodes(id INTEGER); INSERT INTO episodes VALUES (1),(2);'], { encoding: 'utf8' });
+    // Eligible harvest input exists → the empty canonical store is a real defect.
+    sqlite(path.join(d, '.agentic-qe', 'memory.db'),
+      'CREATE TABLE captured_experiences(task TEXT, success INTEGER, quality REAL, embedding BLOB);' +
+      "INSERT INTO captured_experiences VALUES ('t', 1, 0.95, zeroblob(4));");
     // No agentdb.db created → the canonical reflexion store is genuinely empty.
     const r = runVerify(d);
     expect(r.stdout).toMatch(/reflexion store HOLLOW.*ruflo-kit harvest/);
     expect(r.status).toBe(1);
     fs.rmSync(d, { recursive: true, force: true });
+  });
+});
+
+// Fresh post-setup target (first fresh-target e2e, 2026-07-18): the kit's own
+// init/pretrain seeds flat memory_entries and neural-train writes lora updates,
+// but NO session has captured experiences or routed through the adapter yet.
+// That state is "primed", NOT hollow — setup must be able to PROVE it.
+describe('verify-learning: fresh post-setup target is primed, not hollow', () => {
+  let d;
+  beforeAll(() => {
+    d = mkTarget();
+    sqlite(path.join(d, '.swarm', 'memory.db'),
+      'CREATE TABLE memory_entries(id INTEGER); INSERT INTO memory_entries VALUES (1),(2),(3),(4),(5);' +
+      'CREATE TABLE graph_edges(id INTEGER); INSERT INTO graph_edges VALUES (1);');
+    sqlite(path.join(d, '.agentic-qe', 'memory.db'),
+      'CREATE TABLE vectors(dimensions INTEGER, embedding BLOB); INSERT INTO vectors VALUES (384, zeroblob(1536));' +
+      'CREATE TABLE sona_patterns(id INTEGER); INSERT INTO sona_patterns VALUES (1);' +
+      'CREATE TABLE routing_outcomes(id INTEGER); INSERT INTO routing_outcomes VALUES (1);' +
+      // Experience table exists but has nothing harvest-eligible yet.
+      'CREATE TABLE captured_experiences(task TEXT, success INTEGER, quality REAL, embedding BLOB);' +
+      "INSERT INTO captured_experiences VALUES ('low-quality', 1, 0.2, zeroblob(4)), ('failed', 0, 0.9, zeroblob(4));");
+    fs.writeFileSync(path.join(d, '.agentic-qe', 'config.yaml'), 'learning:\n  hnswConfig:\n    useNativeHNSW: true\n');
+    // Bootstrap neural-train wrote updates; the adapter was never applied — and
+    // there are no session records, so this must NOT be called a JS fallback.
+    fs.writeFileSync(path.join(d, '.swarm', 'lora-weights.json'),
+      JSON.stringify({ stats: { totalUpdates: 200, totalAdaptations: 0 } }));
+  });
+  afterAll(() => fs.rmSync(d, { recursive: true, force: true }));
+
+  it('exits 0 with no FAILs (proof P10 maps live|partial → PASS)', () => {
+    const r = runVerify(d, ['--json']);
+    expect(r.status).toBe(0);
+    const j = parseJson(r.stdout);
+    expect(j.verdict).not.toBe('hollow');
+    expect(j.fail).toBe(0);
+  });
+
+  it('names the primed states honestly (no false JS-FALLBACK / HOLLOW claims)', () => {
+    const r = runVerify(d);
+    expect(r.stdout).toMatch(/reflexion store not yet populated/);
+    expect(r.stdout).toMatch(/lora trainer primed/);
+    expect(r.stdout).not.toMatch(/JS FALLBACK/);
+  });
+
+  it('flips to HOLLOW the moment a session captures an eligible experience that is never harvested (embedding-less rows count — HARVEST-VECLESS-V1)', () => {
+    // aqe 3.12.2 captures experiences with embedding=NULL; harvest's reflexion
+    // sink consumes them anyway, so they are harvestable and must arm the tripwire.
+    sqlite(path.join(d, '.agentic-qe', 'memory.db'),
+      "INSERT INTO captured_experiences VALUES ('real work', 1, 0.9, NULL);");
+    fs.mkdirSync(path.join(d, '.claude-flow', 'sessions'), { recursive: true });
+    fs.writeFileSync(path.join(d, '.claude-flow', 'sessions', 'session-9.json'), '{}');
+    const r = runVerify(d, ['--json']);
+    expect(r.status).toBe(1);
+    expect(parseJson(r.stdout).verdict).toBe('hollow');
   });
 });
 

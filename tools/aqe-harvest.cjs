@@ -43,9 +43,17 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
     process.stdout.write(JSON.stringify({ trained: 0, skills: 0, episodes: 0, note: 'no captured_experiences table (fresh AQE store — nothing to harvest)' }) + '\n');
     return;
   }
+  // HARVEST-VECLESS-V1: aqe 3.12.2's capture hook stores experiences WITHOUT
+  // embeddings (observed on the first fresh-target e2e: 5 real edit experiences,
+  // all embedding-NULL). Sink B (reflexion.storeEpisode) needs no vector — the
+  // task/output/reward/success columns are complete real data — so requiring an
+  // embedding here silently discarded every session experience. Embedding-less
+  // rows now harvest to Sink B only; Sink A keeps its per-row vector guard (no
+  // fabricated training vectors). verify-learning probe #2 mirrors this filter —
+  // keep the two byte-identical.
   const rows = db.prepare(
     'SELECT rowid, id, task, agent, domain, success, quality, result_json, embedding ' +
-    'FROM captured_experiences WHERE success=1 AND quality>=0.7 AND embedding IS NOT NULL ORDER BY rowid'
+    'FROM captured_experiences WHERE success=1 AND quality>=0.7 ORDER BY rowid'
   ).all();
   db.close();
   const fresh = rows.filter(r => !done.has(r.id));
