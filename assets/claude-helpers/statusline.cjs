@@ -32,6 +32,15 @@ const CONFIG = {
 
 const CWD = process.cwd();
 
+// DAEMON-AUTOSTART-3-V1: ruflo >=3.32 auto-spawns a detached background daemon
+// on EVERY CLI invocation (services/daemon-autostart.js via index.js) — and this
+// statusline shells out to `ruflo hooks …` on a 5-second refresh, making the
+// statusline itself a daemon-resurrection channel (observed: 12 daemons, one
+// per cwd ever rendered, incl. test fixtures). The daemon is billed-risk and
+// opt-in by project policy. Children inherit env, so pinning here gates every
+// exec site below. Respects an explicit operator override.
+if (process.env.RUFLO_DAEMON_AUTOSTART === undefined) process.env.RUFLO_DAEMON_AUTOSTART = '0';
+
 // ─── Delegation cache ───────────────────────────────────────────
 // Cache the CLI JSON result for 10s so rapid prompt re-renders
 // (e.g. every keypress in some shells) don't re-invoke npx each time.
