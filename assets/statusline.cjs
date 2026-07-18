@@ -32,6 +32,26 @@ const CONFIG = {
 
 const CWD = process.cwd();
 
+// DAEMON-AUTOSTART-3-V1: ruflo >=3.32 auto-spawns a detached background daemon
+// on EVERY CLI invocation (services/daemon-autostart.js via index.js) — and this
+// statusline shells out to `ruflo hooks …` on a 5-second refresh, making the
+// statusline itself a daemon-resurrection channel (observed: 12 daemons, one
+// per cwd ever rendered, incl. test fixtures). The daemon is billed-risk and
+// opt-in by project policy. Children inherit env, so pinning here gates every
+// exec site below. Respects an explicit operator override.
+if (process.env.RUFLO_DAEMON_AUTOSTART === undefined) process.env.RUFLO_DAEMON_AUTOSTART = '0';
+
+// TRUTH-SL-V1: every displayed value is re-derivable from disk ("never assume,
+// always prove"). The audit (docs/STATUSLINE-AUDIT-2026-07-18.md) graded ~40 chips
+// and found 8 cosmetic / 2 free-running-counter / 4 stale values sourced from
+// upstream `ruflo hooks statusline --json` and kit bucket-labels. This file now
+// overlays those chips with measured store liveness, a real swarm registry
+// (.claude-flow/swarm/swarm-state.json), stored episode/pattern counts, an indexed
+// vector count (no fabricated Nx speedup), real test-case counts, and a real model
+// id — deleting the intelligence-stats CLI exec (a counter source AND a
+// daemon-spawn channel). Each override carries a `// TRUTH-SL-V1:` provenance note.
+
+
 // ─── Delegation cache ───────────────────────────────────────────
 // Cache the CLI JSON result for 10s so rapid prompt re-renders
 // (e.g. every keypress in some shells) don't re-invoke npx each time.
@@ -63,13 +83,17 @@ function writeCache(data) {
  * and only counted ADRs in v3/implementation/adrs/ (missed v3/docs/adr/).
  */
 // AQE310-REALIGN-V1: overlay AgentDB/MCP/hooks blocks that `ruflo hooks statusline --json` omits.
+// TRUTH-SL-V1: .timeout 1500 busy-wait — a LIVE writer (aqe-mcp mid-write)
+// holds transient locks; without the wait a read fails and the chip renders a
+// confident-looking 0 (observed by the x2 re-audit). Locks are ms-scale; a
+// short busy-wait returns the true count instead of a false zero.
 function _ra_count(db, sql) {
   if (!fs.existsSync(db)) return 0;
-  try { const o = execFileSync('sqlite3', ['-readonly', db, sql], { timeout: 2000, stdio: ['ignore','pipe','ignore'] }).toString(); const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0; } catch (e) { return 0; }
+  try { const o = execFileSync('sqlite3', ['-cmd', '.timeout 1500', '-readonly', db, sql], { timeout: 4000, stdio: ['ignore','pipe','ignore'] }).toString(); const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0; } catch (e) { return 0; }
 }
 function _ra_tbl(db, t) {
   if (!fs.existsSync(db)) return false;
-  try { return execFileSync('sqlite3', ['-readonly', db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='" + t + "' LIMIT 1;"], { timeout: 2000, stdio: ['ignore','pipe','ignore'] }).toString().trim() === '1'; } catch (e) { return false; }
+  try { return execFileSync('sqlite3', ['-cmd', '.timeout 1500', '-readonly', db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='" + t + "' LIMIT 1;"], { timeout: 4000, stdio: ['ignore','pipe','ignore'] }).toString().trim() === '1'; } catch (e) { return false; }
 }
 function _ra_dbkb(db) {
   let kb = 0;
@@ -79,43 +103,107 @@ function _ra_dbkb(db) {
   return kb;
 }
 
-function _ra_intelligence() {
-  // RUFLO-INTEL-V2: 🧠 is a REAL ruflo-only learning score — NOT ruflo's hardcoded
-  // Routing Accuracy (0.82) or Avg Quality (0.75), which are fixed constants. We use
-  // the trained micro-LoRA magnitude (sum|B| of .swarm/lora-weights.json — 0 until real
-  // training lands, grows with on-device learning) plus real trajectory/pattern counts.
-  let traj = 0, patterns = 0, deltaNorm = 0;
-  function _pick(raw, label) {
-    const i = raw.indexOf(label);
-    if (i === -1) return 0;
-    const seg = raw.slice(i + label.length, i + label.length + 40).replace(/[^0-9.]/g, ' ').trim().split(' ')[0];
-    const v = parseFloat(seg);
-    return Number.isFinite(v) ? v : 0;
-  }
+// TRUTH-SL-V1: liveness of the 5 real learning stores (replaces the cosmetic
+// "5/5 domains" = floor(memory.db_KB/2) bucket). A store counts as live when its
+// file is present AND non-empty (dbs: size>0; lora: a trained B vector; routing:
+// a real rolling window, not just an empty scaffold). detail[] carries per-store
+// truth so tests / dashboard can prove each one.
+function _ra_stores() {
+  const detail = [];
+  function statSize(rel) { try { return fs.statSync(path.join(CWD, rel)).size; } catch (e) { return -1; } }
+  function push(name, ok, size) { detail.push({ name: name, ok: ok, sizeKB: size > 0 ? Math.floor(size / 1024) : 0 }); }
+  const swMem = statSize('.swarm/memory.db'); push('.swarm/memory.db', swMem > 0, swMem);
+  const adb = statSize('agentdb.db'); push('agentdb.db', adb > 0, adb);
+  const aqe = statSize('.agentic-qe/memory.db'); push('.agentic-qe/memory.db', aqe > 0, aqe);
+  // lora is "live" only when a trained B vector exists (empty scaffold => not live)
+  let loraOk = false, loraSize = statSize('.swarm/lora-weights.json');
   try {
-    const raw = require('child_process').execSync('ruflo hooks intelligence stats 2>/dev/null', { timeout: 5000, stdio: ['ignore','pipe','ignore'] }).toString();
-    traj = Math.round(_pick(raw, 'Trajectories'));
-    patterns = Math.round(_pick(raw, 'Patterns Learned'));
+    const w = JSON.parse(fs.readFileSync(path.join(CWD, '.swarm', 'lora-weights.json'), 'utf-8'));
+    const B = (w.weights && w.weights.B) || w.B || [];
+    loraOk = Array.isArray(B) && B.length > 0;
   } catch (e) {}
-  if (traj === 0 && patterns === 0) {
-    try {
-      const j = JSON.parse(fs.readFileSync(path.join(CWD, '.claude-flow', 'neural', 'stats.json'), 'utf-8'));
-      traj = j.trajectoriesRecorded || 0; patterns = j.patternsLearned || 0;
-    } catch (e) {}
+  push('.swarm/lora-weights.json', loraOk, loraSize);
+  // routing-outcomes: a real rolling window carries >100 bytes; an empty [] does not
+  const roSize = statSize('.claude-flow/routing-outcomes.json'); push('.claude-flow/routing-outcomes.json', roSize > 100, roSize);
+  const live = detail.filter(function (d) { return d.ok; }).length;
+  return { live: live, total: 5, detail: detail };
+}
+
+// TRUTH-SL-V1: real swarm registry (replaces the `◉ N/15` produced by
+// `ps aux | grep -c agentic-flow`, which counted unrelated processes incl. the
+// audit's own grep). Reads .claude-flow/swarm/swarm-state.json; an entry is
+// genuinely running only when status==='running' AND its pid is alive
+// (process.kill(pid,0)) AND updatedAt is within 24h (guards pid reuse). Absent
+// file => null so the renderer can say "no registry".
+function _ra_swarmreg() {
+  let s;
+  try { s = JSON.parse(fs.readFileSync(path.join(CWD, '.claude-flow', 'swarm', 'swarm-state.json'), 'utf-8')); }
+  catch (e) { return null; }
+  const swarms = (s && s.swarms && typeof s.swarms === 'object') ? Object.values(s.swarms) : [];
+  const now = Date.now();
+  const DAY = 24 * 3600 * 1000;
+  const running = [];
+  let terminated = 0, lastUpdatedAt = 0;
+  for (const sw of swarms) {
+    if (!sw || typeof sw !== 'object') continue;
+    const upd = sw.updatedAt ? new Date(sw.updatedAt).getTime() : 0;
+    if (upd > lastUpdatedAt) lastUpdatedAt = upd;
+    if (sw.status === 'terminated') terminated++;
+    if (sw.status !== 'running') continue;
+    let alive = false;
+    try { process.kill(sw.pid, 0); alive = true; } catch (e) {}
+    if (!alive) continue;
+    if (!(upd > 0 && (now - upd) < DAY)) continue;
+    running.push({ id: sw.swarmId, agents: Array.isArray(sw.agents) ? sw.agents.length : 0, maxAgents: sw.maxAgents || 0, pid: sw.pid });
   }
+  return { running: running, total: swarms.length, terminated: terminated, lastUpdatedAt: lastUpdatedAt || null };
+}
+
+// TRUTH-SL-V1: real completed-session count (replaces upstream sessionsCompleted =
+// floor(patternsLearned/10) = db-size/20). Counts session-*.json files in
+// .claude-flow/sessions; absent dir => 0.
+function _ra_sessions() {
+  try {
+    const dir = path.join(CWD, '.claude-flow', 'sessions');
+    return fs.readdirSync(dir).filter(function (n) { return /^session-.*\.json$/.test(n); }).length;
+  } catch (e) { return 0; }
+}
+
+// TRUTH-SL-V1: 🧠 composite from measured, saturating signals only. DELETED the
+// former intelligence-stats CLI exec — it was both a free-running
+// event-counter source (SONA showed "traj" that were really events, stored reality
+// far fewer episodes) AND a daemon-resurrection channel (every exec spawns the billed
+// daemon). Inputs now: storedEpisodes (agentdb + .swarm episodes), storedPatterns
+// (neural/patterns.json + .swarm pattern_embeddings), deltaNorm (Σ|B| of the trained
+// LoRA), plus the neural/stats.json event counters DEMOTED to a dim `ev` chip
+// (never labeled traj). Score dominated by trained-LoRA magnitude; caller supplies
+// stored counts so no sqlite call is duplicated.
+function _ra_intelligence(opts) {
+  opts = opts || {};
+  const storedEpisodes = opts.storedEpisodes || 0;
+  const storedPatterns = opts.storedPatterns || 0;
+  let deltaNorm = 0;
   try {
     const w = JSON.parse(fs.readFileSync(path.join(CWD, '.swarm', 'lora-weights.json'), 'utf-8'));
     const B = (w.weights && w.weights.B) || w.B || [];
     for (let i = 0; i < B.length; i++) deltaNorm += Math.abs(B[i]);
   } catch (e) {}
-  // bounded 0-99 score from real signals; trained-LoRA delta dominates (saturating),
-  // trajectory + pattern maturity add the rest. Moves with genuine learning activity.
+  let events = 0, eventPatterns = 0;
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(CWD, '.claude-flow', 'neural', 'stats.json'), 'utf-8'));
+    events = j.trajectoriesRecorded || 0; eventPatterns = j.patternsLearned || 0;
+  } catch (e) {}
   const trainedPct = deltaNorm > 0 ? 55 * (1 - Math.exp(-deltaNorm)) : 0;
-  const trajPct = 30 * Math.min(1, traj / 500);
-  const patPct = 14 * Math.min(1, patterns / 50);
-  const pct = Math.min(99, Math.round(trainedPct + trajPct + patPct));
-  let tier = 0; for (const t of [50, 150, 350, 700, 1500]) { if (traj >= t) tier++; }
-  return { pct: pct, traj: traj, patterns: patterns, deltaNorm: deltaNorm, tier: tier };
+  const epPct = 30 * Math.min(1, storedEpisodes / 1000);
+  const patPct = 14 * Math.min(1, storedPatterns / 50);
+  const pct = Math.min(99, Math.round(trainedPct + epPct + patPct));
+  let tier = 0; for (const t of [50, 150, 350, 700, 1500]) { if (storedEpisodes >= t) tier++; }
+  return {
+    pct: pct, storedEpisodes: storedEpisodes, storedPatterns: storedPatterns,
+    deltaNorm: deltaNorm, events: events, eventPatterns: eventPatterns, tier: tier,
+    // legacy keys for JSON compat — now point at STORED values, never the counters
+    traj: storedEpisodes, patterns: storedPatterns,
+  };
 }
 function _ra_agentdb() {
   // AGENTDB-SPLIT-V1: 📊 AgentDB chip = the standalone agentdb.db store (the file
@@ -126,9 +214,12 @@ function _ra_agentdb() {
     if (_ra_tbl(db, t)) v += _ra_count(db, 'SELECT COUNT(*) FROM ' + t);
   }
   let kb = _ra_dbkb(db);
-  let hnsw = false;
-  if (_ra_tbl(db, 'vector_indexes')) hnsw = _ra_count(db, 'SELECT COALESCE(SUM(total_vectors),0) FROM vector_indexes') > 0;
-  return { vectorCount: v, dbSizeKB: Math.floor(kb), hasHnsw: hnsw };
+  // TRUTH-SL-V1: expose the indexed-vector sum (0 here — agentdb.db has no
+  // vector_indexes table) and the stored episode count (feeds storedEpisodes).
+  let indexedVectors = 0;
+  if (_ra_tbl(db, 'vector_indexes')) indexedVectors = _ra_count(db, 'SELECT COALESCE(SUM(total_vectors),0) FROM vector_indexes');
+  const episodes = _ra_tbl(db, 'episodes') ? _ra_count(db, 'SELECT COUNT(*) FROM episodes') : 0;
+  return { vectorCount: v, dbSizeKB: Math.floor(kb), hasHnsw: indexedVectors > 0, indexedVectors: indexedVectors, episodes: episodes };
 }
 function _ra_swarmdb() {
   // 🗃️ Swarm DB chip = ruflo's claude-flow memory store (.swarm/memory.db).
@@ -136,7 +227,8 @@ function _ra_swarmdb() {
   // label so neither chip impersonates the other.
   const db = path.join(CWD, '.swarm', 'memory.db');
   let v = _ra_count(db, 'SELECT COUNT(*) FROM memory_entries WHERE embedding IS NOT NULL');
-  if (_ra_tbl(db, 'pattern_embeddings')) v += _ra_count(db, 'SELECT COUNT(*) FROM pattern_embeddings');
+  const patternEmbeddings = _ra_tbl(db, 'pattern_embeddings') ? _ra_count(db, 'SELECT COUNT(*) FROM pattern_embeddings') : 0;
+  v += patternEmbeddings;
   if (_ra_tbl(db, 'learning_state_embeddings')) v += _ra_count(db, 'SELECT COUNT(*) FROM learning_state_embeddings');
   if (_ra_tbl(db, 'patterns')) v += _ra_count(db, 'SELECT COUNT(*) FROM patterns WHERE embedding IS NOT NULL');
   let kb = _ra_dbkb(db);
@@ -145,9 +237,14 @@ function _ra_swarmdb() {
   // (a real hnsw.index file, or vector_indexes with SUM(total_vectors)>0). ruflo's
   // backend is "sql.js + HNSW"-capable, but empty index defs (total_vectors=0) are
   // NOT a populated index, so we do not fake ⚡ off mere row-existence.
-  let hnsw = fs.existsSync(path.join(CWD, '.swarm', 'hnsw.index'));
-  if (!hnsw && _ra_tbl(db, 'vector_indexes')) hnsw = _ra_count(db, 'SELECT COALESCE(SUM(total_vectors),0) FROM vector_indexes') > 0;
-  return { vectorCount: v, dbSizeKB: Math.floor(kb), hasHnsw: hnsw };
+  // TRUTH-SL-V1: expose the indexed-vector sum (drives the Learning-row `⚡ N indexed`
+  // chip in place of the fabricated speedup label), plus the stored episode + standalone
+  // pattern_embeddings counts (feed storedEpisodes / storedPatterns).
+  let indexedVectors = 0;
+  if (_ra_tbl(db, 'vector_indexes')) indexedVectors = _ra_count(db, 'SELECT COALESCE(SUM(total_vectors),0) FROM vector_indexes');
+  let hnsw = fs.existsSync(path.join(CWD, '.swarm', 'hnsw.index')) || indexedVectors > 0;
+  const episodes = _ra_tbl(db, 'episodes') ? _ra_count(db, 'SELECT COUNT(*) FROM episodes') : 0;
+  return { vectorCount: v, dbSizeKB: Math.floor(kb), hasHnsw: hnsw, indexedVectors: indexedVectors, episodes: episodes, patternEmbeddings: patternEmbeddings };
 }
 // BRAIN-STATUSLINE-V1: 🧿 Ruflo Brain chip — the MCP-only ruvnet-brain knowledge
 // base (BRAIN-MCP-V1, Patch 53). Cheap filesystem-only probe: top-level readdir
@@ -183,16 +280,27 @@ function _ra_brain() {
   return { registered, kbPresent, repos, sizeKB: Math.floor(sizeKB), readerOk };
 }
 function _ra_aqevec() {
+  // TRUTH-SL-V1: split the vec sum so the footer stops double-counting the traj
+  // rows (the row already shows them as `N traj`). `vectors` = non-traj embeddings
+  // only; `vectorsTotal` = incl. qe_trajectories. And ⚡ is lit ONLY on a real index
+  // artifact (a non-empty .agentic-qe/data/hnsw dir, or a vector_indexes table with
+  // SUM>0) — NOT on mere row-existence (`v>0`), which the audit flagged as cosmetic
+  // (hnsw dir is empty here, so ⚡ stays unlit).
   const db = path.join(CWD, '.agentic-qe', 'memory.db');
-  let v = 0;
-  if (_ra_tbl(db, 'embeddings')) v += _ra_count(db, 'SELECT COUNT(*) FROM embeddings');
-  if (_ra_tbl(db, 'qe_pattern_embeddings')) v += _ra_count(db, 'SELECT COUNT(*) FROM qe_pattern_embeddings');
-  for (const t of ['captured_experiences','vectors','qe_trajectories','concept_nodes','pattern_versions','hypergraph_nodes']) {
-    if (_ra_tbl(db, t)) v += _ra_count(db, 'SELECT COUNT(*) FROM ' + t + ' WHERE embedding IS NOT NULL');
+  let vectors = 0;
+  if (_ra_tbl(db, 'embeddings')) vectors += _ra_count(db, 'SELECT COUNT(*) FROM embeddings');
+  if (_ra_tbl(db, 'qe_pattern_embeddings')) vectors += _ra_count(db, 'SELECT COUNT(*) FROM qe_pattern_embeddings');
+  for (const t of ['captured_experiences','vectors','concept_nodes','pattern_versions','hypergraph_nodes']) {
+    if (_ra_tbl(db, t)) vectors += _ra_count(db, 'SELECT COUNT(*) FROM ' + t + ' WHERE embedding IS NOT NULL');
   }
-  if (_ra_tbl(db, 'sona_patterns')) v += _ra_count(db, 'SELECT COUNT(*) FROM sona_patterns WHERE state_embedding IS NOT NULL');
+  if (_ra_tbl(db, 'sona_patterns')) vectors += _ra_count(db, 'SELECT COUNT(*) FROM sona_patterns WHERE state_embedding IS NOT NULL');
+  const trajVecs = _ra_tbl(db, 'qe_trajectories') ? _ra_count(db, 'SELECT COUNT(*) FROM qe_trajectories WHERE embedding IS NOT NULL') : 0;
+  const vectorsTotal = vectors + trajVecs;
+  let hasIndex = false;
+  try { hasIndex = fs.readdirSync(path.join(CWD, '.agentic-qe', 'data', 'hnsw')).length > 0; } catch (e) {}
+  if (!hasIndex && _ra_tbl(db, 'vector_indexes')) hasIndex = _ra_count(db, 'SELECT COALESCE(SUM(total_vectors),0) FROM vector_indexes') > 0;
   let kb = _ra_dbkb(db);
-  return { vectors: v, dbSizeKB: Math.floor(kb), hasHnsw: v > 0 };
+  return { vectors: vectors, vectorsTotal: vectorsTotal, dbSizeKB: Math.floor(kb), hasIndex: hasIndex, hasHnsw: hasIndex };
 }
 function _ra_mcp() {
   const settings = readJSON(path.join(CWD, '.claude', 'settings.json')) || {};
@@ -210,18 +318,105 @@ function _ra_hooks() {
   return { enabled: h, total: h };
 }
 
+// TRUTH-SL-V1: single source for the disk-truth overlay. Applied over whatever base
+// object we have (upstream CLI JSON, a cached copy, or the local fallback) so every
+// cosmetic/counter field the audit flagged is replaced by a measured value and the
+// additive truth keys are always present. Runs on EVERY render (both cache hit and
+// miss): the probes are cheap readonly sqlite/stat reads, and the whole point of the
+// contract is freshness — the 10s cache only spares the expensive `ruflo hooks
+// statusline` exec, never the local truth. Every field is guarded (try per probe) so
+// a single failing store degrades one chip, not the line.
+function applyTruthOverlay(data) {
+  data = data || {};
+  // Cheap local overlays (ADRs, real test cases, brain, MCP, hooks).
+  try { data.adrs = getLocalADRCount(); } catch (e) {}
+  try { data.tests = getLocalTestCount(); } catch (e) {}
+  try { data.brain = _ra_brain(); } catch (e) {}
+  try { data.integration = Object.assign({}, data.integration, { mcpServers: _ra_mcp() }); } catch (e) {}
+  try { data.hooks = _ra_hooks(); } catch (e) {}
+
+  // Store liveness → replaces "5/5 domains" / dddProgress (both were memory.db-size
+  // buckets). domainsCompleted/totalDomains/dddProgress become the honest N-of-5.
+  let stores = null;
+  try { stores = _ra_stores(); } catch (e) {}
+  if (stores) {
+    data.stores = stores;
+    data.v3Progress = Object.assign({}, data.v3Progress, {
+      domainsCompleted: stores.live,
+      totalDomains: 5,
+      dddProgress: Math.round(100 * stores.live / 5),
+    });
+    const storesKB = stores.detail.reduce(function (a, d) { return a + (d.sizeKB || 0); }, 0);
+    data.system = Object.assign({}, data.system, { memoryMB: Math.round(storesKB / 1024), storesMB: Math.round(storesKB / 1024) });
+  }
+
+  // Extended DB probes (episodes + indexedVectors folded in).
+  let agentdb = null, swarmdb = null;
+  try { agentdb = _ra_agentdb(); data.agentdb = agentdb; } catch (e) {}
+  try { swarmdb = _ra_swarmdb(); data.swarmdb = swarmdb; } catch (e) {}
+
+  // Intelligence 🧠 + SONA — driven by STORED counts, no exec, no counters.
+  const storedEpisodes = (agentdb ? agentdb.episodes : 0) + (swarmdb ? swarmdb.episodes : 0);
+  let neuralPatterns = 0;
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(CWD, '.claude-flow', 'neural', 'patterns.json'), 'utf-8'));
+    neuralPatterns = Array.isArray(p) ? p.length : Object.keys(p).length;
+  } catch (e) {}
+  const storedPatterns = neuralPatterns + (swarmdb ? (swarmdb.patternEmbeddings || 0) : 0);
+  try {
+    const ri = _ra_intelligence({ storedEpisodes: storedEpisodes, storedPatterns: storedPatterns });
+    data.system = Object.assign({}, data.system, { ruflo: ri });
+    if (ri.pct > 0) data.system.intelligencePct = ri.pct;
+  } catch (e) {}
+
+  // Sessions + patternsLearned → real records / stored counts.
+  try {
+    data.v3Progress = Object.assign({}, data.v3Progress, {
+      sessionsCompleted: _ra_sessions(),
+      patternsLearned: storedPatterns,
+    });
+  } catch (e) {}
+
+  // Swarm registry → replaces the ps|grep `◉ N/15`.
+  let registry = null;
+  try { registry = _ra_swarmreg(); } catch (e) {}
+  const running = (registry && Array.isArray(registry.running)) ? registry.running : [];
+  data.swarm = Object.assign({}, data.swarm, {
+    registry: registry,
+    activeAgents: running.length > 0 ? running[0].agents : 0,
+    maxAgents: running.length > 0 ? (running[0].maxAgents || CONFIG.maxAgents) : (data.swarm && data.swarm.maxAgents ? data.swarm.maxAgents : CONFIG.maxAgents),
+    coordinationActive: running.length > 0,
+  });
+
+  // AQE footer stats wired into JSON (were render-only).
+  try {
+    const aqe = getAQEStats();
+    if (aqe.available) {
+      data.aqe = {
+        patterns: aqe.patterns, trajectories: aqe.trajectories,
+        vectors: aqe.vectors, vectorsTotal: aqe.vectorsTotal,
+        hasIndex: aqe.hasIndex, dbSizeKB: aqe.dbSizeKB,
+      };
+    }
+  } catch (e) {}
+
+  // Self-improvement snapshot into JSON.
+  try {
+    const si = getSelfImprove();
+    if (si.available) {
+      data.selfImprove = {
+        accLast: si.accLast, rewardDistinct: si.rewardDistinct,
+        qSpread: si.qSpread, ageDays: (typeof si.ageDays === 'number') ? si.ageDays : null,
+      };
+    }
+  } catch (e) {}
+
+  return data;
+}
+
 function getStatuslineData() {
   const cached = readCache();
-  if (cached) {
-    // Backfill cheap local-only fields an older cache writer may have omitted,
-    // so the Tests / ADRs chips never show a stale 0 across a version upgrade
-    // (the CLI JSON omits test counts entirely). No-op once a current writer has
-    // cached them; both are bounded local dir-walks, no network.
-    if (!cached.tests || cached.tests.testFiles === undefined) { try { cached.tests = getLocalTestCount(); } catch (e) {} }
-    if (!cached.adrs || cached.adrs.count === undefined) { try { cached.adrs = getLocalADRCount(); } catch (e) {} }
-    if (!cached.brain) { try { cached.brain = _ra_brain(); } catch (e) {} }
-    return cached;
-  }
+  if (cached) return applyTruthOverlay(cached);
 
   try {
     const raw = execSync(
@@ -232,23 +427,13 @@ function getStatuslineData() {
     const jsonStart = raw.indexOf('{');
     if (jsonStart === -1) throw new Error('no JSON in CLI output');
     const data = JSON.parse(raw.slice(jsonStart));
-    // Overlay real ADR count from both local directories (fast, no network).
-    data.adrs = getLocalADRCount();
-    // Overlay real test-file count — the CLI JSON omits it, so without this the
-    // Tests chip is a permanent 0 even on repos with hundreds of tests.
-    try { data.tests = getLocalTestCount(); } catch (e) {}
-    try { data.agentdb = _ra_agentdb(); } catch (e) {}
-    try { data.swarmdb = _ra_swarmdb(); } catch (e) {}
-    try { data.brain = _ra_brain(); } catch (e) {}
-    try { const ri = _ra_intelligence(); data.system = Object.assign({}, data.system, { ruflo: ri }); if (ri.pct > 0) data.system.intelligencePct = ri.pct; } catch (e) {}
-    try { data.integration = Object.assign({}, data.integration, { mcpServers: _ra_mcp() }); } catch (e) {}
-    try { if (!data.hooks || data.hooks.total === undefined) data.hooks = _ra_hooks(); } catch (e) {}
+    // Cache the RAW CLI base only — the truth overlay is cheap and must be re-derived
+    // fresh each render, so it is never frozen into the 10s cache.
     writeCache(data);
-    return data;
+    return applyTruthOverlay(data);
   } catch { /* CLI unavailable or timed out */ }
 
-  // Fallback: use local file probes only (will be less accurate, but non-zero
-  // when CLI is available and accurate when it's not).
+  // Fallback: local file probes only (accurate when the CLI is unavailable).
   return buildLocalFallback();
 }
 
@@ -283,50 +468,79 @@ function getLocalADRCount() {
 // previous code (countTests only in the fallback) always showed 0 whenever the
 // CLI succeeded, even with hundreds of tests on disk (monorepos, .spec.ts, etc).
 function getLocalTestCount() {
-  let testFiles = 0;
-  function countTests(dir, depth) {
+  // TRUTH-SL-V1: real `it()`/`test()` case count (replaces the `testFiles * 4`
+  // multiplier the audit flagged — it understated the ~806-case suite 4.3×). The
+  // walk collects matched files' `path:mtimeMs:size` fingerprints; an md5 of the
+  // sorted list keys a tmpdir cache, so the files are only re-read (regex-scanned)
+  // when the suite actually changes — amortized ~0 on the hot render path.
+  const matched = [];
+  function walk(dir, depth) {
     if ((depth || 0) > 5) return;
     try {
       if (!fs.existsSync(dir)) return;
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
         if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
-          countTests(path.join(dir, e.name), (depth || 0) + 1);
+          walk(path.join(dir, e.name), (depth || 0) + 1);
         } else if (e.isFile() && (e.name.includes('.test.') || e.name.includes('.spec.') || e.name.startsWith('test_') || e.name.startsWith('spec_'))) {
-          testFiles++;
+          matched.push(path.join(dir, e.name));
         }
       }
     } catch { /* ignore */ }
   }
   // Cover monorepo layouts (packages/*) in addition to the common roots.
   for (const d of ['tests', 'test', '__tests__', 'src', 'v3', 'packages', 'apps']) {
-    countTests(path.join(CWD, d), 0);
+    walk(path.join(CWD, d), 0);
   }
-  return { testFiles, testCases: testFiles * 4 };
+  const testFiles = matched.length;
+  // Fingerprint the matched set (path + mtime + size) so a code-free render reuses
+  // the cached counts; any add/remove/edit changes the key and forces a recount.
+  const fps = [];
+  for (const f of matched) {
+    try { const st = fs.statSync(f); fps.push(f + ':' + st.mtimeMs + ':' + st.size); } catch (e) {}
+  }
+  fps.sort();
+  const cwdHash = require('crypto').createHash('md5').update(CWD).digest('hex').slice(0, 8);
+  const key = require('crypto').createHash('md5').update(fps.join('\n')).digest('hex');
+  const cacheFile = path.join(os.tmpdir(), 'ruflo-testcases-' + cwdHash + '.json');
+  try {
+    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
+    if (cached && cached.key === key) {
+      return { testFiles: testFiles, testCases: cached.cases, describes: cached.describes, countMethod: 'regex-scan' };
+    }
+  } catch (e) { /* miss */ }
+  let cases = 0, describes = 0;
+  const itRe = /\b(?:it|test)\s*\(/g;
+  const descRe = /\bdescribe\s*\(/g;
+  for (const f of matched) {
+    try {
+      const src = fs.readFileSync(f, 'utf-8');
+      const im = src.match(itRe); if (im) cases += im.length;
+      const dm = src.match(descRe); if (dm) describes += dm.length;
+    } catch (e) {}
+  }
+  try { fs.writeFileSync(cacheFile, JSON.stringify({ key: key, cases: cases, describes: describes }), 'utf-8'); } catch (e) {}
+  return { testFiles: testFiles, testCases: cases, describes: describes, countMethod: 'regex-scan' };
 }
 
-// Minimal local fallback when the CLI is not installed or times out.
-// Returns a structure that matches the CLI JSON schema so the renderer works.
+// Minimal local fallback when the CLI is not installed or times out. Builds a
+// schema-shaped skeleton, then runs the SAME truth overlay so the offline line is
+// as real as the delegated one (TRUTH-SL-V1: no memoryMB=heap, no modelName literal).
 function buildLocalFallback() {
-  const memMB = Math.floor(process.memoryUsage().heapUsed / 1024 / 1024);
-  const adrs = getLocalADRCount();
-  const { testFiles } = getLocalTestCount();
-  let brain = null;
-  try { brain = _ra_brain(); } catch (e) {}
-
-  return {
-    brain,
-    user: { name: 'user', gitBranch: '', modelName: 'Claude Code' },
+  const base = {
+    brain: null,
+    user: { name: 'user', gitBranch: '', modelName: '' },
     v3Progress: { domainsCompleted: 0, totalDomains: 5, dddProgress: 0, patternsLearned: 0, sessionsCompleted: 0 },
     security: { status: 'NONE', cvesFixed: 0, totalCves: 0 },
     swarm: { activeAgents: 0, maxAgents: CONFIG.maxAgents, coordinationActive: false },
-    system: { memoryMB: memMB, contextPct: 0, intelligencePct: 0, subAgents: 0 },
-    adrs,
+    system: { memoryMB: 0, contextPct: 0, intelligencePct: 0, subAgents: 0 },
+    adrs: { count: 0, implemented: 0, compliance: 0 },
     hooks: { enabled: 0, total: 0 },
     agentdb: { vectorCount: 0, dbSizeKB: 0, hasHnsw: false },
     swarmdb: { vectorCount: 0, dbSizeKB: 0, hasHnsw: false },
-    tests: { testFiles, testCases: testFiles * 4 },
+    tests: { testFiles: 0, testCases: 0 },
     lastUpdated: new Date().toISOString(),
   };
+  return applyTruthOverlay(base);
 }
 
 // ANSI colors
@@ -416,44 +630,42 @@ function getGitInfo() {
   return result;
 }
 
-// Detect model name from Claude config (pure file reads, no exec)
-function getModelName() {
+// TRUTH-SL-V1: real model id for stdin-less invocations (replaces the dead
+// hardcoded mapping that emitted a flat 'Opus 4.7'/'Claude Code' literal regardless
+// of the actual model). Reads ~/.claude.json projects[CWD].lastModelUsage, picks the
+// most-recently-used id, and renders its tail (strips the 'claude-' prefix, keeping
+// e.g. 'fable-5', 'opus-4-8[1m]'). Returns '' when nothing is knowable — the render
+// then OMITS the model segment rather than inventing one. Real Claude Code renders
+// pass the true name via stdin display_name, which always wins upstream of this.
+function getModelFallback() {
   try {
     const claudeConfig = readJSON(path.join(os.homedir(), '.claude.json'));
     if (claudeConfig && claudeConfig.projects) {
-      for (const [projectPath, projectConfig] of Object.entries(claudeConfig.projects)) {
+      // Pick the MOST-SPECIFIC (longest) matching project path — both CWD and its
+      // parents can be keys, and a parent entry without lastModelUsage must not
+      // shadow the exact-match repo entry.
+      let bestPath = null;
+      for (const projectPath of Object.keys(claudeConfig.projects)) {
         if (CWD === projectPath || CWD.startsWith(projectPath + '/')) {
-          const usage = projectConfig.lastModelUsage;
-          if (usage) {
-            const ids = Object.keys(usage);
-            if (ids.length > 0) {
-              let modelId = ids[ids.length - 1];
-              let latest = 0;
-              for (const id of ids) {
-                const ts = usage[id] && usage[id].lastUsedAt ? new Date(usage[id].lastUsedAt).getTime() : 0;
-                if (ts > latest) { latest = ts; modelId = id; }
-              }
-              if (modelId.includes('opus')) return 'Opus 4.7';
-              if (modelId.includes('sonnet')) return 'Sonnet 4.6';
-              if (modelId.includes('haiku')) return 'Haiku 4.5';
-              return modelId.split('-').slice(1, 3).join(' ');
-            }
+          if (!bestPath || projectPath.length > bestPath.length) bestPath = projectPath;
+        }
+      }
+      const usage = bestPath ? claudeConfig.projects[bestPath].lastModelUsage : null;
+      if (usage) {
+        const ids = Object.keys(usage);
+        if (ids.length > 0) {
+          let modelId = ids[ids.length - 1];
+          let latest = 0;
+          for (const id of ids) {
+            const ts = usage[id] && usage[id].lastUsedAt ? new Date(usage[id].lastUsedAt).getTime() : 0;
+            if (ts > latest) { latest = ts; modelId = id; }
           }
-          break;
+          return modelId.replace(/^claude-/, '');
         }
       }
     }
   } catch { /* ignore */ }
-
-  // Fallback: settings.json model field
-  const settings = getSettings();
-  if (settings && settings.model) {
-    const m = settings.model;
-    if (m.includes('opus')) return 'Opus 4.7';
-    if (m.includes('sonnet')) return 'Sonnet 4.6';
-    if (m.includes('haiku')) return 'Haiku 4.5';
-  }
-  return 'Claude Code';
+  return '';
 }
 
 // ─── Stdin reader (Claude Code pipes session JSON) ──────────────
@@ -510,7 +722,7 @@ function getCostFromStdin() {
 
 // Read package version from the first package.json we find.
 function getPkgVersion() {
-  let ver = '3.32.2';   // last-known fallback only — live detection below wins
+  let ver = '0.0.0';   // TRUTH-SL-V1: neutral fallback — live detection below always wins
   try {
     const home = os.homedir();
     // live-detect the GLOBAL ruflo (the kit launches from the global binary, per
@@ -573,16 +785,18 @@ function getPluginStatus() {
 function getAQEStats() {
   // self-contained (fix-statusbar runtime backstop): no safeStat/safeExec/getAgentDBStats hard-dep
   const dbPath = path.join(CWD, '.agentic-qe', 'memory.db');
-  if (!fs.existsSync(dbPath)) return { available: false, patterns: 0, trajectories: 0, vectors: 0, dbSizeKB: 0, hasHnsw: false };
+  if (!fs.existsSync(dbPath)) return { available: false, patterns: 0, trajectories: 0, vectors: 0, vectorsTotal: 0, dbSizeKB: 0, hasHnsw: false, hasIndex: false };
   let p = 0, t = 0;
   try {
     const sql = "SELECT (SELECT COUNT(*) FROM qe_patterns WHERE usage_count > 0 OR quality_score > 0 OR name NOT LIKE 'bench-%') || '|' || (SELECT COUNT(*) FROM qe_trajectories);";
     const out = execFileSync('sqlite3', ['-readonly', dbPath, sql], { timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
     const parts = out.split('|').map(n => parseInt(n, 10) || 0); p = parts[0] || 0; t = parts[1] || 0;
   } catch (e) { /* ignore */ }
-  let vec = 0, mb = 0, hnsw = false;
-  try { const av = _ra_aqevec(); vec = av.vectors || 0; mb = av.dbSizeKB || 0; hnsw = !!av.hasHnsw; } catch (e) { /* ignore */ }
-  return { available: true, patterns: p, trajectories: t, vectors: vec, dbSizeKB: mb, hasHnsw: hnsw };
+  // TRUTH-SL-V1: non-traj `vectors` (footer chip) split from `vectorsTotal`, and ⚡
+  // gated on a real index (hasIndex) not row-existence.
+  let vec = 0, vecTotal = 0, mb = 0, idx = false;
+  try { const av = _ra_aqevec(); vec = av.vectors || 0; vecTotal = av.vectorsTotal || 0; mb = av.dbSizeKB || 0; idx = !!av.hasIndex; } catch (e) { /* ignore */ }
+  return { available: true, patterns: p, trajectories: t, vectors: vec, vectorsTotal: vecTotal, dbSizeKB: mb, hasHnsw: idx, hasIndex: idx };
 }
 
 // RUFLO-INTEL-V3: self-IMPROVEMENT snapshot from the precomputed bench history.
@@ -596,6 +810,10 @@ function getSelfImprove() {
   try {
     const p = path.join(CWD, '.claude-flow', 'selfimprove-history.jsonl');
     if (!fs.existsSync(p)) return { available: false };
+    // TRUTH-SL-V1: bench staleness — the SI row was frozen ~7 weeks (audit). ageDays
+    // from the file mtime drives a `bench Nd⚠` chip when the bench hasn't been re-run.
+    let ageDays = null;
+    try { ageDays = (Date.now() - fs.statSync(p).mtimeMs) / 86400000; } catch (e) {}
     const rows = fs.readFileSync(p, 'utf-8').split('\n').map(s => s.trim()).filter(Boolean)
       .map(s => { try { return JSON.parse(s); } catch { return null; } })
       .filter(r => r && typeof r === 'object');
@@ -618,6 +836,7 @@ function getSelfImprove() {
       rewardDistinct: (typeof last.rewardDistinct === 'number') ? last.rewardDistinct : 0,
       rewardConstant: last.rewardConstant === true,
       qSpread: (typeof last.qSpread === 'number') ? last.qSpread : 0,
+      ageDays: ageDays,
     };
   } catch { return { available: false }; }
 }
@@ -625,7 +844,10 @@ function getSelfImprove() {
 function generateStatusline() {
   const d = getStatuslineData();
   const git = getGitInfo();
-  const modelName = getModelFromStdin() || (d.user && d.user.modelName) || 'Claude Code';
+  // TRUTH-SL-V1: real model — stdin display_name (real Claude Code renders), else the
+  // id-tail from ~/.claude.json. NEVER upstream's d.user.modelName literal. Empty =>
+  // the model segment is omitted rather than fabricated.
+  const modelName = getModelFromStdin() || getModelFallback();
   const ctxInfo = getContextFromStdin();
   const costInfo = getCostFromStdin();
   const pkgVersion = getPkgVersion();
@@ -639,12 +861,6 @@ function generateStatusline() {
   const agentdb = d.agentdb || {};
   const tests = d.tests || {};
 
-  const domainsCompleted = progress.domainsCompleted || 0;
-  const totalDomains = progress.totalDomains || 5;
-  const dddProgress = progress.dddProgress || 0;
-  const patternsLearned = progress.patternsLearned || 0;
-  const activeAgents = swarm.activeAgents || 0;
-  const maxAgents = swarm.maxAgents || CONFIG.maxAgents;
   const coordinationActive = swarm.coordinationActive || false;
   const intelligencePct = system.intelligencePct || 0;
   const memoryMB = system.memoryMB || 0;
@@ -655,7 +871,6 @@ function generateStatusline() {
   const adrCount = adrs.count || 0;
   const adrImpl = adrs.implemented || 0;
   const hooksEnabled = hooks.enabled || 0;
-  const hooksTotal = hooks.total || 0;
   const vectorCount = agentdb.vectorCount || 0;
   const hasHnsw = agentdb.hasHnsw || false;
   const dbSizeKB = agentdb.dbSizeKB || 0;
@@ -664,7 +879,12 @@ function generateStatusline() {
   const swHasHnsw = swarmdb.hasHnsw || false;
   const swDbSizeKB = swarmdb.dbSizeKB || 0;
   const testFiles = tests.testFiles || 0;
-  const testCases = tests.testCases || testFiles * 4;
+  const testCases = tests.testCases || 0;
+  // TRUTH-SL-V1 render inputs: store liveness, indexed-vector total, swarm registry.
+  const stores = d.stores || {};
+  const storesLive = (typeof stores.live === 'number') ? stores.live : (progress.domainsCompleted || 0);
+  const indexedVectors = (agentdb.indexedVectors || 0) + (swarmdb.indexedVectors || 0);
+  const registry = swarm.registry; // null when no swarm-state.json
 
   const lines = [];
 
@@ -684,7 +904,7 @@ function generateStatusline() {
     if (git.ahead > 0) header += ' ' + c.brightGreen + '↑' + git.ahead + c.reset;
     if (git.behind > 0) header += ' ' + c.brightRed + '↓' + git.behind + c.reset;
   }
-  header += '  ' + c.dim + '│' + c.reset + '  ' + c.purple + modelName + c.reset;
+  if (modelName) header += '  ' + c.dim + '│' + c.reset + '  ' + c.purple + modelName + c.reset;
   const duration = costInfo ? costInfo.duration : '';
   if (duration) header += '  ' + c.dim + '│' + c.reset + '  ' + c.cyan + '⏱ ' + duration + c.reset;
   if (ctxInfo && ctxInfo.usedPct > 0) {
@@ -699,52 +919,65 @@ function generateStatusline() {
   // Separator
   lines.push(c.dim + '─'.repeat(53) + c.reset);
 
-  // Line 1: DDD Domains
-  const domainsColor = domainsCompleted >= 3 ? c.brightGreen : domainsCompleted > 0 ? c.yellow : c.red;
-  let perfIndicator;
-  const hnswVecs = (hasHnsw ? vectorCount : 0) + (swHasHnsw ? swVectorCount : 0);
-  if (hnswVecs > 0) {
-    const speedup = hnswVecs > 10000 ? '12500x' : hnswVecs > 1000 ? '150x' : '10x';
-    perfIndicator = c.brightGreen + '⚡ HNSW ' + speedup + c.reset;
-  } else if (patternsLearned > 0) {
-    const pk = patternsLearned >= 1000 ? (patternsLearned / 1000).toFixed(1) + 'k' : String(patternsLearned);
-    perfIndicator = c.brightYellow + '📚 ' + pk + ' patterns' + c.reset;
-  } else {
-    perfIndicator = c.dim + '⚡ target: 150x-12500x' + c.reset;
-  }
+  // Line 1: Learning stores + indexed vectors
+  // TRUTH-SL-V1: `N/5 stores` (live count, gauge dots = live) replaces the "5/5
+  // domains" memory.db-size bucket; `⚡ N indexed` = the measured indexed-vector total
+  // (swarmdb + agentdb vector_indexes SUM) replaces the fabricated `HNSW Nx` speedup label.
+  const domainsColor = storesLive >= 3 ? c.brightGreen : storesLive > 0 ? c.yellow : c.red;
+  const perfIndicator = indexedVectors > 0
+    ? c.brightGreen + '⚡ ' + indexedVectors + ' indexed' + c.reset
+    : c.dim + '⚡ no index' + c.reset;
   lines.push(
-    c.brightCyan + '🏗️  Learning' + c.reset + '    ' + progressBar(domainsCompleted, totalDomains) + '  ' +
-    domainsColor + domainsCompleted + c.reset + '/' + c.brightWhite + totalDomains + c.reset + '    ' + perfIndicator
+    c.brightCyan + '🏗️  Learning' + c.reset + '    ' + progressBar(storesLive, 5) + '  ' +
+    domainsColor + storesLive + c.reset + '/' + c.brightWhite + '5' + c.reset + c.dim + ' stores' + c.reset + '    ' + perfIndicator
   );
 
-  // Line 2: Swarm + Hooks + CVE + Memory + Intelligence
-  const swarmInd = swarm.coordinationActive ? c.brightGreen + '\u25C9' + c.reset : c.dim + '\u25CB' + c.reset;
-  const agentsColor = swarm.activeAgents > 0 ? c.brightGreen : c.dim;
+  // Line 2: Swarm registry + Sub + Hooks + CVE + store bytes + Intelligence
+  // TRUTH-SL-V1: registry chip from .claude-flow/swarm/swarm-state.json (running =
+  // status running + pid alive + updatedAt<24h) replaces the `ps|grep` \u25C9 N/15;
+  // `\uD83E\uDE9D N` drops the tautological /N denominator (no per-hook disable exists);
+  // `\uD83D\uDCBE NMB stores` is the real \u03A3 store bytes, not the renderer's heap.
+  const running = (registry && Array.isArray(registry.running)) ? registry.running : [];
+  let swarmChip;
+  if (running.length > 0) {
+    const r0 = running[0];
+    swarmChip = c.brightGreen + '\u25C9 ' + running.length + ' swarm' + c.reset + ' ' + c.brightWhite + r0.agents + '/' + r0.maxAgents + c.reset;
+  } else if (registry) {
+    const h = registry.lastUpdatedAt ? Math.round((Date.now() - registry.lastUpdatedAt) / 3600000) : '?';
+    swarmChip = c.dim + '\u25CB idle (last ' + h + 'h)' + c.reset;
+  } else {
+    swarmChip = c.dim + '\u25CB no registry' + c.reset;
+  }
   const secIcon = security.status === 'CLEAN' ? '\uD83D\uDFE2' : (security.status === 'IN_PROGRESS' || security.status === 'STALE') ? '\uD83D\uDFE1' : (security.status === 'NONE' ? '\u26AA' : '\uD83D\uDD34');
   const secColor = security.status === 'CLEAN' ? c.brightGreen : (security.status === 'IN_PROGRESS' || security.status === 'STALE') ? c.brightYellow : (security.status === 'NONE' ? c.dim : c.brightRed);
   const hooksColor = hooksEnabled > 0 ? c.brightGreen : c.dim;
   const intellColor = system.intelligencePct >= 80 ? c.brightGreen : system.intelligencePct >= 40 ? c.brightYellow : c.dim;
-  const topoTag = swarm.topology ? ' ' + c.dim + swarm.topology.slice(0, 5) + c.reset : '';
   const subColor = system.subAgents > 0 ? c.brightPurple : c.dim;
   const subLabel = system.subAgents > 0 ? 'Sub ' + system.subAgents : 'Sub 0';
 
   lines.push(
-    c.brightYellow + '\uD83E\uDD16 Swarm' + c.reset + '  ' + swarmInd + ' [' + agentsColor + String(swarm.activeAgents).padStart(2) + c.reset + '/' + c.brightWhite + swarm.maxAgents + c.reset + ']' + topoTag + '  ' +
+    c.brightYellow + '\uD83E\uDD16 Swarm' + c.reset + '  ' + swarmChip + '  ' +
     subColor + '\uD83D\uDC65 ' + subLabel + c.reset + '    ' +
-    c.brightBlue + '\uD83E\uDE9D ' + hooksColor + hooksEnabled + c.reset + '/' + c.brightWhite + hooksTotal + c.reset + '    ' +
+    c.brightBlue + '\uD83E\uDE9D ' + hooksColor + hooksEnabled + c.reset + '    ' +
     secIcon + ' ' + secColor + 'CVE ' + security.cvesFixed + c.reset + '/' + c.brightWhite + security.totalCves + c.reset + '    ' +
-    c.brightCyan + '\uD83D\uDCBE ' + system.memoryMB + 'MB' + c.reset + '    ' +
+    c.brightCyan + '\uD83D\uDCBE ' + system.memoryMB + 'MB' + c.reset + c.dim + ' stores' + c.reset + '    ' +
     intellColor + '\uD83E\uDDE0 ' + String(system.intelligencePct).padStart(3) + '%' + c.reset
   );
 
-  // RUFLO-INTEL-V1: SONA/neural learning ladder (Ruflo-only intelligence chip)
+  // TRUTH-SL-V1: SONA row now renders STORED artifacts, not free-running counters.
+  // `{storedEpisodes} ep \u2502 {storedPatterns} pat \u2502 \u0394 {..} LoRA \u2502 {events} ev` \u2014 the
+  // neural/stats.json event counter is DEMOTED to a dim `ev` chip (never labeled
+  // traj) and omitted when 0/absent. Gauge tier is keyed on storedEpisodes.
   const _ri = system.ruflo || {};
-  if ((_ri.traj || 0) > 0 || (_ri.patterns || 0) > 0) {
+  const _riEp = _ri.storedEpisodes || 0;
+  const _riPat = _ri.storedPatterns || 0;
+  if (_riEp > 0 || _riPat > 0) {
       const _rt = _ri.tier || 0;
       const _rl = '[' + '\u25CF'.repeat(_rt) + '\u25CB'.repeat(5 - _rt) + ']';
       const _rc = _rt >= 4 ? c.brightGreen : _rt >= 2 ? c.brightYellow : c.dim;
-      let _rln = c.brightPurple + '\uD83D\uDCF6 SONA' + c.reset + '    ' + _rc + _rl + c.reset + '  ' + c.brightWhite + (_ri.traj || 0) + c.reset + c.dim + ' traj' + c.reset + '  ' + c.dim + '\u2502' + c.reset + '  ' + c.brightWhite + (_ri.patterns || 0) + c.reset + c.dim + ' patterns' + c.reset;
+      let _rln = c.brightPurple + '\uD83D\uDCF6 SONA' + c.reset + '    ' + _rc + _rl + c.reset + '  ' + c.brightWhite + _riEp + c.reset + c.dim + ' ep' + c.reset + '  ' + c.dim + '\u2502' + c.reset + '  ' + c.brightWhite + _riPat + c.reset + c.dim + ' pat' + c.reset;
       if ((_ri.deltaNorm || 0) > 0) _rln += '  ' + c.dim + '\u2502' + c.reset + '  ' + c.cyan + '\u0394 ' + (_ri.deltaNorm).toFixed(2) + c.reset + c.dim + ' LoRA' + c.reset;
+      if ((_ri.events || 0) > 0) _rln += '  ' + c.dim + '\u2502' + c.reset + '  ' + c.dim + _ri.events + ' ev' + c.reset;
       lines.push(_rln);
     }
 
@@ -761,23 +994,30 @@ function generateStatusline() {
     const _siChip = _si.rewardConstant
       ? c.dim + '\u26aa loop:open' + c.reset
       : c.brightYellow + '\u25c8 loop:closed eff:flat' + c.reset;
+    // TRUTH-SL-V1: bench staleness chip \u2014 the SI row was frozen ~7 weeks (audit).
+    // Warn (brightYellow) when the bench file hasn't been re-run in >7 days.
+    const _siBench = (typeof _si.ageDays === 'number' && _si.ageDays > 7)
+      ? '  ' + c.dim + '\u2502' + c.reset + '  ' + c.brightYellow + 'bench ' + Math.round(_si.ageDays) + 'd\u26a0' + c.reset
+      : '';
     lines.push(
       c.brightCyan + '\ud83d\udd2c SI' + c.reset + '       ' +
       c.cyan + 'acc' + c.reset + ' ' + _siAcc + '  ' + c.dim + '\u2502' + c.reset + '  ' +
       c.cyan + '\u25c7' + c.reset + c.brightWhite + _si.rewardDistinct + c.reset + c.dim + ' rwd' + c.reset + '  ' + c.dim + '\u2502' + c.reset + '  ' +
-      c.cyan + 'Q\u00b1' + c.reset + c.brightWhite + _siQs + c.reset + '  ' + c.dim + '\u2502' + c.reset + '  ' +
-      _siChip
+      c.cyan + 'Qsprd ' + c.reset + c.brightWhite + _siQs + c.reset + '  ' + c.dim + '\u2502' + c.reset + '  ' +
+      _siChip + _siBench
     );
   }
     // Line 3: Architecture
-  const dddColor = dddProgress >= 50 ? c.brightGreen : dddProgress > 0 ? c.yellow : c.red;
+  // TRUTH-SL-V1: `Stores ●N/5` (same store-liveness measure) replaces the cosmetic
+  // `Learn ●100%` (which was the memory.db-size bucket restated as dddProgress).
+  const storesColor = storesLive >= 5 ? c.brightGreen : storesLive > 0 ? c.brightYellow : c.brightRed;
   const adrColor = adrCount > 0 ? (adrImpl === adrCount ? c.brightGreen : c.yellow) : c.dim;
   const adrDisplay = adrColor + '●' + adrImpl + '/' + adrCount + c.reset;
 
   lines.push(
     c.brightPurple + '🔧 Architecture' + c.reset + '    ' +
     c.cyan + 'ADRs' + c.reset + ' ' + adrDisplay + '  ' + c.dim + '│' + c.reset + '  ' +
-    c.cyan + 'Learn' + c.reset + ' ' + dddColor + '●' + String(dddProgress).padStart(3) + '%' + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
+    c.cyan + 'Stores' + c.reset + ' ' + storesColor + '●' + storesLive + '/5' + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
     c.cyan + 'Security' + c.reset + ' ' + secColor + '●' + secStatus + c.reset
   );
 
@@ -813,7 +1053,7 @@ function generateStatusline() {
     c.brightCyan + '📊 AgentDB' + c.reset + '    ' +
     c.cyan + 'Vectors' + c.reset + ' ' + vectorColor + '●' + vectorCount + hnswInd + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
     c.cyan + 'Size' + c.reset + ' ' + c.brightWhite + sizeDisp + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
-    c.cyan + 'Tests' + c.reset + ' ' + testColor + '●' + testFiles + c.reset + ' ' + c.dim + '(~' + testCases + ' cases)' + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
+    c.cyan + 'Tests' + c.reset + ' ' + testColor + '●' + testFiles + c.reset + ' ' + c.dim + '(' + testCases + ' cases)' + c.reset + '  ' + c.dim + '│' + c.reset + '  ' +
     integStr
   );
 
@@ -861,7 +1101,9 @@ function generateStatusline() {
     const trajStr = aqe.trajectories > 0
       ? '  ' + c.dim + '\u2502' + c.reset + '  ' + c.brightYellow + '\uD83E\uDDED ' + aqe.trajectories + ' traj' + c.reset
       : '';
-    const vecHnsw = aqe.hasHnsw ? c.brightGreen + '\u26A1' + c.reset : '';
+    // TRUTH-SL-V1: `N vec` = non-traj embeddings only (the row already shows traj
+    // separately); \u26A1 lit ONLY on a real index (hasIndex), unlit here (empty hnsw dir).
+    const vecHnsw = aqe.hasIndex ? c.brightGreen + '\u26A1' + c.reset : '';
     const vecStr = aqe.vectors > 0
       ? '  ' + c.dim + '\u2502' + c.reset + '  ' + c.brightCyan + '\uD83E\uDDEC ' + aqe.vectors + ' vec' + c.reset + vecHnsw
       : '';
@@ -883,6 +1125,17 @@ function generateStatusline() {
 // JSON output — delegates to CLI for accuracy; caller can use --json flag
 function generateJSON() {
   const d = getStatuslineData();
+  // Schema guarantee (ported from the installed helper, SCHEMA-NORM): chip keys must
+  // exist no matter which branch produced d (a 10s cache written by an older writer,
+  // upstream CLI schema drift, or an overlay probe failure). getStatuslineData already
+  // applies the truth overlay, so these are normally present; this is the defensive
+  // backstop consumers (dashboard, tests) rely on. TRUTH-SL-V1 additive keys (stores,
+  // swarm.registry, aqe, selfImprove, system.ruflo.*) come through the overlay itself.
+  if (!d.swarmdb) { try { d.swarmdb = _ra_swarmdb(); } catch (e) { d.swarmdb = { vectorCount: 0, dbSizeKB: 0, hasHnsw: false }; } }
+  if (!d.agentdb) { try { d.agentdb = _ra_agentdb(); } catch (e) { d.agentdb = { vectorCount: 0, dbSizeKB: 0, hasHnsw: false }; } }
+  if (!d.tests)   { try { d.tests   = getLocalTestCount(); } catch (e) { d.tests = { testFiles: 0, testCases: 0 }; } }
+  if (!d.adrs)    { try { d.adrs    = getLocalADRCount(); } catch (e) { d.adrs = { count: 0, implemented: 0, compliance: 0 }; } }
+  if (!d.hooks)   { try { d.hooks   = _ra_hooks(); } catch (e) { d.hooks = { enabled: 0, total: 0 }; } }
   const git = getGitInfo();
   return Object.assign({}, d, {
     user: Object.assign({ name: git.name, gitBranch: git.gitBranch }, d.user || {}),

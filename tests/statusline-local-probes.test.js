@@ -81,17 +81,20 @@ describe('statusline ADR probe (getLocalADRCount)', () => {
 
 describe('statusline Tests probe (getLocalTestCount)', () => {
   it('counts tests across tests/ and monorepo packages/* (the carousel regression)', () => {
+    // TRUTH-SL-V1: testCases is a REAL regex-scan of it()/test() calls in the
+    // matched files (was the dishonest testFiles*4 multiplier — audit Patch 61).
     const d = mkProject((d) => {
-      write(d, 'tests/a.test.js');
-      write(d, 'tests/visual/b.spec.ts');
-      write(d, 'packages/ui/src/c.test.ts');
-      write(d, 'apps/web/d.spec.tsx');
+      write(d, 'tests/a.test.js', "it('one', () => {});\nit('two', () => {});\n");
+      write(d, 'tests/visual/b.spec.ts', "test('three', () => {});\n");
+      write(d, 'packages/ui/src/c.test.ts', "describe('x', () => { it('four', () => {}); });\n");
+      write(d, 'apps/web/d.spec.tsx', '// no cases in this stub\n');
       write(d, 'src/notatest.ts');                     // must NOT count
-      write(d, 'node_modules/pkg/x.test.js');          // must NOT count (excluded)
+      write(d, 'node_modules/pkg/x.test.js', "it('never', () => {});\n"); // must NOT count (excluded)
     });
     const j = renderJSON(d);
     expect(j.tests.testFiles).toBe(4);
-    expect(j.tests.testCases).toBe(16); // testFiles * 4
+    expect(j.tests.testCases).toBe(4); // 2 + 1 + 1 + 0 real it()/test() calls
+    expect(j.tests.countMethod).toBe('regex-scan');
     fs.rmSync(d, { recursive: true, force: true });
   });
 
