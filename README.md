@@ -28,6 +28,8 @@ ruflo-kit session /path/to/your/codebase
 
 `init` is idempotent: it skips `ruflo init` / `aqe init` if they have already run and only re-applies the patches. Pass `--force` to wipe and re-init, or `--dry-run` to preview without changes.
 
+**Adopting a target that was ruflo-inited WITHOUT the kit is memory-safe:** no kit verb deletes or rewrites the learning stores (`.swarm/memory.db`, `.agentic-qe/memory.db`, `./agentdb.db`), init self-no-ops on the existing ruflo pieces, and every config edit (`.mcp.json`, `CLAUDE.md`, `.claude/settings.json`) is a backed-up surgical merge. `--force` is the kit's only destructive switch (it re-runs `ruflo init --force`, regenerating `CLAUDE.md`/`.claude/`). Recommended: `status` → `sync --dry-run` → `setup` without `--force` — full walkthrough in [docs/OPERATIONS.md §A1b](docs/OPERATIONS.md#a1b-adopting-an-already-inited-target-ruflo-init-without-the-kit).
+
 **Upgrade** the kit with `ruflo-kit self-update` (or re-run the installer); **uninstall** with `curl … | bash -s -- --uninstall`. The installer bundles Apple-Silicon (darwin-arm64) native SONA/GNN builds; other platforms run with upstream fallbacks (the native step skips cleanly).
 
 ### Manual / contributor install
