@@ -117,8 +117,11 @@ if [[ -f "$BRAIN_KB/forge-mcp-all.mjs" ]]; then
   _kb="$(du -sk "$BRAIN_KB" 2>/dev/null | awk '{print $1}')"
   [[ "$_kb" =~ ^[0-9]+$ ]] && BRAIN_SIZE=$((_kb * 1024))
   # disk-only KB version (BRAIN-KB-REFRESH-V1) — no network here; freshness
-  # against the released bundle is fix-brain Step 1.5's job
-  BRAIN_VER="$(node -p "require('$BRAIN_KB/package.json').version" 2>/dev/null || echo '')"
+  # against the released bundle is fix-brain Step 1.5's job. Prefer the kit's
+  # .release-tag marker (bundle package.json can lag the release tag).
+  BRAIN_VER="$(head -1 "$BRAIN_KB/.release-tag" 2>/dev/null | tr -d '[:space:]')"
+  BRAIN_VER="${BRAIN_VER#v}"
+  [[ -z "$BRAIN_VER" ]] && BRAIN_VER="$(node -p "require('$BRAIN_KB/package.json').version" 2>/dev/null || echo '')"
 fi
 
 # ── Learning stores (sqlite3 -readonly; n/a when sqlite3 absent) ─────────────
