@@ -32,6 +32,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 | Register the ruvnet-brain MCP knowledge base (MCP-only, no daemon/hooks) | `bin/ruflo-kit fix-brain <target> --download` |
 | Refresh a stale brain KB in place (freshness is reported on every fix-brain run) | `bin/ruflo-kit fix-brain <target> --refresh` (or upstream: `npx ruvnet-brain --update`) |
 | First-time project init | `bin/ruflo-kit init <target>` |
+| **Adopt a project ruflo-inited WITHOUT the kit** (memory-safe; never pass `--force`) | `ruflo-kit status <target>` → `ruflo-kit sync <target> --dry-run` → `ruflo-kit setup <target>` — see [A1b](./OPERATIONS.md#a1b-adopting-an-already-inited-target-ruflo-init-without-the-kit) |
 | **Reload dist patches into the running daemon** (REQUIRED after fix-ruflo/fix-aqe, **only if the daemon is running**) | `ruflo daemon stop && ruflo daemon start` |
 | Run ONE background-worker pass (no persistent loop, bounded spend) | `ruflo daemon trigger -w audit` |
 | Start the persistent loop (⚠ billed 24/7 until you stop it) | `ruflo daemon start` → **always** `ruflo daemon stop` when done |
@@ -101,6 +102,7 @@ Each `bin/ruflo-kit <command>` dispatches to an implementation in `lib/` (shell)
 ## 4. Safety (read before destructive ops)
 
 - **BACK UP before any DB operation.** Never `rm -f` on `.agentic-qe/` or `*.db` files without confirmation.
+- **`init --force` is the kit's ONLY memory/content-destructive switch** — it re-runs `ruflo init --force`, regenerating `CLAUDE.md`/`.claude/` over existing content. Adopting a pre-existing (kit-less) `ruflo init` never needs it: without `--force` the kit never touches the canonical stores (`.swarm/memory.db`, `.agentic-qe/memory.db`, `./agentdb.db`) and every config edit is a backed-up merge — see [A1b](./OPERATIONS.md#a1b-adopting-an-already-inited-target-ruflo-init-without-the-kit).
 - **NEVER `cp` a backup over a live `.agentic-qe/memory.db`** (Patch 46). It's WAL-mode with live writers (daemon + MCP) — copying over it corrupts the page tree. Use `sqlite3 DB ".backup '/tmp/x.db'"`, surgical `DELETE` (tag rows with a unique prefix), or stop all writers + restart Claude Code first. Recovery if corrupted: `sqlite3 bad.db ".recover" \| sqlite3 fixed.db`, then `PRAGMA journal_mode=WAL`.
 - **NEVER auto-commit or push.** Wait for an explicit request.
 - **DO NOT bump AgentDB past alpha.10** — it dormant-fails the advanced controllers.

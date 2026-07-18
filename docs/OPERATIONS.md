@@ -7,6 +7,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 **Contents**
 - [A. Workflows](#a-workflows)
   - [A1. First-time setup](#a1-first-time-setup)
+  - [A1b. Adopting an already-inited target (ruflo init without the kit)](#a1b-adopting-an-already-inited-target-ruflo-init-without-the-kit)
   - [A2. Session start](#a2-session-start)
   - [A3. Upgrade ruflo](#a3-upgrade-ruflo)
   - [A3b. Upgrade AQE](#a3b-upgrade-aqe)
@@ -39,6 +40,39 @@ This one script calls `fix-ruflo.sh` (step 5), `fix-statusbar.sh` (step 6) and `
 **AQE install:** AQE ships as the global `agentic-qe` package (CLI binary `aqe`, MCP binary `aqe-mcp`); install it with `npm i -g agentic-qe` (npx fallback: `npx -y agentic-qe@latest`). The init script's **step 4** runs `aqe init --auto`, which creates `.agentic-qe/memory.db`, installs ~115 skills / ~60 agents / ~20 `aqe-*` commands, and appends the `## Agentic QE v3` section to `CLAUDE.md`. (`aqe init` *without* `--auto` is a half-init — always use `--auto`.) Because `aqe init` also clobbers the statusline and regenerates `CLAUDE.md`/`settings.json`, `fix-statusbar.sh` runs after it.
 
 **Verify:** run `bin/ruflo-kit session <target>` and confirm "All systems ready".
+
+### A1b. Adopting an already-inited target (ruflo init without the kit)
+
+*Use when:* pointing the kit at a codebase that was already set up with a plain `ruflo init` (and possibly `aqe init`) **without** the kit, and you need to know what it will and won't touch.
+
+**Memory safety — the short answer:** without `--force`, the kit never resets memories. The three canonical stores (`.swarm/memory.db`, `.agentic-qe/memory.db`, `./agentdb.db`) are never deleted, truncated, or rewritten by any kit verb — `init` step 3 skips `ruflo memory init` when `.swarm/memory.db` exists, `fix-learning`'s stray-store cleanup hard-codes all three as preserved canonical roots (and only runs under `--cleanup --confirm`, with a `.cleanup-bak` copy first), and `harvest`/`fix-learning` only ADD rows. The stray-`.agentic-qe` sweep (RVF-STRAY-SWEEP-V1) only targets RVF-only dirs — no `memory.db`/`config.yaml` inside — and `mv`s them to `.cleanup-bak` rather than deleting.
+
+**Init self-no-ops on the existing pieces.** With `.claude-flow/config.yaml` + `.mcp.json` + `.claude/skills` present, `init` skips `ruflo init` entirely; the step-4.5 template backfill is add-only (never overwrites, so local `.claude/` customizations survive). What the kit then ADDS is the AQE/agentdb/brain layer plus the config pins below.
+
+**What the kit WILL change on an adopted target** (all surgical merges, all backed up, all previewable with `--dry-run`):
+
+| Artifact | Change | Safety |
+|---|---|---|
+| `.mcp.json` | claude-flow entry migrated `npx` → global `ruflo`; duplicate `ruflo` entry deduped; `agentdb` + `ruvnet-brain` servers added | jq merge, JSON-validated, backup + restore-on-failure |
+| `CLAUDE.md` | stale `@claude-flow/cli@latest` refs rewritten; Runtime section appended (only if the `## Agentic QE v3` anchor exists) | `.fixruflo.bak`, auto-restore on failed verification; prose untouched by design |
+| `.claude/settings.json` | hooks wired (SessionEnd harvest etc.), `AQE_PROJECT_ROOT` pinned, `enabledMcpjsonServers`, `statusLine.command` | node JSON merge preserving other keys, `.fixaqe-bak`, restore-on-invalid |
+| `.claude/helpers/statusline.cjs` | **replaced** with the kit's canonical statusline — the one file a custom setup loses | `.bak` + `node --check` + runtime smoke, restore on failure |
+| `.agentic-qe/config.yaml` + `claude-flow.config.json` | `daemonAutoStart` / `daemon.autostart` pinned `false` (billed daemon stays opt-in) | single-key edit |
+| `node_modules/agentdb` (target) | removed **only if orphaned** (kept with a warning when declared in the target's `package.json`) | guarded check |
+
+**Behavioral deltas to expect:** the MCP launch moves from npx to the global `ruflo` binary (`setup` installs it); daemon autostart is pinned OFF in all three channels — a workflow that relied on autostart now needs an explicit `ruflo daemon start` or `RUFLO_DAEMON_MODE=auto` (see [A8](#a8-daemon--token-cost)). A RUNNING daemon is never killed by adoption — only `upgrade` and `init --force` stop it.
+
+**Recommended sequence:**
+
+1. `bin/ruflo-kit status <target>` — read-only; see what the kit is walking into.
+2. `bin/ruflo-kit sync <target> --dry-run` — the whole fix cascade prints its plan with zero writes; review the "would" lines.
+3. Optional belt-and-suspenders: `sqlite3 <db> ".backup '/tmp/x.db'"` for the two memory DBs (never `cp` a live WAL DB — §Safety), and git-commit `.mcp.json` / `CLAUDE.md` / `.claude/` if the target is a repo.
+4. `bin/ruflo-kit setup <target>` (or `init` + `sync`) — **without `--force`**. Init no-ops the existing ruflo pieces, adds the missing layers; sync converges configs; the 15-probe proof verifies (exit code = verdict).
+5. Restart Claude Code so the MCP/settings changes load; the daemon stays opt-in.
+
+**The one destructive switch:** `bin/ruflo-kit init <target> --force` re-runs upstream `ruflo init --force`, which regenerates `CLAUDE.md`/`.claude/` over existing content — reserve it for genuinely broken installs, never for "it was inited without the kit". Two benign edge cases: a *partial* prior init (e.g. no `.claude/skills`) makes `init` re-run plain non-force `ruflo init` (add/skip-oriented; the npx `mcpServers.ruflo` entry it re-adds is deduped right after), and a half `aqe init` (DB present, `.claude/` AQE templates missing) triggers `aqe init --auto --upgrade` — which regenerates the statusline (restored by `fix-statusbar`) but does not touch the DB.
+
+**Verify:** `bin/ruflo-kit proof <target>` ends PROVED, `bin/ruflo-kit status <target>` shows the pre-existing learning stores with their prior row counts intact.
 
 ### A2. Session start
 
