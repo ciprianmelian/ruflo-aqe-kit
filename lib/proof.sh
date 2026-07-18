@@ -99,7 +99,10 @@ probe_aqe() {
     record_probe "aqe" PASS "aqe ${v:-?} (no agentic-qe entry in .mcp.json)"
     return
   fi
-  local _oldifs="$IFS"; IFS=$'\t'; local parts=($acmd); IFS="$_oldifs"
+  # tab-split robustly (SC2206): read -a with a scoped IFS — no glob expansion,
+  # and bash-3.2-safe (no mapfile on stock macOS).
+  local parts=()
+  IFS=$'\t' read -r -a parts <<< "$acmd"
   case "$(mcp_initialize_probe 8 "${parts[@]}")" in
     PROBE_OK)     record_probe "aqe" PASS "aqe ${v:-?} · aqe-mcp handshake answered" ;;
     PROBE_NORESP) record_probe "aqe" WARN "aqe ${v:-?} · aqe-mcp no response in 8s" ;;
