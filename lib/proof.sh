@@ -5,13 +5,13 @@ set -uo pipefail
 # ============================================================================
 # lib/proof.sh — PROOF-V1. Prove the ruflo + AQE stack actually works, twice.
 #
-#   bin/ruflo-kit proof <target>              # 13 probes, run TWICE (x2), verdict
-#   bin/ruflo-kit proof <target> --single     # 13 probes, ONE pass
+#   bin/ruflo-kit proof <target>              # 15 probes, run TWICE (x2), verdict
+#   bin/ruflo-kit proof <target> --single     # 15 probes, ONE pass
 #   bin/ruflo-kit proof <target> --json       # machine shape
 #   bin/ruflo-kit proof <target> --dry-run    # list what would run, exit 0
 #
 # EVERY assertion is DISK-DERIVED or REAL command output — never an MCP/daemon
-# self-report (a broken server happily says "healthy"). Thirteen probes:
+# self-report (a broken server happily says "healthy"). Fifteen probes:
 #   P1  ruflo-cli       ruflo --version exits 0 + prints a semver
 #   P2  ruflo-mcp       ruflo mcp start answers one JSON-RPC initialize
 #   P3  aqe             aqe --version + aqe-mcp handshake (.mcp.json command)
@@ -25,6 +25,10 @@ set -uo pipefail
 #   P11 health-parse    health.sh --json: memory totals sane (comma-bug tripwire)
 #   P12 swarm-smoke     ruflo hooks route returns a routing decision
 #   P13 stores-writable each present sqlite store takes a momentary write lock
+#   P14 daemon-gates    CF-CONFIG autostart:false + statusline DAEMON-AUTOSTART-3-V1
+#                       pin (running daemons WARN, never FAIL)
+#   P15 statusline-truth canonical --json swarmdb.vectorCount == sqlite sum (±5) +
+#                       tests.testCases>=testFiles with countMethod 'regex-scan'
 #
 # NOTE (P12): `ruflo hooks route` may append one route-capture row to the swarm
 # store — this probe is read-MOSTLY, not strictly read-only. Everything else is
@@ -306,6 +310,128 @@ probe_stores_writable() {
   fi
 }
 
+# P14 daemon-gates: the three-channel daemon opt-out must be intact on the target.
+# FAIL if the project-root claude-flow.config.json is missing or its
+# daemon.autostart is not exactly false (CF-CONFIG-AUTOSTART-OFF-V1), OR if the
+# INSTALLED statusline lacks the DAEMON-AUTOSTART-3-V1 child-env pin (the 5s
+# statusline refresh is the resurrection channel the pin closes). A statusline
+# that isn't installed yet is a fresh-target WARN, not a FAIL. Running
+# `cli.js daemon start` processes are a WARN, never a FAIL — a deliberate operator
+# daemon is allowed (matches setup S6 semantics); the count is surfaced in detail.
+probe_daemon_gates() {
+  local cf="$TARGET_DIR/claude-flow.config.json"
+  local sl="$TARGET_DIR/.claude/helpers/statusline.cjs"
+  local verdict="PASS" detail=""
+  # (1) project config gate
+  local cfstate
+  if [[ ! -f "$cf" ]]; then
+    cfstate="missing"
+  else
+    cfstate="$(node -e '
+      try{const j=require(process.argv[1]);
+        process.stdout.write((j.daemon&&j.daemon.autostart===false)?"off":"on")}
+      catch(e){process.stdout.write("bad")}
+    ' "$cf" 2>/dev/null)"
+  fi
+  case "$cfstate" in
+    off)     detail="config:off" ;;
+    missing) verdict="FAIL"; detail="claude-flow.config.json MISSING (run fix-ruflo)" ;;
+    on)      verdict="FAIL"; detail="daemon.autostart != false" ;;
+    *)       verdict="FAIL"; detail="claude-flow.config.json unreadable" ;;
+  esac
+  # (2) installed statusline child-env pin
+  if [[ ! -f "$sl" ]]; then
+    [[ "$verdict" == "PASS" ]] && verdict="WARN"
+    detail="$detail · statusline absent (fresh target)"
+  elif grep -q "DAEMON-AUTOSTART-3-V1" "$sl" 2>/dev/null; then
+    detail="$detail · statusline pinned"
+  else
+    verdict="FAIL"; detail="$detail · statusline lacks DAEMON-AUTOSTART-3-V1"
+  fi
+  # (3) running daemons — WARN, never FAIL
+  local dcount
+  dcount="$(pgrep -f "cli.js daemon start" 2>/dev/null | grep -c . | tr -d ' ')"
+  if [[ "${dcount:-0}" -gt 0 ]]; then
+    [[ "$verdict" != "FAIL" ]] && verdict="WARN"
+    detail="$detail · $dcount daemon proc(s) running (operator?)"
+  fi
+  record_probe "daemon-gates" "$verdict" "$detail"
+}
+
+# P15 statusline-truth: the TRUTH-STATUSLINE-V1 contract must hold — every
+# displayed number must re-derive from disk. Render the CANONICAL statusline
+# ($KIT_ASSETS/statusline.cjs) with --json from the target cwd (stdin=/dev/null,
+# 15s SIGKILL guard), then cross-check two fields against independent ground
+# truth: (a) swarmdb.vectorCount == a freshly-computed sqlite sum over
+# $TARGET/.swarm/memory.db (memory_entries embedding NOT NULL + pattern_embeddings
+# + learning_state_embeddings + patterns embedding NOT NULL — the audit formula),
+# within ±5 for live drift; (b) tests.testCases >= tests.testFiles AND
+# tests.countMethod === 'regex-scan'. No .swarm/memory.db → fresh-target WARN.
+# NOTE: (b) requires the TRUTH-SL-V1 statusline to be integrated; if the rendered
+# --json lacks these keys the probe correctly FAILs.
+probe_statusline_truth() {
+  local swarmdb="$TARGET_DIR/.swarm/memory.db"
+  if [[ ! -f "$swarmdb" ]]; then
+    record_probe "statusline-truth" WARN "no .swarm/memory.db (fresh target)"; return
+  fi
+  if [[ ! -f "$KIT_ASSETS/statusline.cjs" ]]; then
+    record_probe "statusline-truth" FAIL "canonical statusline.cjs absent from kit assets"; return
+  fi
+  local driver res
+  driver="$(mktemp)"
+  cat > "$driver" <<'NODE'
+'use strict';
+const { spawn, execSync } = require('node:child_process');
+const [SL, TARGET, SWARMDB] = process.argv.slice(2);
+function sqliteCount(sql) {
+  try {
+    const o = execSync('sqlite3 -readonly "' + SWARMDB + '" "' + sql + '"',
+      { timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0;
+  } catch (e) { return 0; }
+}
+// Independent 4-query sum — the exact audit formula, computed here (not trusting
+// the statusline's own arithmetic). Missing tables error out to 0 under -readonly.
+const indep =
+  sqliteCount("SELECT COUNT(*) FROM memory_entries WHERE embedding IS NOT NULL") +
+  sqliteCount("SELECT COUNT(*) FROM pattern_embeddings") +
+  sqliteCount("SELECT COUNT(*) FROM learning_state_embeddings") +
+  sqliteCount("SELECT COUNT(*) FROM patterns WHERE embedding IS NOT NULL");
+const child = spawn(process.execPath, [SL, '--json'],
+  { cwd: TARGET, stdio: ['ignore', 'pipe', 'ignore'],
+    env: Object.assign({}, process.env, { CLAUDE_PROJECT_DIR: TARGET }) });
+let out = '', done = false;
+const finish = (tok) => { if (done) return; done = true; try { child.kill('SIGKILL'); } catch (_) {} console.log(tok); process.exit(0); };
+const timer = setTimeout(() => finish('FAIL|canonical render timed out (>15s)'), 15000);
+child.stdout.on('data', (d) => { out += d.toString(); });
+child.on('error', () => { clearTimeout(timer); finish('FAIL|canonical render spawn error'); });
+child.on('exit', () => {
+  clearTimeout(timer);
+  let j; try { j = JSON.parse(out); } catch (e) { return finish('FAIL|--json not parseable (TRUTH-SL-V1 not integrated yet?)'); }
+  const sw = (j.swarmdb && typeof j.swarmdb === 'object') ? j.swarmdb : null;
+  const t = (j.tests && typeof j.tests === 'object') ? j.tests : null;
+  if (!sw || typeof sw.vectorCount !== 'number') return finish('FAIL|swarmdb.vectorCount missing from --json');
+  if (!t) return finish('FAIL|tests block missing from --json');
+  const problems = [];
+  if (Math.abs(sw.vectorCount - indep) > 5) problems.push('vectorCount ' + sw.vectorCount + ' vs sqlite ' + indep + ' (>5 drift)');
+  if (!(typeof t.testCases === 'number' && typeof t.testFiles === 'number' && t.testCases >= t.testFiles))
+    problems.push('testCases(' + t.testCases + ') < testFiles(' + t.testFiles + ')');
+  if (t.countMethod !== 'regex-scan') problems.push("countMethod='" + t.countMethod + "' != regex-scan");
+  if (problems.length) return finish('FAIL|' + problems.join('; '));
+  finish('PASS|vectorCount ' + sw.vectorCount + ' ~ sqlite ' + indep + '; testCases ' + t.testCases + ' >= testFiles ' + t.testFiles + '; regex-scan');
+});
+NODE
+  res="$(node "$driver" "$KIT_ASSETS/statusline.cjs" "$TARGET_DIR" "$swarmdb" 2>/dev/null)"
+  rm -f "$driver"
+  local verdict detail
+  verdict="${res%%|*}"; detail="${res#*|}"
+  case "$verdict" in
+    PASS) record_probe "statusline-truth" PASS "$detail" ;;
+    FAIL) record_probe "statusline-truth" FAIL "$detail" ;;
+    *)    record_probe "statusline-truth" FAIL "render probe inconclusive (${res:-no output})" ;;
+  esac
+}
+
 run_all_probes() {
   probe_ruflo_cli
   probe_ruflo_mcp
@@ -320,6 +446,8 @@ run_all_probes() {
   probe_health_parse
   probe_swarm_smoke
   probe_stores_writable
+  probe_daemon_gates
+  probe_statusline_truth
 }
 
 # ── Emitters ─────────────────────────────────────────────────────────────────
@@ -343,7 +471,7 @@ emit_single_json() {
 
 print_single_table() {
   local failed=0 warned=0 i
-  header "proof" "13-probe disk-evidence proof (single pass)"
+  header "proof" "15-probe disk-evidence proof (single pass)"
   kit_banner
   echo ""
   printf "  %-18s %-8s %s\n" "PROBE" "VERDICT" "DETAIL"
@@ -369,7 +497,7 @@ run_single() {
     if [[ "$JSON" -eq 1 ]]; then
       echo '{"dryRun":true,"probes":[],"failed":0,"warned":0}'
     else
-      echo "[dry-run] would run 13 disk-evidence probes against $TARGET_DIR (no commands executed)"
+      echo "[dry-run] would run 15 disk-evidence probes against $TARGET_DIR (no commands executed)"
     fi
     exit 0
   fi
@@ -386,7 +514,7 @@ run_x2() {
     if [[ "$JSON" -eq 1 ]]; then
       echo '{"dryRun":true,"stable":true,"verdict":"PROVED"}'
     else
-      echo "[dry-run] would run the 13 probes TWICE:"
+      echo "[dry-run] would run the 15 probes TWICE:"
       echo "  pass 1: bash $KIT_LIB/proof.sh $TARGET_DIR --single --json   (inherited env)"
       echo "  pass 2: env -i HOME PATH TERM bash $KIT_LIB/proof.sh $TARGET_DIR --single --json   (clean env)"
       echo "  verdict PROVED iff both passes have zero FAIL and identical verdict vectors"

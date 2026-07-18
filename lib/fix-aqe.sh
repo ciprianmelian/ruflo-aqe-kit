@@ -120,6 +120,12 @@ else
            metrics-db.mjs router.js ruflo-hook.cjs session.js \
            statusline-v3.cjs statusline.cjs statusline.js v3/advisor-call.cjs; do
     src="$HELPER_SRC/$h"; dst="$CLAUDE_HELPERS/$h"
+    # CANONICAL-STATUSLINE: statusline.cjs seeds from the canonical asset
+    # (assets/statusline.cjs — the single source of truth fix-statusbar installs
+    # + TRUTH-STATUSLINE-V1 targets), never the claude-helpers/ copy (removed in
+    # the canonical consolidation). Redirecting the seed source here means the
+    # loop tolerates that copy's absence silently.
+    [[ "$h" == "statusline.cjs" ]] && src="$KIT_ASSETS/statusline.cjs"
     [[ -f "$src" ]] || { warn "missing seed source $h"; continue; }
     [[ -f "$dst" ]] && { pass "$h present (seed skipped — upstream/healed copy kept)"; continue; }
     if [[ "$DRY_RUN" -eq 1 ]]; then info "[dry-run] would seed $h"; continue; fi
