@@ -995,7 +995,13 @@ while IFS= read -r memreg; do
   force_nested_agentdb "$(dirname "$(dirname "$memreg")")"
   AGENTDB_FORCED_ANY=1
 done < <(
-  { find "$HOME_DIR/.nvm" -maxdepth 12 -path "*ruflo/node_modules/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
+  # `npm root -g` FIRST: it is authoritative for ANY node distribution — nvm,
+  # homebrew, system, AND GitHub-runner hostedtoolcache, which the hardcoded
+  # roots below miss entirely (nightly-drift caught exactly that: Step 3b
+  # reported "no global registry" on runners with a healthy global ruflo).
+  { _groot="$(npm root -g 2>/dev/null)"
+    [[ -n "$_groot" ]] && find "$_groot/ruflo" -maxdepth 8 -path "*node_modules/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
+    find "$HOME_DIR/.nvm" -maxdepth 12 -path "*ruflo/node_modules/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
     find "/usr/local/lib/node_modules" "/opt/homebrew/lib/node_modules" -maxdepth 6 -path "*ruflo/node_modules/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
   } | sort -u
 )
@@ -1947,7 +1953,13 @@ while IFS= read -r candidate; do
     REGISTRY_FILE="$candidate"
     break
   fi
-done < <(find ~/.nvm/versions /usr/local/lib/node_modules /opt/homebrew/lib/node_modules -path "*/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null)
+done < <(
+  # npm root -g first — covers hostedtoolcache/system layouts the fixed roots miss.
+  { _groot="$(npm root -g 2>/dev/null)"
+    [[ -n "$_groot" ]] && find "$_groot" -maxdepth 8 -path "*/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
+    find ~/.nvm/versions /usr/local/lib/node_modules /opt/homebrew/lib/node_modules -path "*/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
+  } | sort -u
+)
 
 if [[ -z "$REGISTRY_FILE" ]]; then
   # Fallback: npx cache (only relevant if no global ruflo install exists)
