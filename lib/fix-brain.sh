@@ -182,6 +182,10 @@ function verify(zip, sig) {
     fs.rmdirSync(nested);
   }
   if (!fs.existsSync(path.join(KB, 'forge-mcp-all.mjs'))) die(`unpacked but forge-mcp-all.mjs is missing from ${KB} — archive layout may have changed`);
+  // Record WHICH release we installed: the bundle's inner package.json can lag
+  // the release tag (v3.3.1 ships version 3.3.0), which would read as
+  // permanently-STALE. The tag we downloaded is the authoritative identity.
+  try { fs.writeFileSync(path.join(KB, '.release-tag'), tag + '\n'); } catch (_) { /* freshness falls back to package.json */ }
   console.log('    ✓ brain unpacked');
 })();
 NODE
@@ -214,7 +218,12 @@ header "1.5" "KB freshness (BRAIN-KB-REFRESH-V1)"
 if [[ "$KB_PRESENT" -ne 1 ]]; then
   info "KB not present — freshness not applicable"
 else
-  KB_LOCAL_VER="$(node -p "require('$KB_DIR/package.json').version" 2>/dev/null || echo '')"
+  # Prefer the kit's .release-tag marker (written at download time): the bundle's
+  # inner package.json can lag the release tag (v3.3.1 ships version 3.3.0 → a
+  # false permanent STALE). Upstream-installed KBs have no marker → package.json.
+  KB_LOCAL_VER="$(head -1 "$KB_DIR/.release-tag" 2>/dev/null | tr -d '[:space:]')"
+  KB_LOCAL_VER="${KB_LOCAL_VER#v}"
+  [[ -z "$KB_LOCAL_VER" ]] && KB_LOCAL_VER="$(node -p "require('$KB_DIR/package.json').version" 2>/dev/null || echo '')"
   BRAIN_LATEST="$(brain_latest_tag)"
   if [[ -z "$KB_LOCAL_VER" ]]; then
     info "KB has no readable package.json version — freshness unknown"
