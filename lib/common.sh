@@ -80,6 +80,15 @@ kit_resolve() {
       *)  TARGET_DIR="$(pwd)/$tgt" ;;
     esac
   fi
+  # AQE-ROOT-INHERIT-GUARD-V1: the caller's shell may carry AQE_PROJECT_ROOT
+  # pinned to a DIFFERENT project (the kit repo's own settings.json exports it,
+  # so running `ruflo-kit setup B` from a Claude session in project A inherits
+  # A's pin). aqe honors the env var over findProjectRoot, so `aqe init` on the
+  # target then refuses/redirects its own memory.db ("points to a production
+  # .agentic-qe/ while AQE_PROJECT_ROOT=<other>") and the database phase dies —
+  # observed on the first fresh-target e2e (learning HOLLOW, store absent).
+  # Unconditional override: for kit verbs the target IS the project root.
+  export AQE_PROJECT_ROOT="$TARGET_DIR"
 }
 
 # Require the target to already exist (most subcommands operate on a real codebase).

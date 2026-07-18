@@ -96,33 +96,58 @@ note() { [[ "$JSON" -eq 0 ]] && info "$1"; INFO=$((INFO+1)); }
 # that says structured learning SHOULD have something to harvest. FAIL only when
 # there's flat activity but nothing harvested into the reflexion store.
 probe_reflexion_store() {
-  local epi ski me struct
+  local epi ski me struct eligible
   epi="$(count_tbl "$AGENTDB" episodes)"
   ski="$(count_tbl "$AGENTDB" skills)"
   me="$(count_tbl "$SWARM_DB" memory_entries)"
   struct=$((epi + ski))
+  # HOLLOW is judged against what harvest can actually consume: eligible rows in
+  # .agentic-qe captured_experiences (success=1, quality>=0.7 — the exact
+  # tools/aqe-harvest.cjs filter; embedding-less rows harvest to the reflexion
+  # sink, HARVEST-VECLESS-V1, so they count as harvestable). Flat .swarm memory_entries are NOT a
+  # harvest source — the kit's own init/pretrain seeds them, so using them as the
+  # "should have harvested" signal misclassified EVERY fresh post-setup target as
+  # broken (first fresh-target e2e, 2026-07-18) and contradicted SETUP-V1's
+  # "fresh machine → PROVED" contract. Experiences appear once live sessions
+  # capture real work; from then on this probe FAILs exactly as before.
+  eligible=0
+  if table_exists "$AQE_DB" captured_experiences; then
+    eligible="$(sqlite_count_safe "$AQE_DB" "SELECT COUNT(*) FROM captured_experiences WHERE success=1 AND quality>=0.7;")"
+  fi
   RUFLO_ME="$me"; RUFLO_STRUCT="$struct"
   if [[ "$struct" -gt 0 ]]; then
     ok "reflexion store populated (agentdb.db: $epi episodes, $ski skills)"
-  elif [[ "$me" -gt 0 ]]; then
-    bad "reflexion store HOLLOW: agentdb.db has 0 episodes/skills despite $me flat memory_entries — structured learning not harvested. Run: ruflo-kit harvest $TARGET_DIR (or fix-learning)"
+  elif [[ "$eligible" -gt 0 ]]; then
+    bad "reflexion store HOLLOW: $eligible harvestable experience(s) captured but agentdb.db has 0 episodes/skills — structured learning not harvested. Run: ruflo-kit harvest $TARGET_DIR (or fix-learning)"
   else
-    note "reflexion store empty (fresh target — nothing to harvest yet)"
+    note "reflexion store not yet populated ($me flat entries are bootstrap/coordination data, not harvestable — episodes appear after live sessions capture experiences)"
   fi
 }
 
 # #3 neural trainer in JS fallback: the LoRA writer logs updates but never
 # produces a real adaptation (native backend never engaged). FAIL.
 probe_lora_backend() {
-  local ta tu
+  local ta tu sessions_n
   if [[ ! -f "$LORA" ]]; then note "no lora-weights.json yet (#3 n/a)"; LORA_TA=-2; return; fi
   ta="$(json_num "$LORA" "(j.stats||{}).totalAdaptations" -1)"
   tu="$(json_num "$LORA" "(j.stats||{}).totalUpdates" -1)"
   LORA_TA="$ta"
-  if [[ "$tu" -gt 0 && "$ta" -eq 0 ]]; then
-    bad "neural trainer in JS FALLBACK: lora totalUpdates=$tu but totalAdaptations=0 (native backend never engaged) — run: ruflo-kit fix-learning $TARGET_DIR"
+  # totalUpdates counts train() gradient writes; totalAdaptations counts the
+  # adapter being APPLIED at inference (lora-adapter.js adapt()). A fresh target
+  # whose only updates came from the kit's own neural-train bootstrap has ta=0
+  # because no live session has routed through the adapter yet — that is
+  # "primed", not a broken backend. FAIL only when session records exist, i.e.
+  # the adapter SHOULD have been applied but never was (the original #3 defect).
+  sessions_n=0
+  if [[ -d ".claude-flow/sessions" ]]; then
+    sessions_n="$(find .claude-flow/sessions -maxdepth 1 -name 'session-*.json' 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  if [[ "$tu" -gt 0 && "$ta" -eq 0 && "$sessions_n" -gt 0 ]]; then
+    bad "neural trainer in JS FALLBACK: lora totalUpdates=$tu but totalAdaptations=0 across $sessions_n session(s) (adapter never applied at inference) — run: ruflo-kit fix-learning $TARGET_DIR"
   elif [[ "$ta" -gt 0 ]]; then
     ok "neural trainer engaged (lora adaptations=$ta)"
+  elif [[ "$tu" -gt 0 ]]; then
+    note "lora trainer primed (totalUpdates=$tu) — adaptations engage once live sessions route through the adapter (0 session records yet)"
   else
     note "lora trainer idle (totalUpdates=$tu, totalAdaptations=$ta)"
   fi
