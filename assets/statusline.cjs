@@ -83,13 +83,17 @@ function writeCache(data) {
  * and only counted ADRs in v3/implementation/adrs/ (missed v3/docs/adr/).
  */
 // AQE310-REALIGN-V1: overlay AgentDB/MCP/hooks blocks that `ruflo hooks statusline --json` omits.
+// TRUTH-SL-V1: .timeout 1500 busy-wait — a LIVE writer (aqe-mcp mid-write)
+// holds transient locks; without the wait a read fails and the chip renders a
+// confident-looking 0 (observed by the x2 re-audit). Locks are ms-scale; a
+// short busy-wait returns the true count instead of a false zero.
 function _ra_count(db, sql) {
   if (!fs.existsSync(db)) return 0;
-  try { const o = execFileSync('sqlite3', ['-readonly', db, sql], { timeout: 2000, stdio: ['ignore','pipe','ignore'] }).toString(); const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0; } catch (e) { return 0; }
+  try { const o = execFileSync('sqlite3', ['-cmd', '.timeout 1500', '-readonly', db, sql], { timeout: 4000, stdio: ['ignore','pipe','ignore'] }).toString(); const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0; } catch (e) { return 0; }
 }
 function _ra_tbl(db, t) {
   if (!fs.existsSync(db)) return false;
-  try { return execFileSync('sqlite3', ['-readonly', db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='" + t + "' LIMIT 1;"], { timeout: 2000, stdio: ['ignore','pipe','ignore'] }).toString().trim() === '1'; } catch (e) { return false; }
+  try { return execFileSync('sqlite3', ['-cmd', '.timeout 1500', '-readonly', db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='" + t + "' LIMIT 1;"], { timeout: 4000, stdio: ['ignore','pipe','ignore'] }).toString().trim() === '1'; } catch (e) { return false; }
 }
 function _ra_dbkb(db) {
   let kb = 0;
