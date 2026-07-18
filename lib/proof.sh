@@ -290,6 +290,10 @@ probe_swarm_smoke() {
 
 # P13 stores-writable: each present sqlite store takes a momentary write lock
 # (BEGIN IMMEDIATE; ROLLBACK — zero mutation). A missing store is WARN, not FAIL.
+# busy_timeout 3s: in a LIVE session the aqe-mcp / claude-flow servers hold
+# transient RESERVED locks mid-write — "lockable within 3s" is the honest
+# invariant; an instant-fail probe just measures the writer's timing, not the
+# store's health (observed: P13 flapped whenever the live aqe-mcp was writing).
 probe_stores_writable() {
   local rels=(".swarm/memory.db" ".agentic-qe/memory.db" "agentdb.db")
   local rel db checked=0 missing=0 locked=""
@@ -297,7 +301,7 @@ probe_stores_writable() {
     db="$TARGET_DIR/$rel"
     if [[ ! -f "$db" ]]; then missing=$((missing + 1)); continue; fi
     checked=$((checked + 1))
-    sqlite3 "$db" "BEGIN IMMEDIATE; ROLLBACK;" >/dev/null 2>&1 || locked+="$rel "
+    sqlite3 -cmd ".timeout 3000" "$db" "BEGIN IMMEDIATE; ROLLBACK;" >/dev/null 2>&1 || locked+="$rel "
   done
   if [[ -n "$locked" ]]; then
     record_probe "stores-writable" FAIL "locked/unwritable: $locked"
