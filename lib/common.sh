@@ -103,8 +103,13 @@ aqe_installed_version() { aqe --version 2>/dev/null | tr -d '[:space:]'; }
 # Three-slot AgentDB layout (Patch 52): standalone global + nested shadow stay on
 # the pin; ruflo hoists the upstream floor. proof asserts all three + the
 # controller surface, so a deliberate pin bump is a one-place edit here.
-KIT_AGENTDB_PIN="3.0.0-alpha.10"        # standalone global MCP + nested shadow (memory layer)
-KIT_AGENTDB_HOISTED="3.0.0-alpha.17"    # upstream floor hoisted at ruflo/node_modules/agentdb
+KIT_AGENTDB_PIN="3.0.0-alpha.10"          # standalone global MCP + nested shadow (memory layer)
+# The HOISTED slot is upstream's to move (alpha.17 shipped with ruflo 3.32.2,
+# alpha.18 with 3.32.7 a week later) — the kit asserts a FLOOR, never equality:
+# hoisted >= MIN proves we're past the 8-controller removal watershed; the exact
+# version is upstream's business. Pinning equality here would re-break proof on
+# every routine upstream bump.
+KIT_AGENTDB_HOISTED_MIN="3.0.0-alpha.17"
 KIT_AGENTDB_CONTROLLERS=23              # controller classes the nested alpha.10 must expose
 
 # ── Global npm installs (NPM-ALLOW-SCRIPTS-V1) ──────────────────────────────
