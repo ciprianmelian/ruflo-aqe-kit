@@ -5,7 +5,12 @@ set -uo pipefail
 
 # ============================================================================
 # fix-brain.sh — integrate ruvnet-brain as an MCP-ONLY server (marker BRAIN-MCP-V1).
-# Run from anywhere: bin/ruflo-kit fix-brain <target> [--download] [--allow-unsigned] [--dry-run]
+# Run from anywhere: bin/ruflo-kit fix-brain <target> [--download] [--refresh] [--allow-unsigned] [--dry-run]
+#
+# BRAIN-KB-REFRESH-V1: Step 1.5 compares the installed KB version against the
+# newest GitHub Release (6s budget, offline → UNKNOWN, never fatal). A
+# present-but-stale KB is refreshed ONLY behind the explicit --refresh flag
+# (implies --download) — a GB-class download must never happen implicitly.
 #
 # ruvnet-brain (github.com/stuinfla/ruvnet-brain) is a Claude Code plugin whose
 # core value is ONE MCP tool — search_ruvnet — served by kb/forge-mcp-all.mjs out
@@ -34,11 +39,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # ── Pre-parse fix-brain-only flags, then hand the rest to kit_resolve ────────
 # kit_resolve() warns on flags it doesn't know, so strip ours out first. The
 # `${ARR[@]+...}` form is the bash-3.2-safe empty-array expansion under `set -u`.
-BRAIN_DOWNLOAD=0; BRAIN_ALLOW_UNSIGNED=0
+BRAIN_DOWNLOAD=0; BRAIN_ALLOW_UNSIGNED=0; BRAIN_REFRESH=0
 _KR_ARGS=()
 for _a in "$@"; do
   case "$_a" in
     --download)       BRAIN_DOWNLOAD=1 ;;
+    --refresh)        BRAIN_REFRESH=1; BRAIN_DOWNLOAD=1 ;;
     --allow-unsigned) BRAIN_ALLOW_UNSIGNED=1 ;;
     *)                _KR_ARGS+=("$_a") ;;
   esac
@@ -64,8 +70,8 @@ echo "============================================"
 
 # ── Step 1: locate the KB (optional gated download) ─────────────────────────
 header "1" "Locate the ruvnet-brain KB"
-KB_PRESENT=0
-if [[ -f "$MCP_MARKER" ]]; then
+KB_PRESENT=0; KB_REFRESHED=0
+if [[ -f "$MCP_MARKER" && "$BRAIN_REFRESH" -ne 1 ]]; then
   KB_PRESENT=1
   pass "KB present (forge-mcp-all.mjs found in $KB_DIR)"
   [[ -n "${RUVNET_BRAIN_KB:-}" ]] && info "(from your RUVNET_BRAIN_KB override)"
@@ -76,9 +82,11 @@ elif [[ "$BRAIN_DOWNLOAD" -ne 1 ]]; then
   info "  npx ruvnet-brain                                       # upstream installer"
   info "Or point at an existing brain: export RUVNET_BRAIN_KB=/path/to/kb"
 elif [[ "$DRY_RUN" -eq 1 ]]; then
-  info "[dry-run] would download + Ed25519-verify + unpack the ~736MB brain into $KB_DIR"
+  info "[dry-run] would download + Ed25519-verify + unpack the GB-class brain bundle into $KB_DIR"
+  [[ -f "$MCP_MARKER" ]] && { KB_PRESENT=1; info "[dry-run] existing KB would be replaced in place (--refresh)"; }
 else
-  info "downloading + verifying the brain (~736MB) — replicating bin/install.mjs …"
+  [[ "$BRAIN_REFRESH" -eq 1 && -f "$MCP_MARKER" ]] && info "refreshing existing KB in place (--refresh)"
+  info "downloading + verifying the brain (GB-class) — replicating bin/install.mjs …"
   DL="$(mktemp)"
   cat > "$DL" <<'NODE'
 'use strict';
@@ -178,11 +186,46 @@ function verify(zip, sig) {
 })();
 NODE
   if KB_DIR="$KB_DIR" ALLOW_UNSIGNED="$BRAIN_ALLOW_UNSIGNED" node "$DL"; then
-    KB_PRESENT=1; fix "Downloaded + verified + unpacked ruvnet-brain KB into $KB_DIR"; pass "KB installed at $KB_DIR"
+    KB_PRESENT=1; KB_REFRESHED="$BRAIN_REFRESH"
+    fix "Downloaded + verified + unpacked ruvnet-brain KB into $KB_DIR"; pass "KB installed at $KB_DIR"
   else
-    warn "brain download/verify failed — KB still MISSING (see messages above)"
+    if [[ -f "$MCP_MARKER" ]]; then
+      KB_PRESENT=1
+      warn "brain refresh download/verify failed — existing KB left as-is (see messages above)"
+    else
+      warn "brain download/verify failed — KB still MISSING (see messages above)"
+    fi
   fi
   rm -f "$DL"
+fi
+
+# ── Step 1.5: KB freshness (BRAIN-KB-REFRESH-V1) ────────────────────────────
+# Compare the installed KB's package.json version against the newest GitHub
+# Release tag. Network-gated (6s), NON-fatal: offline/API failure reads as
+# UNKNOWN (info, exit unchanged). Test/offline override: KIT_TEST_BRAIN_LATEST.
+brain_latest_tag() {
+  [[ -n "${KIT_TEST_BRAIN_LATEST:-}" ]] && { echo "${KIT_TEST_BRAIN_LATEST#v}"; return; }
+  curl -fsSL --max-time 6 -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/stuinfla/ruvnet-brain/releases/latest" 2>/dev/null \
+    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[^"]*"v?([^"]+)".*/\1/'
+}
+
+header "1.5" "KB freshness (BRAIN-KB-REFRESH-V1)"
+if [[ "$KB_PRESENT" -ne 1 ]]; then
+  info "KB not present — freshness not applicable"
+else
+  KB_LOCAL_VER="$(node -p "require('$KB_DIR/package.json').version" 2>/dev/null || echo '')"
+  BRAIN_LATEST="$(brain_latest_tag)"
+  if [[ -z "$KB_LOCAL_VER" ]]; then
+    info "KB has no readable package.json version — freshness unknown"
+  elif [[ -z "$BRAIN_LATEST" ]]; then
+    info "could not reach GitHub — freshness UNKNOWN (offline is fine; installed KB v$KB_LOCAL_VER)"
+  elif aqe_semver_lt "$KB_LOCAL_VER" "$BRAIN_LATEST"; then
+    warn "KB v$KB_LOCAL_VER is STALE — released v$BRAIN_LATEST is newer"
+    info "refresh: bin/ruflo-kit fix-brain $TARGET_DIR --refresh    (or: npx ruvnet-brain --update)"
+  else
+    pass "KB v$KB_LOCAL_VER is current (latest release v$BRAIN_LATEST)"
+  fi
 fi
 
 # ── Step 2: ensure the local reader deps live in the KB dir ─────────────────
@@ -190,7 +233,9 @@ header "2" "Local reader deps (@ruvector/rvf + @xenova/transformers)"
 reader_ok() { [[ -d "$KB_DIR/node_modules/@ruvector" && -f "$KB_DIR/node_modules/@xenova/transformers/package.json" ]]; }
 if [[ "$KB_PRESENT" -ne 1 ]]; then
   info "KB not present — nothing to install into yet (run with --download or set RUVNET_BRAIN_KB)"
-elif reader_ok; then
+elif [[ "$KB_REFRESHED" -ne 1 ]] && reader_ok; then
+  # after a --refresh the bundle ships a new package-lock — presence of an OLD
+  # node_modules must not skip the reinstall, so the early-pass is refresh-gated
   pass "reader deps present (vector reads run offline — no cloud, no API key)"
 elif [[ "$DRY_RUN" -eq 1 ]]; then
   info "[dry-run] would run npm install in $KB_DIR to add the reader deps"
@@ -281,31 +326,13 @@ elif ! node --check "$MCP_MARKER" 2>/dev/null; then
 else
   pass "forge-mcp-all.mjs loads (node --check clean)"
   if [[ -f "$SERVER_MJS" ]] && reader_ok; then
-    PROBE="$(mktemp)"
-    cat > "$PROBE" <<'NODE'
-'use strict';
-// Best-effort: spawn the vendored launcher and send ONE MCP `initialize` request;
-// a JSON-RPC result on stdout proves the server answers. Timeout → PROBE_NORESP
-// (first run may be warming the local model) — the caller treats that as warn, not fail.
-const { spawn } = require('node:child_process');
-const child = spawn('node', [process.env.SERVER_MJS], { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, RUVNET_BRAIN_KB: process.env.KB_DIR } });
-let out = '', done = false;
-const finish = (tok) => { if (done) return; done = true; try { child.kill('SIGKILL'); } catch (_) {} console.log(tok); process.exit(0); };
-const timer = setTimeout(() => finish('PROBE_NORESP'), 6000);
-child.stdout.on('data', (d) => {
-  out += d.toString();
-  for (const line of out.split('\n')) { if (!line.trim()) continue; try { const m = JSON.parse(line); if (m && m.id === 1 && (m.result || m.error)) { clearTimeout(timer); return finish(m.result ? 'PROBE_OK' : 'PROBE_NORESP'); } } catch (_) { /* partial line */ } }
-});
-child.on('error', () => { clearTimeout(timer); finish('PROBE_ERR'); });
-child.on('exit', () => { clearTimeout(timer); finish('PROBE_NORESP'); });
-child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'fix-brain-probe', version: '1.0' } } }) + '\n');
-NODE
-    case "$(SERVER_MJS="$SERVER_MJS" KB_DIR="$KB_DIR" node "$PROBE" 2>/dev/null)" in
+    # shared handshake probe (common.sh) — timeout is soft: the first run may be
+    # warming the local model, so NORESP is a warn, never a fail
+    case "$(RUVNET_BRAIN_KB="$KB_DIR" mcp_initialize_probe 6 node "$SERVER_MJS")" in
       PROBE_OK)     pass "MCP initialize handshake answered — search_ruvnet server is live";;
       PROBE_NORESP) warn "server launched but did not answer initialize in time (first-run model warmup?) — verify in a live session";;
       *)            warn "MCP server probe inconclusive — verify search_ruvnet in a live Claude Code session";;
     esac
-    rm -f "$PROBE"
   else
     info "reader deps absent — skipped the live MCP handshake (node-load check passed)"
   fi
