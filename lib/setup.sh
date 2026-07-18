@@ -46,8 +46,9 @@ kit_resolve ${_KR_ARGS[@]+"${_KR_ARGS[@]}"}
 
 _dryflag=()
 [[ "$DRY_RUN" -eq 1 ]] && _dryflag=(--dry-run)
-# Display suffixes — must be EMPTY when dry-run is off (${DRY_RUN:+…} expands
-# for "0" too, which made live summaries claim "(dry-run — no changes made)").
+# Display suffixes — must be EMPTY when dry-run is off. (A ":+"-style parameter
+# expansion on DRY_RUN expands for "0" too, which made live summaries claim
+# "(dry-run — no changes made)"; hence the explicit -eq 1 test.)
 _DRY_SFX=""; _DRY_TAG=""
 [[ "$DRY_RUN" -eq 1 ]] && { _DRY_SFX=" (dry-run — no changes made)"; _DRY_TAG=" (dry-run)"; }
 

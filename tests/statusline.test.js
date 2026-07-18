@@ -158,18 +158,23 @@ describe('statusline --json output', () => {
   });
 
   it('has top-level keys: adrs, hooks, agentdb, swarmdb, tests', () => {
-    // swarmdb is state-dependent: the key exists only when .swarm/memory.db is
-    // present in cwd. A dogfooded machine always has it; a clean CI checkout
-    // does not (and whether an earlier test created it is order-dependent —
-    // observed as a macos-only CI failure). Provision it deterministically:
-    // create an empty placeholder ONLY when absent, never touch an existing DB.
+    // Two order-dependent hazards make this flaky against the repo cwd (both
+    // observed as macos-only CI failures):
+    //  1. swarmdb requires .swarm/memory.db in cwd (absent on a clean checkout
+    //     unless an earlier test happened to create it);
+    //  2. statusline caches its data per-cwd (tmpdir, md5(CWD), 10s TTL) — a
+    //     synthetic cache written by statusline-cache tests for the SAME cwd
+    //     can be served here, and it predates the swarmdb key.
+    // Deterministic on every platform: a throwaway cwd (own cache slot, no
+    // cross-file race) provisioned with a .swarm/memory.db placeholder.
     const fs = require('fs');
-    const swarmDb = path.join(PROJECT_ROOT, '.swarm', 'memory.db');
-    if (!fs.existsSync(swarmDb)) {
-      fs.mkdirSync(path.dirname(swarmDb), { recursive: true });
-      fs.writeFileSync(swarmDb, '');
-    }
-    const r = run(['--json']);
+    const os = require('os');
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'statusline-json-'));
+    fs.mkdirSync(path.join(cwd, '.swarm'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.swarm', 'memory.db'), '');
+    const r = spawnSync(process.execPath, [SCRIPT, '--json'], {
+      encoding: 'utf8', timeout: 30000, cwd,
+    });
     const d = JSON.parse(r.stdout);
     expect(d).toHaveProperty('adrs');
     expect(d).toHaveProperty('hooks');
