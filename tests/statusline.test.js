@@ -28,10 +28,12 @@ const os = require('os');
 // session hooks REGENERATE .claude/helpers mid-suite (observed in CI: the
 // seeded statusline.cjs was replaced by a vanilla upstream copy between the
 // seed step and this file's execution — same clobber the hook-handler suite
-// hit). assets/claude-helpers/statusline.cjs is what HELPER-SEED-V1/
-// fix-statusbar guarantee gets installed, it is self-contained (no sibling
-// requires), and it cannot be rewritten under the suite's feet.
-const SCRIPT = path.resolve(__dirname, '../assets/claude-helpers/statusline.cjs');
+// hit). Under TRUTH-STATUSLINE-V1 the single source of truth is
+// assets/statusline.cjs — what fix-statusbar installs and what HELPER-SEED
+// seeds; the retired assets/claude-helpers/ copy is deleted (see
+// statusline-canonical.test.js). It is self-contained (no sibling requires)
+// and cannot be rewritten under the suite's feet.
+const SCRIPT = path.resolve(__dirname, '../assets/statusline.cjs');
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 function run(args = [], opts = {}) {
@@ -218,6 +220,70 @@ describe('statusline --json output', () => {
     const r = run(['--json']);
     const d = JSON.parse(r.stdout);
     expect(d.tests.testFiles).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ── TRUTH-STATUSLINE-V1 additive --json keys ─────────────────────────────────
+// The truth overhaul keeps EVERY existing key (asserted above) and adds real,
+// disk-derived fields. Rendered in a throwaway cwd with a .swarm/memory.db
+// placeholder so the swarmdb branch runs and the cache slot is this test's own
+// (no cross-file cache race — same isolation the top-level-keys test uses).
+// Expected-fail until w-statusline lands TRUTH-SL-V1 on assets/statusline.cjs.
+
+describe('statusline --json — TRUTH-SL-V1 additive keys', () => {
+  let cwd, d;
+
+  beforeAll(() => {
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'statusline-truthkeys-'));
+    fs.mkdirSync(path.join(cwd, '.swarm'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.swarm', 'memory.db'), '');
+    // getAQEStats() gates the additive `aqe` block on the existence of
+    // .agentic-qe/memory.db — provision it so the key is present (it is a REAL
+    // disk-derived block, absent by design on non-AQE targets).
+    fs.mkdirSync(path.join(cwd, '.agentic-qe'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.agentic-qe', 'memory.db'), '');
+    const r = spawnSync(process.execPath, [SCRIPT, '--json'], {
+      encoding: 'utf8', timeout: 30000, cwd,
+    });
+    d = JSON.parse(r.stdout);
+  }, 40000);
+
+  afterAll(() => { if (cwd) fs.rmSync(cwd, { recursive: true, force: true }); });
+
+  it('stores: N-of-5 learning-store liveness ({live,total,detail})', () => {
+    expect(d).toHaveProperty('stores');
+    expect(typeof d.stores.live).toBe('number');
+    expect(d.stores.total).toBe(5);
+    expect(d.stores.live).toBeGreaterThanOrEqual(0);
+    expect(d.stores.live).toBeLessThanOrEqual(5);
+    // detail[] carries per-store truth so tests/dashboard can prove each one.
+    expect(Array.isArray(d.stores.detail)).toBe(true);
+    expect(d.stores.detail.length).toBe(5);
+  });
+
+  it('swarm.registry: present as a key, nullable (null when no swarm-state.json)', () => {
+    // registry-backed swarm chip; the key must exist even when there is no
+    // registry file (value null), never be silently absent.
+    expect(d.swarm).toHaveProperty('registry');
+    expect(d.swarm.registry === null || typeof d.swarm.registry === 'object').toBe(true);
+  });
+
+  it('tests.countMethod is the real-count method tag and testCases >= testFiles', () => {
+    expect(d.tests.countMethod).toBe('regex-scan');
+    expect(typeof d.tests.testCases).toBe('number');
+    expect(d.tests.testCases).toBeGreaterThanOrEqual(d.tests.testFiles);
+  });
+
+  it('system.storesMB is a number (Σ of the store sizes, replacing renderer-heap "memory")', () => {
+    expect(typeof d.system.storesMB).toBe('number');
+    expect(d.system.storesMB).toBeGreaterThanOrEqual(0);
+  });
+
+  it('aqe: real disk-derived block present when .agentic-qe/memory.db exists', () => {
+    expect(d).toHaveProperty('aqe');
+    expect(typeof d.aqe.patterns).toBe('number');
+    expect(typeof d.aqe.vectors).toBe('number');
+    expect(typeof d.aqe.hasIndex).toBe('boolean');
   });
 });
 

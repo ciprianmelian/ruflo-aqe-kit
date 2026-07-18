@@ -1620,7 +1620,7 @@ for d in "${NM_DIRS[@]}"; do
 done
 while IFS= read -r f; do [[ -n "$f" ]] && NM_FILES+=("$f"); done < <(find "$TARGET_DIR/.claude/commands" -maxdepth 1 -type f -name 'claude-flow-*.md' 2>/dev/null)
 
-for f in "${NM_FILES[@]}"; do
+for f in ${NM_FILES[@]+"${NM_FILES[@]}"}; do
   # Only act if a VERIFIED-mappable legacy invocation is present.
   if grep -qE "${NM_PREFIX}(memory (query|search)|swarm init|workflow execute|hook (pre-edit|post-edit|pre-task|post-task|session-end))" "$f" 2>/dev/null; then
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -1864,6 +1864,50 @@ if [[ -d "$CF_DIR" ]]; then
   fi
 else
   pass "No .claude-flow directory (fresh project)"
+fi
+
+# ── Step 8b: Daemon autostart project opt-out (CF-CONFIG-AUTOSTART-OFF-V1) ────
+# Upstream `@claude-flow/cli/dist/src/services/daemon-autostart.js` (invoked from
+# index.js on EVERY CLI call except `daemon` itself) spawns a detached, billed
+# background daemon unless the project opts out via claude-flow.config.json
+# daemon.autostart:false. The statusline's 5s `ruflo hooks statusline` refresh
+# turned every render into a daemon-resurrection channel (12 live daemons found in
+# the 2026-07-18 audit) that bypasses both existing gates — RUFLO_DAEMON_MODE (the
+# kit's own start-sites, Patch 50) and .agentic-qe daemonAutoStart:false (aqe paths,
+# AQE-DAEMON-AUTOSTART-OFF-V1). This writes the THIRD, upstream-honored gate: the
+# project-root config opt-out. Idempotent value-check; creates the file when absent;
+# preserves every other key; .bak first; DRY_RUN prints intent. Deliberate daemon use
+# stays possible via `ruflo daemon start` / RUFLO_DAEMON_MODE=auto.
+header "8b/11" "Daemon autostart project opt-out (CF-CONFIG-AUTOSTART-OFF-V1)"
+CF_CONFIG="$TARGET_DIR/claude-flow.config.json"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ -f "$CF_CONFIG" ]]; then
+    info "[dry-run] would ensure daemon.autostart=false in claude-flow.config.json (preserve other keys)"
+  else
+    info "[dry-run] would create claude-flow.config.json with {\"daemon\":{\"autostart\":false}}"
+  fi
+else
+  [[ -f "$CF_CONFIG" ]] && backup "$CF_CONFIG" "fixruflo.bak"
+  CF_RES="$(node -e '
+    const fs = require("fs"), F = process.argv[1];
+    if (!fs.existsSync(F)) {
+      fs.writeFileSync(F, JSON.stringify({ daemon: { autostart: false } }, null, 2) + "\n");
+      console.log("CHANGED"); process.exit(0);
+    }
+    let s;
+    try { s = JSON.parse(fs.readFileSync(F, "utf8")); } catch (e) { console.log("INVALID_JSON"); process.exit(0); }
+    s.daemon = (s.daemon && typeof s.daemon === "object") ? s.daemon : {};
+    if (s.daemon.autostart === false) { console.log("UNCHANGED"); process.exit(0); }
+    s.daemon.autostart = false;
+    fs.writeFileSync(F, JSON.stringify(s, null, 2) + "\n");
+    console.log("CHANGED");
+  ' "$CF_CONFIG" 2>/dev/null)"
+  case "$CF_RES" in
+    CHANGED)      fix "Pinned daemon.autostart=false in claude-flow.config.json (CF-CONFIG-AUTOSTART-OFF-V1 — billed daemon stays opt-in)"; pass "claude-flow.config.json daemon.autostart pinned false";;
+    UNCHANGED)    pass "daemon.autostart already false (CF-CONFIG-AUTOSTART-OFF-V1)";;
+    INVALID_JSON) warn "claude-flow.config.json is not valid JSON — leaving untouched (verify manually)";;
+    *)            warn "claude-flow.config.json pin inconclusive ($CF_RES)";;
+  esac
 fi
 
 # ── Step 9: Multi-node check ────────────────────────────────────────────────
