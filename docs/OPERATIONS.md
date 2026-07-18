@@ -16,6 +16,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
   - [A7. Security scan](#a7-security-scan)
   - [A8. Daemon & token cost](#a8-daemon--token-cost)
   - [A9. ruvnet-brain (MCP-only knowledge base)](#a9-ruvnet-brain-mcp-only-knowledge-base)
+  - [A10. Fresh machine → proved stack (setup + proof)](#a10-fresh-machine--proved-stack-setup--proof)
 - [B. Troubleshooting](#b-troubleshooting)
 - [C. Architecture (plain English)](#c-architecture-plain-english)
 - [D. See also](#d-see-also)
@@ -195,6 +196,32 @@ Stale `daemon-state.json` files can read `running: true` with no live process �
 **Why MCP-only (not a hook or daemon):** anything that fires on a hook or a timer can spawn billed `claude --print` work unattended — the exact trap Tier 13 closed. A pure MCP read surface can only run when the agent explicitly calls it, so it stays free at rest. Full record: `_INSTRUCTIONS.md` Patch 53.
 
 **Verify:** `.mcp.json` contains a **`ruvnet-brain`** server entry (the server exposes the `search_ruvnet` tool — do not grep for the tool name); `~/.cache/ruvnet-brain/kb` exists and verifies; the health probe reports OK. The statusline shows the `🧿 Ruflo Brain` row (`BRAIN-STATUSLINE-V1`, installed by `fix-statusbar`) with repo count, KB size, MCP registration and reader-deps state — if it reads `KB ●missing`, run `fix-brain --download`.
+
+**Refreshing a stale KB (`BRAIN-KB-REFRESH-V1`, Patch 57):** every `fix-brain` run reports freshness — installed KB identity vs the newest GitHub Release (offline → `UNKNOWN`, informational, never an error). On a STALE report:
+
+```bash
+bin/ruflo-kit fix-brain <target> --refresh     # kit path: Ed25519 fail-closed re-download, in-place replace, reader deps reinstalled
+npx ruvnet-brain --update                      # upstream alternative (same bundle)
+```
+
+The refresh is a **destructive in-place replace** with no multi-GB backup — the safety net is the fail-closed signature verify plus the post-unpack marker check (a failed download leaves the existing KB untouched). The installed identity is recorded in `$KB_DIR/.release-tag` at download time because the bundle's inner `package.json` can lag the release tag (v3.3.1 ships `3.0.0`-era `3.3.0`), which would otherwise read as permanently stale. `ruflo-kit status` shows the KB version disk-only (`mcp.brainKb.kbVersion`).
+
+### A10. Fresh machine → proved stack (`setup` + `proof`)
+
+*Use when:* bringing the full stack up on a new machine or a new target codebase — or whenever you want hard evidence the stack works.
+
+```bash
+bin/ruflo-kit setup <target>                   # the whole path: prereqs → installs → init → sync → proof x2
+bin/ruflo-kit setup <target> --with-brain-kb   # + the opt-in GB-class knowledge base (add --refresh-brain-kb to force-refresh)
+bin/ruflo-kit setup <target> --dry-run         # preview; changes nothing, exits 0
+bin/ruflo-kit proof <target>                   # the evidence check alone, any time
+```
+
+**Stages:** S1 prereqs (node ≥18, npm — with the npm ≥11.17 install-scripts verdict printed, `NPM-ALLOW-SCRIPTS-V1`) → S2 global installs, probe-first idempotent (`ruflo`, `agentic-qe` — closing the old init gap that only *warned* — and `agentdb@pin` + `better-sqlite3`) → S3 `init` → S4 `sync` (the full heal cascade, including brain MCP registration) → S5 brain KB (only with `--with-brain-kb`) → S6 daemon policy: **setup never starts or stops the daemon** (it is billed — [A8](#a8-daemon--token-cost)); it only reports → S7 **proof x2**, and setup's exit code *is* the proof verdict.
+
+**What `proof` actually proves (13 probes, disk/real-output only — never MCP self-reports):** ruflo + aqe CLIs and MCP `initialize` handshakes; the three AgentDB slots (standalone/nested exactly at the pin, hoisted at-or-past the upstream floor); ≥23 controller classes importable from the nested slot; better-sqlite3 loads; brain registered (KB optional = WARN); statusline renders; dist sentinels n/N; `verify-learning` ∈ {live, partial}; health parses sanely (the comma-bug tripwire); `hooks route` answers; all three learning stores accept a write lock. It runs the whole set **twice** — the second pass re-executed under a scrubbed environment (`env -i`) so nothing from the calling shell can influence it — and only identical clean passes earn `PROVED` (exit 0). A probe that changes its answer between passes yields `UNSTABLE`.
+
+**Idempotence contract:** a second `setup` run on a healthy machine installs nothing, changes nothing, and ends PROVED again. Full record: `_INSTRUCTIONS.md` Patch 59.
 
 ---
 
