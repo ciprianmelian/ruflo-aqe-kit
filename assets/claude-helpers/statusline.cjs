@@ -883,6 +883,14 @@ function generateStatusline() {
 // JSON output — delegates to CLI for accuracy; caller can use --json flag
 function generateJSON() {
   const d = getStatuslineData();
+  // Schema guarantee: chip keys must exist no matter which branch produced d
+  // (a 10s cache written by an older writer, upstream CLI schema drift, or an
+  // overlay probe failure). Consumers (dashboard, tests) rely on their presence.
+  if (!d.swarmdb) { try { d.swarmdb = _ra_swarmdb(); } catch (e) { d.swarmdb = { vectorCount: 0, dbSizeKB: 0, hasHnsw: false }; } }
+  if (!d.agentdb) { try { d.agentdb = _ra_agentdb(); } catch (e) { d.agentdb = { vectorCount: 0, dbSizeKB: 0, hasHnsw: false }; } }
+  if (!d.tests)   { try { d.tests   = getLocalTestCount(); } catch (e) { d.tests = { testFiles: 0, testCases: 0 }; } }
+  if (!d.adrs)    { try { d.adrs    = getLocalADRCount(); } catch (e) { d.adrs = { count: 0, implemented: 0, compliance: 0 }; } }
+  if (!d.hooks)   { try { d.hooks   = _ra_hooks(); } catch (e) { d.hooks = { enabled: 0, total: 0 }; } }
   const git = getGitInfo();
   return Object.assign({}, d, {
     user: Object.assign({ name: git.name, gitBranch: git.gitBranch }, d.user || {}),
