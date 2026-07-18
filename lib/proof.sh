@@ -296,15 +296,24 @@ probe_swarm_smoke() {
 # store's health (observed: P13 flapped whenever the live aqe-mcp was writing).
 probe_stores_writable() {
   local rels=(".swarm/memory.db" ".agentic-qe/memory.db" "agentdb.db")
-  local rel db checked=0 missing=0 locked=""
+  local rel db checked=0 missing=0 locked="" held=""
   for rel in "${rels[@]}"; do
     db="$TARGET_DIR/$rel"
     if [[ ! -f "$db" ]]; then missing=$((missing + 1)); continue; fi
     checked=$((checked + 1))
-    sqlite3 -cmd ".timeout 3000" "$db" "BEGIN IMMEDIATE; ROLLBACK;" >/dev/null 2>&1 || locked+="$rel "
+    if ! sqlite3 -cmd ".timeout 3000" "$db" "BEGIN IMMEDIATE; ROLLBACK;" >/dev/null 2>&1; then
+      # A LIVE writer (aqe-mcp / claude-flow MCP mid-write) yields transient
+      # SQLITE_BUSY or even SQLITE_IOERR on WAL checkpoints — that is "not
+      # assessable right now", not "broken". FAIL is reserved for a store that
+      # fails with NO live holder (genuinely locked/corrupt).
+      local holder; holder="$(lsof -t -- "$db" 2>/dev/null | head -1)"
+      if [[ -n "$holder" ]]; then held+="$rel(pid $holder) "; else locked+="$rel "; fi
+    fi
   done
   if [[ -n "$locked" ]]; then
-    record_probe "stores-writable" FAIL "locked/unwritable: $locked"
+    record_probe "stores-writable" FAIL "locked/unwritable with no live holder: $locked"
+  elif [[ -n "$held" ]]; then
+    record_probe "stores-writable" WARN "held by live writer: ${held}- writability not assessable mid-session"
   elif [[ "$checked" -eq 0 ]]; then
     record_probe "stores-writable" WARN "no sqlite stores present yet (fresh target)"
   elif [[ "$missing" -gt 0 ]]; then
@@ -354,7 +363,10 @@ probe_daemon_gates() {
   fi
   # (3) running daemons — WARN, never FAIL
   local dcount
-  dcount="$(pgrep -f "cli.js daemon start" 2>/dev/null | grep -c . | tr -d ' ')"
+  # bin/cli.js anchors the match to the real daemon argv — a shell whose command
+  # line merely CONTAINS the words (e.g. an agent discussing it) false-matched
+  # the looser pattern (x2 re-audit note).
+  dcount="$(pgrep -f "bin/cli.js daemon start" 2>/dev/null | grep -c . | tr -d ' ')"
   if [[ "${dcount:-0}" -gt 0 ]]; then
     [[ "$verdict" != "FAIL" ]] && verdict="WARN"
     detail="$detail · $dcount daemon proc(s) running (operator?)"

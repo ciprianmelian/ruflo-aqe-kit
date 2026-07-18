@@ -211,7 +211,23 @@ gone in 3.32.7.
 1. **`DAEMON-AUTOSTART-3-V1`** — `claude-flow.config.json` autostart pin + `RUFLO_DAEMON_AUTOSTART=0`
    in the statusline's child env (both copies); 12 daemons killed; zero respawn verified.
 
-## Recommended follow-ups (not applied)
+## Remediated by TRUTH-STATUSLINE-V1 (same day — Patches 60/61)
+
+Every follow-up below was implemented on `feat/truth-statusline-20260718` and validated by an
+**adversarial re-audit** (same instrument as this audit, fresh ground truth at its own run
+time): census went from REAL 20 / COSMETIC 8 / COUNTER 2 / STALE 4 to
+**REAL 33 · DERIVED-honest 9 · zero COSMETIC / COUNTER / STALE — no refutation**. The line now
+renders stored episodes/patterns (counter demoted to a dim `N ev` chip), the real swarm
+registry, measured indexed-vector counts (no `Nx` claim anywhere), regex-counted test cases,
+store-liveness instead of file-size buckets, the honest model id-tail, a fresh SI row
+(bench re-run: acc 33.3 %), and an AQE ⚡ that stays unlit until a real index exists.
+Canonical single source enforced (`assets/statusline.cjs`, sha256-verified on install,
+drift-tested in the suite); proof gained P14 (daemon gates) + P15 (statusline-truth
+tripwire); the kit heals the third daemon channel on every target
+(`CF-CONFIG-AUTOSTART-OFF-V1`) and pins `RUFLO_DAEMON_AUTOSTART=0` for all kit and suite
+children. Full record: `_INSTRUCTIONS.md` Tier 17; re-audit evidence: `sl-audit/x2-reaudit.md`.
+
+## Recommended follow-ups (superseded — all applied, see above)
 
 1. fix-ruflo sentinel writing the `claude-flow.config.json` daemon pin on every target
    (`CF-CONFIG-AUTOSTART-OFF-V1`) + a proof probe asserting zero `cli.js daemon start` processes.
