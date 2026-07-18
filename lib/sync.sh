@@ -18,6 +18,10 @@ set -uo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 kit_resolve "$@"          # parses --dry-run into DRY_RUN natively
+# Display suffixes — must be EMPTY when dry-run is off (${DRY_RUN:+…} expands
+# for "0" too, which made live summaries claim "(dry-run — no changes made)").
+_DRY_SFX=""; _DRY_TAG=""
+[[ "$DRY_RUN" -eq 1 ]] && { _DRY_SFX=" (dry-run — no changes made)"; _DRY_TAG=" (dry-run)"; }
 kit_require_target
 
 echo "============================================"
@@ -59,7 +63,7 @@ run_fix() {
     record "$label" skip "-" "not present"
     return
   fi
-  header "$label" "running${DRY_RUN:+ (dry-run)}"
+  header "$label" "running${_DRY_TAG}"
   local out rc
   out="$(bash "$script" "$TARGET_DIR" ${_dryflag[@]+"${_dryflag[@]}"} 2>&1)"; rc=$?
   local changes; changes="$(parse_changes "$out")"
@@ -101,7 +105,7 @@ fi
 # ── Summary table ────────────────────────────────────────────────────────────
 echo ""
 echo "============================================"
-echo " sync summary${DRY_RUN:+ (dry-run — no changes made)}"
+echo " sync summary${_DRY_SFX}"
 echo "============================================"
 printf "  %-16s %-8s %-9s %s\n" "STAGE" "RESULT" "CHANGES" "DETAIL"
 for i in "${!STAGE_NAME[@]}"; do
@@ -122,6 +126,6 @@ if [[ "$HARD_FAIL" -eq 1 ]]; then
   echo "============================================"
   exit 1
 fi
-echo -e "  ${GREEN}✓ sync complete${NC}${DRY_RUN:+ (dry-run)}"
+echo -e "  ${GREEN}✓ sync complete${NC}${_DRY_TAG}"
 echo "============================================"
 exit 0

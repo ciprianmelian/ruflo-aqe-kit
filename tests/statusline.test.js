@@ -158,6 +158,17 @@ describe('statusline --json output', () => {
   });
 
   it('has top-level keys: adrs, hooks, agentdb, swarmdb, tests', () => {
+    // swarmdb is state-dependent: the key exists only when .swarm/memory.db is
+    // present in cwd. A dogfooded machine always has it; a clean CI checkout
+    // does not (and whether an earlier test created it is order-dependent —
+    // observed as a macos-only CI failure). Provision it deterministically:
+    // create an empty placeholder ONLY when absent, never touch an existing DB.
+    const fs = require('fs');
+    const swarmDb = path.join(PROJECT_ROOT, '.swarm', 'memory.db');
+    if (!fs.existsSync(swarmDb)) {
+      fs.mkdirSync(path.dirname(swarmDb), { recursive: true });
+      fs.writeFileSync(swarmDb, '');
+    }
     const r = run(['--json']);
     const d = JSON.parse(r.stdout);
     expect(d).toHaveProperty('adrs');
