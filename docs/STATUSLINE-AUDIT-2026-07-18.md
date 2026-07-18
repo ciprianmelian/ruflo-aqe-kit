@@ -9,7 +9,7 @@ strictly read-only (`sqlite3 -readonly`, `stat`, one-shot CLI reads under `alarm
 during the audit — noted where relevant):
 
 ```
-▊ RuFlo V3.32.7 ● Ciprian Melian │ ⏇ main ?5 │ Opus 4.6 (1M context)
+▊ RuFlo V3.32.7 ● <operator> │ ⏇ main ?5 │ Opus 4.6 (1M context)
 🏗️ Learning [●●●●●] 5/5   ⚡ HNSW 150x
 🤖 Swarm ◉ 1/15  👥 Sub 0  🪝 10/10  🔴 CVE 0/0  💾 18MB  🧠 86%
 📶 SONA [●●●●○] 1481 traj │ 176 patterns │ Δ 1.43 LoRA
