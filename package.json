@@ -1,0 +1,17 @@
+{
+  "name": "osam-fullstack-codebase",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "vitest run --config vitest.config.js",
+    "test:watch": "vitest --config vitest.config.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "vitest": "^2.0.0"
+  }
+}

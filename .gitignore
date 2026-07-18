@@ -31,8 +31,9 @@ vendor/
 node_modules/
 .mcp.json
 .mcp.json.bak
-package.json
-package-lock.json
+# package.json + package-lock.json are TRACKED: they are the kit's own vitest
+# manifest, which CI (nightly-drift "npm ci" + "npm test") depends on. They are
+# kit source, not dogfood runtime state — do not re-ignore them.
 agentdb.*
 *.rvf
 *.rvf.lock
