@@ -24,7 +24,14 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const SCRIPT = path.resolve(__dirname, '../.claude/helpers/statusline.cjs');
+// Test the CANONICAL tracked baseline, not the installed copy: upstream
+// session hooks REGENERATE .claude/helpers mid-suite (observed in CI: the
+// seeded statusline.cjs was replaced by a vanilla upstream copy between the
+// seed step and this file's execution — same clobber the hook-handler suite
+// hit). assets/claude-helpers/statusline.cjs is what HELPER-SEED-V1/
+// fix-statusbar guarantee gets installed, it is self-contained (no sibling
+// requires), and it cannot be rewritten under the suite's feet.
+const SCRIPT = path.resolve(__dirname, '../assets/claude-helpers/statusline.cjs');
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 function run(args = [], opts = {}) {
