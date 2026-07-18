@@ -19,11 +19,35 @@
 'use strict';
 
 const { execFile } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const util = require('util');
 
 const execFileAsync = util.promisify(execFile);
-const HANDLER = path.resolve(__dirname, '../.claude/helpers/hook-handler.cjs');
+
+// SANDBOXED COPY: spawn a snapshot of .claude/helpers, not the live tree.
+// Upstream session hooks can REGENERATE the live helpers mid-suite (first-run
+// auto-enable / aqe session-end refresh — the exact clobber HOOK-BLOCK-EXIT2-V1
+// re-heals), which made the dangerous-command block tests flaky: they'd assert
+// exit 2 against a freshly-reverted exit-1 copy. A snapshot taken at suite
+// start is immune; hook-handler resolves its siblings via __dirname, so the
+// whole dir is copied to keep relative requires working.
+const LIVE_HELPERS = path.resolve(__dirname, '../.claude/helpers');
+const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-handler-sandbox-'));
+fs.cpSync(LIVE_HELPERS, SANDBOX, {
+  recursive: true,
+  filter: (src) => !/\.(fixaqe-bak|exit2-bak|bak)$/.test(src),
+});
+// The handler itself comes from the CANONICAL tracked baseline: if a clobber
+// already landed before this file loaded, the live copy may be the reverted
+// exit-1 form. assets/claude-helpers/hook-handler.cjs is the healed behavior
+// the kit guarantees (fix-aqe Step 8 restores exactly it), so test that.
+fs.copyFileSync(
+  path.resolve(__dirname, '../assets/claude-helpers/hook-handler.cjs'),
+  path.join(SANDBOX, 'hook-handler.cjs'),
+);
+const HANDLER = path.join(SANDBOX, 'hook-handler.cjs');
 
 // Helper: spawn hook-handler with optional stdin JSON
 async function runHook(command, stdinJson, extraArgs = []) {

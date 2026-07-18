@@ -12,6 +12,7 @@
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
+    "sql.js": "^1.14.1",
     "vitest": "^2.0.0"
   }
 }

@@ -104,17 +104,10 @@ ruflo_timeout() {
   perl -e 'alarm shift; exec @ARGV' "$secs" "${RUFLO[@]}" "$@" 2>/dev/null || true
 }
 
-# Extract a number after a label in tabular output (handles `│` and `|` cells)
-extract_number_after() {
-  local label="$1" text="$2"
-  echo "$text" | grep -m1 -E "$label" | grep -oE '[0-9]+(\.[0-9]+)?' | head -1 || echo 0
-}
-
-# Extract a percentage value (e.g. "75.0%") and strip the %
-extract_percent() {
-  local label="$1" text="$2"
-  echo "$text" | grep -m1 -E "$label" | grep -oE '[0-9]+(\.[0-9]+)?%' | head -1 | tr -d '%' || echo 0
-}
+# Number/percent parsers live in common.sh (HEALTH-COMMA-V1): ruflo >=3.32
+# prints comma-separated counts (`1,921`), which the old in-file digit-grep
+# read as `1`. extract_number_after / extract_percent / extract_paren_count
+# are comma-safe and unit-tested in tests/health-parser.test.js.
 
 # ── collect metrics ─────────────────────────────────────────────────────────
 NOW_S=$(date +%s)
@@ -125,7 +118,7 @@ NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 MEMORY_OUT=$(ruflo_timeout 5 memory stats || true)
 MEMORY_TOTAL=$(extract_number_after 'Total Entries' "$MEMORY_OUT")
 MEMORY_TOTAL=$(num_or_zero "$MEMORY_TOTAL")
-MEMORY_HNSW=$(echo "$MEMORY_OUT" | grep -m1 -E 'HNSW Index' | grep -oE '\([0-9]+ entries\)' | grep -oE '[0-9]+' || echo 0)
+MEMORY_HNSW=$(extract_paren_count 'HNSW Index' "$MEMORY_OUT")
 MEMORY_HNSW=$(num_or_zero "$MEMORY_HNSW")
 
 # Intelligence: `ruflo hooks intelligence stats` (SONA + MoE block)
@@ -141,7 +134,7 @@ SEARCH_SPEEDUP=$(echo "$INTEL_OUT" | grep -m1 -E 'HNSW.*Faster Search' | grep -o
 
 # Neural: `ruflo neural status` (ReasoningBank line)
 NEURAL_OUT=$(ruflo_timeout 5 neural status || true)
-RB_PAT=$(echo "$NEURAL_OUT" | grep -m1 -E 'ReasoningBank' | grep -oE '[0-9]+ patterns' | grep -oE '[0-9]+' || echo 0)
+RB_PAT=$(echo "$NEURAL_OUT" | grep -m1 -E 'ReasoningBank' | tr -d ',' | grep -oE '[0-9]+ patterns' | grep -oE '[0-9]+' || echo 0)
 RB_PAT=$(num_or_zero "$RB_PAT")
 
 # Direct sqlite probes (fast, ~20ms each)

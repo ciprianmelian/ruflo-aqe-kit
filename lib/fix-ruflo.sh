@@ -98,7 +98,8 @@ if [[ -z "$INSTALLED_RUFLO" ]]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
     info "[dry-run] Would: npm install -g ruflo@latest"
   else
-    npm install -g ruflo@latest 2>/dev/null && {
+    # kit_npm_global_install = shared helper (NPM-ALLOW-SCRIPTS-V1 aware)
+    kit_npm_global_install ruflo@latest && {
       fix "Installed ruflo@$LATEST_RUFLO"
       INSTALLED_RUFLO="$LATEST_RUFLO"
       pass "Installed ruflo@$LATEST_RUFLO"
@@ -112,7 +113,7 @@ elif [[ "$INSTALLED_RUFLO" != "$LATEST_RUFLO" && -n "$LATEST_RUFLO" ]]; then
   if [[ "$DRY_RUN" -eq 1 ]]; then
     info "[dry-run] Would: npm install -g ruflo@latest"
   else
-    npm install -g ruflo@latest 2>/dev/null && {
+    kit_npm_global_install ruflo@latest && {
       fix "Updated ruflo to $LATEST_RUFLO"
       INSTALLED_RUFLO="$LATEST_RUFLO"
       pass "Updated ruflo to $LATEST_RUFLO"
@@ -994,7 +995,13 @@ while IFS= read -r memreg; do
   force_nested_agentdb "$(dirname "$(dirname "$memreg")")"
   AGENTDB_FORCED_ANY=1
 done < <(
-  { find "$HOME_DIR/.nvm" -maxdepth 12 -path "*ruflo/node_modules/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
+  # `npm root -g` FIRST: it is authoritative for ANY node distribution — nvm,
+  # homebrew, system, AND GitHub-runner hostedtoolcache, which the hardcoded
+  # roots below miss entirely (nightly-drift caught exactly that: Step 3b
+  # reported "no global registry" on runners with a healthy global ruflo).
+  { _groot="$(npm root -g 2>/dev/null)"
+    [[ -n "$_groot" ]] && find "$_groot/ruflo" -maxdepth 8 -path "*node_modules/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
+    find "$HOME_DIR/.nvm" -maxdepth 12 -path "*ruflo/node_modules/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
     find "/usr/local/lib/node_modules" "/opt/homebrew/lib/node_modules" -maxdepth 6 -path "*ruflo/node_modules/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
   } | sort -u
 )
@@ -1159,7 +1166,7 @@ fi
 # claude-flow) is to install agentdb + better-sqlite3 GLOBALLY and launch the
 # GLOBAL `agentdb` binary (command:"agentdb", args:["mcp","start"]). npx never
 # reconciles a `npm -g` install, so the native build sticks across restarts.
-AGENTDB_VERSION="3.0.0-alpha.10"
+AGENTDB_VERSION="$KIT_AGENTDB_PIN"   # single source of truth: lib/common.sh
 
 # ── Step 5b.0: AGENTDB-GLOBAL-MCP-V1 — install agentdb + better-sqlite3 globally
 # Idempotent: skip when BOTH the global `agentdb` binary and a resolvable global
@@ -1187,8 +1194,7 @@ NPM_ROOT_G="$(npm root -g 2>/dev/null || echo '')"
 # Assert the resolved path is UNDER the global root — node walks up parent dirs,
 # so a stray ~/node_modules/better-sqlite3 would otherwise satisfy this and mask a
 # missing global install (the .mcp.json `agentdb` binary only sees the global one).
-if [[ -n "$NPM_ROOT_G" ]] && \
-   node -e "const p=require.resolve('better-sqlite3',{paths:['$NPM_ROOT_G/agentdb','$NPM_ROOT_G']});if(!p.startsWith('$NPM_ROOT_G'))process.exit(3);require(p)" >/dev/null 2>&1; then
+if [[ -n "$NPM_ROOT_G" ]] && global_bsqlite_loads; then   # shared helper, common.sh
   GLOBAL_BSQLITE_OK=1
 fi
 if [[ "$GLOBAL_AGENTDB_OK" -eq 1 && "$GLOBAL_BSQLITE_OK" -eq 1 ]]; then
@@ -1199,7 +1205,7 @@ else
     info "[dry-run] Would: npm install -g agentdb@$AGENTDB_VERSION better-sqlite3@^11.8.1"
   else
     adb_log="/tmp/ruflo-agentdb-global-install.log"
-    if npm install -g "agentdb@$AGENTDB_VERSION" "better-sqlite3@^11.8.1" >"$adb_log" 2>&1; then
+    if KIT_NPM_LOG="$adb_log" kit_npm_global_install "agentdb@$AGENTDB_VERSION" "better-sqlite3@^11.8.1"; then
       fix "Installed global agentdb@$AGENTDB_VERSION + better-sqlite3 (AGENTDB-GLOBAL-MCP-V1)"
       pass "Global agentdb MCP runtime installed"
     else
@@ -1947,7 +1953,13 @@ while IFS= read -r candidate; do
     REGISTRY_FILE="$candidate"
     break
   fi
-done < <(find ~/.nvm/versions /usr/local/lib/node_modules /opt/homebrew/lib/node_modules -path "*/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null)
+done < <(
+  # npm root -g first — covers hostedtoolcache/system layouts the fixed roots miss.
+  { _groot="$(npm root -g 2>/dev/null)"
+    [[ -n "$_groot" ]] && find "$_groot" -maxdepth 8 -path "*/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
+    find ~/.nvm/versions /usr/local/lib/node_modules /opt/homebrew/lib/node_modules -path "*/@claude-flow/memory/dist/controller-registry.js" 2>/dev/null
+  } | sort -u
+)
 
 if [[ -z "$REGISTRY_FILE" ]]; then
   # Fallback: npx cache (only relevant if no global ruflo install exists)

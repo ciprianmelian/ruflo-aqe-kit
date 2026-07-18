@@ -17,7 +17,12 @@ const path = require('path');
 
 const REPO = path.resolve(__dirname, '..');
 const FIX_BRAIN = path.join(REPO, 'lib', 'fix-brain.sh');
-const SERVER_MJS = path.join(REPO, 'vendor', 'ruvnet-brain', 'plugin', 'mcp', 'server.mjs');
+// Mirror fix-brain.sh's launcher resolution: the local vendor checkout when
+// present, else the kit-tracked fallback copy (clean clone / CI has no vendor/).
+const VENDOR_SERVER = path.join(REPO, 'vendor', 'ruvnet-brain', 'plugin', 'mcp', 'server.mjs');
+const SERVER_MJS = fs.existsSync(VENDOR_SERVER)
+  ? VENDOR_SERVER
+  : path.join(REPO, 'assets', 'brain', 'server.mjs');
 
 // Run fix-brain.sh against <target> with a fixture KB (via RUVNET_BRAIN_KB) and
 // return {code, out}. Never passes --download, so nothing is ever fetched.

@@ -50,14 +50,20 @@ describe('github-safe argument validation', () => {
 // ── Body size cap ─────────────────────────────────────────────────────────────
 
 describe('github-safe body size cap', () => {
-  it('rejects body > 256KB with exit 1 and an error message', () => {
+  // Linux caps a SINGLE argv element at MAX_ARG_STRLEN (128KB): a 256KB body
+  // can never reach the process via argv there — spawnSync fails with E2BIG
+  // (status null) before the helper runs. The cap logic is exercised on macOS;
+  // on Linux these two cases are OS-unspawnable, not helper regressions.
+  const bigArgvOk = process.platform !== 'linux';
+
+  it.skipIf(!bigArgvOk)('rejects body > 256KB with exit 1 and an error message', () => {
     const oversized = 'x'.repeat(256 * 1024 + 1);
     const r = run(['issue', 'comment', '42', oversized]);
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/exceeds maximum/i);
   });
 
-  it('accepts body exactly at the 256KB limit', () => {
+  it.skipIf(!bigArgvOk)('accepts body exactly at the 256KB limit', () => {
     const maxBody = 'x'.repeat(256 * 1024);
     const r = run(['issue', 'comment', '42', maxBody]);
     // Should succeed in dry-run (exits 0, logs DRY-RUN)

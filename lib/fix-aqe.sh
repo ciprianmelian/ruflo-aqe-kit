@@ -108,6 +108,25 @@ else
     cp "$src" "$dst" && { node --check "$dst" 2>/dev/null && { fix "Installed .claude/helpers/$h"; pass "installed $h"; } || { warn "$h failed node --check"; }; }
   done
 
+  # HELPER-SEED-V1: baseline copies of the CLI-generated helpers (router.js,
+  # session.js, hook-handler.cjs, statusline*, …) as healed + behavior-tested on
+  # a dogfooded machine. These are normally written by `ruflo init`/`aqe init`
+  # and then surgically healed in place — so they are installed ONLY WHEN
+  # MISSING (a fresh target / CI checkout), never overwriting an existing
+  # upstream-generated file. This is what lets the kit's vitest suite run on a
+  # clean clone (nightly-drift "Kit unit tests" step).
+  for h in auto-memory-hook.mjs brain-checkpoint.cjs github-safe.mjs \
+           hook-handler.cjs intelligence.cjs learning-service.mjs memory.js \
+           metrics-db.mjs router.js ruflo-hook.cjs session.js \
+           statusline-v3.cjs statusline.cjs statusline.js v3/advisor-call.cjs; do
+    src="$HELPER_SRC/$h"; dst="$CLAUDE_HELPERS/$h"
+    [[ -f "$src" ]] || { warn "missing seed source $h"; continue; }
+    [[ -f "$dst" ]] && { pass "$h present (seed skipped — upstream/healed copy kept)"; continue; }
+    if [[ "$DRY_RUN" -eq 1 ]]; then info "[dry-run] would seed $h"; continue; fi
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst" && { node --check "$dst" 2>/dev/null && { fix "Seeded .claude/helpers/$h (HELPER-SEED-V1)"; pass "seeded $h"; } || { warn "$h failed node --check"; }; }
+  done
+
   # HELPER-MODULE-PIN-V1: in a "type":"module" project, the CJS helpers load as ES
   # modules and the PreCompact/SessionEnd hooks crash with "require is not defined".
   # Pin .claude/helpers/ to commonjs + relocate the ESM github-safe.js -> .mjs.
