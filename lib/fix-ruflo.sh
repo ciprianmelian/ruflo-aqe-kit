@@ -1620,7 +1620,7 @@ for d in "${NM_DIRS[@]}"; do
 done
 while IFS= read -r f; do [[ -n "$f" ]] && NM_FILES+=("$f"); done < <(find "$TARGET_DIR/.claude/commands" -maxdepth 1 -type f -name 'claude-flow-*.md' 2>/dev/null)
 
-for f in "${NM_FILES[@]}"; do
+for f in ${NM_FILES[@]+"${NM_FILES[@]}"}; do
   # Only act if a VERIFIED-mappable legacy invocation is present.
   if grep -qE "${NM_PREFIX}(memory (query|search)|swarm init|workflow execute|hook (pre-edit|post-edit|pre-task|post-task|session-end))" "$f" 2>/dev/null; then
     if [[ "$DRY_RUN" -eq 1 ]]; then
