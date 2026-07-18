@@ -54,6 +54,7 @@ kit_resolve() {
       --dry-run)        DRY_RUN=1 ;;
       --force)          FORCE=1 ;;
       --reactivate)     REACTIVATE=1 ;;
+      --json)           : ;;   # several verbs (status/health/verify-learning/proof/setup) parse --json themselves — not "unknown"
       -h|--help)        KIT_WANT_HELP=1 ;;
       --*)              warn "ignoring unknown flag: $a" ;;
       *)                [[ -z "$tgt" ]] && tgt="$a" ;;
