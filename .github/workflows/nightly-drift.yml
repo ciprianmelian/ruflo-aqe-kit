@@ -74,6 +74,14 @@ jobs:
       - name: health (fails on regression)
         run: bin/ruflo-kit health "$DRIFT_TARGET"
 
+      # The vitest suite exercises .claude/helpers/* — dogfood runtime state a
+      # clean checkout does not have (those files are CLI-generated on a real
+      # machine, then kit-healed). fix-aqe seeds the behavior-tested baselines
+      # from assets/claude-helpers (HELPER-SEED-V1: install only-if-missing) so
+      # the suite can run here; on live targets existing files are never touched.
+      - name: Materialize dogfood helpers into the checkout
+        run: bin/ruflo-kit fix-aqe "$GITHUB_WORKSPACE"
+
       # The kit's own unit suite must stay green against the freshly-installed
       # globals — bash helpers, node instruments, and the fix-script sentinels.
       - name: Kit unit tests

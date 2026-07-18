@@ -111,10 +111,17 @@ fi
 BRAIN_KB="${RUVNET_BRAIN_KB:-${RUVNET_BRAIN_HOME:-$HOME/.cache/ruvnet-brain}/kb}"
 BRAIN_PRESENT=0
 BRAIN_SIZE=""
+BRAIN_VER=""
 if [[ -f "$BRAIN_KB/forge-mcp-all.mjs" ]]; then
   BRAIN_PRESENT=1
   _kb="$(du -sk "$BRAIN_KB" 2>/dev/null | awk '{print $1}')"
   [[ "$_kb" =~ ^[0-9]+$ ]] && BRAIN_SIZE=$((_kb * 1024))
+  # disk-only KB version (BRAIN-KB-REFRESH-V1) — no network here; freshness
+  # against the released bundle is fix-brain Step 1.5's job. Prefer the kit's
+  # .release-tag marker (bundle package.json can lag the release tag).
+  BRAIN_VER="$(head -1 "$BRAIN_KB/.release-tag" 2>/dev/null | tr -d '[:space:]')"
+  BRAIN_VER="${BRAIN_VER#v}"
+  [[ -z "$BRAIN_VER" ]] && BRAIN_VER="$(node -p "require('$BRAIN_KB/package.json').version" 2>/dev/null || echo '')"
 fi
 
 # ── Learning stores (sqlite3 -readonly; n/a when sqlite3 absent) ─────────────
@@ -152,7 +159,7 @@ build_json() {
   AGENTDB_STANDALONE="$AGENTDB_STANDALONE" \
   SENTINEL_ITEMS="$SENTINEL_ITEMS" HOOK_BLOCK_EXIT2="$HOOK_BLOCK_EXIT2" DREAM_LOCKFIX_COUNT="$DREAM_LOCKFIX_COUNT" \
   DAEMON_RUNNING="$DAEMON_RUNNING" DAEMON_PIDS="$DAEMON_PIDS" \
-  MCP_SERVERS="$MCP_SERVERS" BRAIN_PRESENT="$BRAIN_PRESENT" BRAIN_SIZE="$BRAIN_SIZE" \
+  MCP_SERVERS="$MCP_SERVERS" BRAIN_PRESENT="$BRAIN_PRESENT" BRAIN_SIZE="$BRAIN_SIZE" BRAIN_VER="$BRAIN_VER" \
   L_EPISODES="$L_EPISODES" L_SKILLS="$L_SKILLS" L_EXPERIENCES="$L_EXPERIENCES" L_PATTERNS="$L_PATTERNS" SQLITE_OK="$SQLITE_OK" \
   DAEMON_AUTOSTART="$DAEMON_AUTOSTART" HEALTH_PRESENT="$HEALTH_PRESENT" HEALTH_ISO="$HEALTH_ISO" \
   node -e '
@@ -191,7 +198,7 @@ build_json() {
       },
       mcp: {
         servers: lines(e.MCP_SERVERS),
-        brainKb: { present: bool(e.BRAIN_PRESENT), sizeBytes: num(e.BRAIN_SIZE) },
+        brainKb: { present: bool(e.BRAIN_PRESENT), sizeBytes: num(e.BRAIN_SIZE), kbVersion: str(e.BRAIN_VER) || null },
       },
       learning: {
         episodes: num(e.L_EPISODES),
@@ -294,7 +301,7 @@ else
   info "no .mcp.json servers (or file absent)"
 fi
 if [[ "$BRAIN_PRESENT" -eq 1 ]]; then
-  pass "ruvnet-brain KB present ($(_human_bytes "$BRAIN_SIZE")) at $BRAIN_KB"
+  pass "ruvnet-brain KB present (${BRAIN_VER:+v$BRAIN_VER · }$(_human_bytes "$BRAIN_SIZE")) at $BRAIN_KB"
 else
   info "ruvnet-brain KB not installed (optional: bin/ruflo-kit fix-brain $TARGET_DIR --download)"
 fi

@@ -10,6 +10,8 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 
 | I want to... | Run |
 |---|---|
+| **Fresh machine → proved working stack, one verb** (install + init + heal + proof x2) | `ruflo-kit setup <target>` (add `--with-brain-kb` for the GB-class KB; `--dry-run` to preview) |
+| **Prove the stack works, from disk evidence** (13 probes, run twice, exit 0 only on PROVED) | `ruflo-kit proof <target>` (`--single` for one pass, `--json` for machines) |
 | **See the current state at a glance** (versions, sentinels, daemon, learning) | bare `ruflo-kit` — or `ruflo-kit status <target>` (`--json` for machines) |
 | **Heal everything with one verb** (fix-ruflo → fix-aqe → fix-statusbar → fix-brain → verify) | `ruflo-kit sync <target>` (`--dry-run` first if unsure) |
 | **Watch the stack in a browser** (live status + health/bench history) | `ruflo-kit dashboard <target>` → http://127.0.0.1:7431 (foreground, read-only, Ctrl-C stops) |
@@ -28,6 +30,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 | Fix AQE config drift (incl. dream-lock fix + graded reward) | `bin/ruflo-kit fix-aqe <target>` |
 | Fix the status bar | `bin/ruflo-kit fix-statusbar <target>` |
 | Register the ruvnet-brain MCP knowledge base (MCP-only, no daemon/hooks) | `bin/ruflo-kit fix-brain <target> --download` |
+| Refresh a stale brain KB in place (freshness is reported on every fix-brain run) | `bin/ruflo-kit fix-brain <target> --refresh` (or upstream: `npx ruvnet-brain --update`) |
 | First-time project init | `bin/ruflo-kit init <target>` |
 | **Reload dist patches into the running daemon** (REQUIRED after fix-ruflo/fix-aqe, **only if the daemon is running**) | `ruflo daemon stop && ruflo daemon start` |
 | Run ONE background-worker pass (no persistent loop, bounded spend) | `ruflo daemon trigger -w audit` |
@@ -56,8 +59,10 @@ Each `bin/ruflo-kit <command>` dispatches to an implementation in `lib/` (shell)
 | `fix-aqe` → `lib/fix-aqe.sh` | Codify AQE-side hardening — re-applies the **AQE-PROMOTE-V1** dist patch (inside the global `agentic-qe` package's `dist/cli/chunks/*.js`, located dynamically) that is **overwritten on every `agentic-qe` reinstall/upgrade**, the **`AQE-DREAM-LOCKFIX-V2`** dream-engine SQLite-lock fix across all 4 insert paths (Patch 35), install/wire `.claude` helpers (incl. the **`DERIVE-OUTCOME-V2`** graded reward oracle, Patch 36), **set `routing.confidenceThreshold = 0.6`** in `.agentic-qe/config.yaml` (Step 4, Patch 41), and **install kit-maintained `.claude/commands` docs** from tracked `assets/claude-commands/` (Step 5, Patch 41). Pair with `aqe learning extract` to re-mint the lost pattern row. Idempotent, reversible (`.bak`), `--dry-run`. |
 | `fix-statusbar` → `lib/fix-statusbar.sh` | Restore ruflo + Agentic QE v3 coexistence in the status bar. Idempotent, safe to re-run after `aqe init`. No flags. |
 | `status` → `lib/status.sh` | One-screen disk truth (versions incl. 3 agentdb slots, sentinels n/N, daemon via pgrep, MCP + brain KB, learning stores). `--json` always-valid; bare `ruflo-kit` = short hints. |
+| `setup` → `lib/setup.sh` | **The entry point** (SETUP-V1, Patch 59): S1 prereqs → S2 global installs (probe-first idempotent; npm ≥11.17 `--allow-scripts` auto-handled) → S3 init → S4 sync → S5 brain KB (opt-in `--with-brain-kb`) → S6 daemon policy (**never** started) → S7 proof x2. Setup's exit code IS the proof verdict. |
+| `proof` → `lib/proof.sh` | 13 disk-evidence probes (PROOF-V1, Patch 59), run **twice** — pass 2 re-executes under `env -i` so it can only see committed disk state. `PROVED` iff both passes have zero FAILs and identical verdicts; a probe that flips = `UNSTABLE`. |
 | `sync` → `lib/sync.sh` | One-verb heal: fix-ruflo → fix-aqe → fix-statusbar → fix-brain → verify-learning + stage summary. `--dry-run` propagates; hard fix failure = exit 1. |
-| `fix-brain` → `lib/fix-brain.sh` | Register the **MCP-only** `ruvnet-brain` server (tool: `search_ruvnet`; `BRAIN-MCP-V1`, Patch 53) in `.mcp.json` — an Ed25519-verified KB (≈736 MB download → ≈1.7 GB unpacked) at `~/.cache/ruvnet-brain/kb`. `--download` fetches the KB. **No hooks, no launchd, no plugin** → zero always-on cost. Idempotent; re-run is a health probe. |
+| `fix-brain` → `lib/fix-brain.sh` | Register the **MCP-only** `ruvnet-brain` server (tool: `search_ruvnet`; `BRAIN-MCP-V1`, Patch 53) in `.mcp.json` — an Ed25519-verified GB-class KB at `~/.cache/ruvnet-brain/kb`. `--download` fetches; **`--refresh` re-downloads a stale KB in place** (freshness vs the latest release is reported on every run, offline-safe; `BRAIN-KB-REFRESH-V1`, Patch 57). **No hooks, no launchd, no plugin** → zero always-on cost. Idempotent; re-run is a health probe. |
 | `init` → `lib/init.sh` | One-shot project init for ruflo + Agentic QE + AgentDB. Calls `fix-ruflo` + `fix-statusbar` + `fix-aqe`. Idempotent; `--force` (implies `--reactivate`), `--reactivate`, `--dry-run`. |
 | `health` → `lib/health.sh` | Growth-delta health check — snapshots ~14 metrics, diffs vs last run; exits non-zero if anything regressed (CI-friendly). `--reset`, `--dry-run`, `--json`, `-h`/`--help`. |
 | `session` → `lib/session-init.sh` | Per-session init: applies patches, checks MCP + daemon, verifies storage and controllers. No flags. |

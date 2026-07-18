@@ -4,8 +4,10 @@
 #
 # Clone this repo once, then run it against ANY codebase path:
 #
+#   bin/ruflo-kit setup       /path/to/codebase     # fresh machine → proved stack (install+init+heal+proof)
 #   bin/ruflo-kit status      /path/to/codebase     # one-screen truth (disk-derived; --json)
 #   bin/ruflo-kit sync        /path/to/codebase     # one-verb heal (fix cascade; --dry-run)
+#   bin/ruflo-kit proof       /path/to/codebase     # 13-probe disk-evidence proof, run twice (x2)
 #   bin/ruflo-kit init        /path/to/codebase     # first-time bootstrap
 #   bin/ruflo-kit session     /path/to/codebase     # per-session maintenance
 #   bin/ruflo-kit health      /path/to/codebase     # growth-delta health check
@@ -45,11 +47,13 @@ usage() {
   cat <<EOF
 
 Commands:
+  setup          Fresh machine → proved working stack: install + init + heal + proof; --with-brain-kb
   status         One-screen truth (versions, sentinels, daemon, learning); --json
   sync           One-verb heal — run the fix cascade in order; --dry-run
   init           First-time bootstrap of a codebase (ruflo + AQE + AgentDB)
   session        Per-session maintenance (patches, daemon, verification)
   health         Growth-delta health check (CI-friendly exit code)
+  proof          13-probe disk-evidence proof, run twice (x2) — exit 0 only when PROVED
   fix-ruflo      Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup
   fix-aqe        Codify AQE-side hardening + install .claude helpers/commands
   fix-brain      Register the vendored ruvnet-brain search_ruvnet MCP server (MCP-only; --download to fetch the KB)
@@ -70,8 +74,10 @@ EOF
 
 cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
+  setup)         exec bash "$KIT_DIR/lib/setup.sh"          "$@" ;;
   status)        exec bash "$KIT_DIR/lib/status.sh"         "$@" ;;
   sync)          exec bash "$KIT_DIR/lib/sync.sh"           "$@" ;;
+  proof)         exec bash "$KIT_DIR/lib/proof.sh"          "$@" ;;
   init)          exec bash "$KIT_DIR/lib/init.sh"           "$@" ;;
   fix-ruflo)     exec bash "$KIT_DIR/lib/fix-ruflo.sh"      "$@" ;;
   fix-aqe)       exec bash "$KIT_DIR/lib/fix-aqe.sh"        "$@" ;;

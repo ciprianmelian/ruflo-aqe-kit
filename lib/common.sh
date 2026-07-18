@@ -54,6 +54,7 @@ kit_resolve() {
       --dry-run)        DRY_RUN=1 ;;
       --force)          FORCE=1 ;;
       --reactivate)     REACTIVATE=1 ;;
+      --json)           : ;;   # several verbs (status/health/verify-learning/proof/setup) parse --json themselves — not "unknown"
       -h|--help)        KIT_WANT_HELP=1 ;;
       --*)              warn "ignoring unknown flag: $a" ;;
       *)                [[ -z "$tgt" ]] && tgt="$a" ;;
@@ -98,6 +99,108 @@ aqe_semver_lt() {
 }
 # Installed aqe version (dotted string, whitespace-stripped; empty if aqe unavailable).
 aqe_installed_version() { aqe --version 2>/dev/null | tr -d '[:space:]'; }
+
+# ── Version pins (single source of truth — fix-ruflo, setup and proof read these)
+# Three-slot AgentDB layout (Patch 52): standalone global + nested shadow stay on
+# the pin; ruflo hoists the upstream floor. proof asserts all three + the
+# controller surface, so a deliberate pin bump is a one-place edit here.
+KIT_AGENTDB_PIN="3.0.0-alpha.10"          # standalone global MCP + nested shadow (memory layer)
+# The HOISTED slot is upstream's to move (alpha.17 shipped with ruflo 3.32.2,
+# alpha.18 with 3.32.7 a week later) — the kit asserts a FLOOR, never equality:
+# hoisted >= MIN proves we're past the 8-controller removal watershed; the exact
+# version is upstream's business. Pinning equality here would re-break proof on
+# every routine upstream bump.
+KIT_AGENTDB_HOISTED_MIN="3.0.0-alpha.17"
+KIT_AGENTDB_CONTROLLERS=23              # controller classes the nested alpha.10 must expose
+
+# ── Global npm installs (NPM-ALLOW-SCRIPTS-V1) ──────────────────────────────
+# npm >=11.17 refuses package lifecycle (postinstall) scripts unless a curated
+# allowlist is passed — without it the better-sqlite3 native build is silently
+# skipped and the agentdb MCP dies with -32000. The flag is GLOBAL-install-only
+# (project installs reject it with EALLOWSCRIPTS — Patch 54). Dual gate makes
+# this self-retiring by construction: the version must be new enough to need it
+# AND the installed npm must actually document the flag.
+KIT_NPM_ALLOW_LIST="better-sqlite3,sqlite3"   # only boot-path native builds
+npm_wants_allow_scripts() {
+  local v; v="$(npm --version 2>/dev/null | tr -d '[:space:]')"
+  [[ -n "$v" ]] || return 1
+  aqe_semver_lt "$v" "11.17.0" && return 1
+  npm install --help 2>&1 | grep -q -- 'allow-scripts' || return 1
+  return 0
+}
+
+# kit_npm_global_install <pkg-spec>...  — the ONE way the kit installs globals.
+# DRY_RUN-aware; log path overridable via KIT_NPM_LOG; retries WITHOUT the
+# allow-scripts flag once if the flagged form fails (flag-syntax drift guard).
+# Returns npm's rc; callers own their pass/fail messaging (those strings are
+# load-bearing for sync's parse_changes and the nightly-drift CI greps).
+kit_npm_global_install() {
+  local log="${KIT_NPM_LOG:-/tmp/ruflo-kit-npm-global.log}" flags=()
+  [[ "${DRY_RUN:-0}" -eq 1 ]] && { info "[dry-run] Would: npm install -g $*"; return 0; }
+  npm_wants_allow_scripts && flags=(--allow-scripts="$KIT_NPM_ALLOW_LIST")
+  npm install -g ${flags[@]+"${flags[@]}"} "$@" >"$log" 2>&1 && return 0
+  [[ ${#flags[@]} -gt 0 ]] && npm install -g "$@" >>"$log" 2>&1 && return 0
+  return 1
+}
+
+# ── MCP stdio handshake probe (generalized from fix-brain Step 4) ────────────
+# mcp_initialize_probe <timeout-s> <cmd> [args...] — spawn the server, send ONE
+# JSON-RPC `initialize`, echo exactly one token: PROBE_OK | PROBE_NORESP |
+# PROBE_ERR. Env passes through (export RUVNET_BRAIN_KB etc. before calling).
+mcp_initialize_probe() {
+  local secs="$1"; shift
+  local probe; probe="$(mktemp)"
+  cat > "$probe" <<'NODE'
+'use strict';
+// Spawn an MCP stdio server, send ONE `initialize`; a JSON-RPC reply with id 1
+// proves the server answers. Timeout is soft (first run may warm a local model).
+const { spawn } = require('node:child_process');
+const secs = Number(process.argv[2]) || 6;
+const child = spawn(process.argv[3], process.argv.slice(4), { stdio: ['pipe', 'pipe', 'ignore'] });
+let out = '', done = false;
+const finish = (tok) => { if (done) return; done = true; try { child.kill('SIGKILL'); } catch (_) {} console.log(tok); process.exit(0); };
+const timer = setTimeout(() => finish('PROBE_NORESP'), secs * 1000);
+child.stdout.on('data', (d) => {
+  out += d.toString();
+  for (const line of out.split('\n')) { if (!line.trim()) continue; try { const m = JSON.parse(line); if (m && m.id === 1 && (m.result || m.error)) { clearTimeout(timer); return finish(m.result ? 'PROBE_OK' : 'PROBE_NORESP'); } } catch (_) { /* partial line */ } }
+});
+child.on('error', () => { clearTimeout(timer); finish('PROBE_ERR'); });
+child.on('exit', () => { clearTimeout(timer); finish('PROBE_NORESP'); });
+child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'ruflo-kit-probe', version: '1.0' } } }) + '\n');
+NODE
+  node "$probe" "$secs" "$@" 2>/dev/null || echo "PROBE_ERR"
+  rm -f "$probe"
+}
+
+# ── Global better-sqlite3 load test (extracted from fix-ruflo Step 5b.0) ─────
+# require() (not just resolve) from agentdb's own context, and assert the
+# resolved path is UNDER the global root — a stray ~/node_modules copy or an
+# ABI-stale build after a node upgrade must read as NOT-ok. Exit 0 iff loadable.
+global_bsqlite_loads() {
+  local groot; groot="$(npm root -g 2>/dev/null || echo '')"
+  [[ -n "$groot" ]] || return 1
+  node -e "const p=require.resolve('better-sqlite3',{paths:['$groot/agentdb','$groot']});if(!p.startsWith('$groot'))process.exit(3);require(p)" >/dev/null 2>&1
+}
+
+# ── Tabular-output number parsers (HEALTH-COMMA-V1) ──────────────────────────
+# ruflo >=3.32 prints thousands separators in `memory stats` / intelligence
+# tables (`| Total Entries |  1,921 |`): the old digit-grep returned the `1`
+# before the comma. Strip commas AFTER the label match (labels never contain
+# commas; the number cells do). Unconditional — kit-owned parsing, correct for
+# both old (no-comma) and new output, so no defect gate.
+extract_number_after() {
+  local label="$1" text="$2"
+  echo "$text" | grep -m1 -E "$label" | tr -d ',' | grep -oE '[0-9]+(\.[0-9]+)?' | head -1 || echo 0
+}
+extract_percent() {
+  local label="$1" text="$2"
+  echo "$text" | grep -m1 -E "$label" | tr -d ',' | grep -oE '[0-9]+(\.[0-9]+)?%' | head -1 | tr -d '%' || echo 0
+}
+# Count inside "(N entries)" cells — `active (1,008 entries)` must read 1008.
+extract_paren_count() {
+  local label="$1" text="$2"
+  echo "$text" | grep -m1 -E "$label" | tr -d ',' | grep -oE '\([0-9]+ entries\)' | grep -oE '[0-9]+' | head -1 || echo 0
+}
 
 # ── Dist-defect gate (agentic-kit adoption: patch only what's confirmed broken) ─
 # Version gates (aqe_semver_lt) answer "is the installed release old enough to

@@ -24,7 +24,14 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const SCRIPT = path.resolve(__dirname, '../.claude/helpers/statusline.cjs');
+// Test the CANONICAL tracked baseline, not the installed copy: upstream
+// session hooks REGENERATE .claude/helpers mid-suite (observed in CI: the
+// seeded statusline.cjs was replaced by a vanilla upstream copy between the
+// seed step and this file's execution — same clobber the hook-handler suite
+// hit). assets/claude-helpers/statusline.cjs is what HELPER-SEED-V1/
+// fix-statusbar guarantee gets installed, it is self-contained (no sibling
+// requires), and it cannot be rewritten under the suite's feet.
+const SCRIPT = path.resolve(__dirname, '../assets/claude-helpers/statusline.cjs');
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 function run(args = [], opts = {}) {
@@ -158,7 +165,23 @@ describe('statusline --json output', () => {
   });
 
   it('has top-level keys: adrs, hooks, agentdb, swarmdb, tests', () => {
-    const r = run(['--json']);
+    // Two order-dependent hazards make this flaky against the repo cwd (both
+    // observed as macos-only CI failures):
+    //  1. swarmdb requires .swarm/memory.db in cwd (absent on a clean checkout
+    //     unless an earlier test happened to create it);
+    //  2. statusline caches its data per-cwd (tmpdir, md5(CWD), 10s TTL) — a
+    //     synthetic cache written by statusline-cache tests for the SAME cwd
+    //     can be served here, and it predates the swarmdb key.
+    // Deterministic on every platform: a throwaway cwd (own cache slot, no
+    // cross-file race) provisioned with a .swarm/memory.db placeholder.
+    const fs = require('fs');
+    const os = require('os');
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'statusline-json-'));
+    fs.mkdirSync(path.join(cwd, '.swarm'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, '.swarm', 'memory.db'), '');
+    const r = spawnSync(process.execPath, [SCRIPT, '--json'], {
+      encoding: 'utf8', timeout: 30000, cwd,
+    });
     const d = JSON.parse(r.stdout);
     expect(d).toHaveProperty('adrs');
     expect(d).toHaveProperty('hooks');
