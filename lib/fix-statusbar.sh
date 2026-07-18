@@ -1211,6 +1211,35 @@ RASI
   fi
 fi
 
+# ── Step 1z: CANONICAL-STATUSLINE post-install verify ───────────────────────
+# The installed statusline MUST be byte-identical to the kit's canonical
+# assets/statusline.cjs (the single source of truth — TRUTH-STATUSLINE-V1).
+# Step 1.0 installs it verbatim, but the anchor-patch cascade above can drift
+# the on-disk copy from canonical (a legacy anchor that still fires, an aqe-init
+# regen that reintroduces a stale base, a version _ra_sed rewrite). This final
+# gate re-establishes canonical: sha256 the installed copy against the asset and,
+# on any mismatch, re-copy (node --check-gated). Match → nothing to heal.
+if [[ -f "$CANON_SL" && -f "$STATUSLINE_FILE" ]]; then
+  _canon_sha="$(shasum -a 256 "$CANON_SL" 2>/dev/null | awk '{print $1}')"
+  _inst_sha="$(shasum -a 256 "$STATUSLINE_FILE" 2>/dev/null | awk '{print $1}')"
+  if [[ -z "$_canon_sha" || -z "$_inst_sha" ]]; then
+    warn "sha256 unavailable — cannot verify canonical statusline drift"
+  elif [[ "$_canon_sha" == "$_inst_sha" ]]; then
+    pass "installed statusline sha256 matches canonical (assets/statusline.cjs)"
+  elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    info "[dry-run] would heal statusline drift (re-copy canonical assets/statusline.cjs)"
+  else
+    backup "$STATUSLINE_FILE" precanon-bak
+    if cp "$CANON_SL" "$STATUSLINE_FILE" && node --check "$STATUSLINE_FILE" 2>/dev/null; then
+      fix "healed statusline drift (CANONICAL-STATUSLINE — re-copied assets/statusline.cjs)"
+      pass "healed statusline drift → canonical (assets/statusline.cjs)"
+    else
+      warn "canonical re-copy failed node --check — restoring pre-heal copy"
+      [[ -e "$STATUSLINE_FILE.precanon-bak" ]] && cp "$STATUSLINE_FILE.precanon-bak" "$STATUSLINE_FILE"
+    fi
+  fi
+fi
+
 # ── Step 2: Write the dual-display fallback (statusline-v3.cjs) ────────────
 echo -e "\n${CYAN}[2/4]${NC} Installing dual fallback .claude/helpers/statusline-v3.cjs"
 

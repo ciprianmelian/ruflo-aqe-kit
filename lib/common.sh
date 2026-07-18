@@ -32,6 +32,16 @@ KIT_LIB="$KIT_DIR/lib"
 KIT_ASSETS="$KIT_DIR/assets"
 KIT_TOOLS="$KIT_DIR/tools"
 
+# ── Daemon-safety for every kit child process (DAEMON-AUTOSTART-3-V1) ───────
+# ruflo >=3.32 auto-spawns a detached background daemon on EVERY CLI invocation
+# (services/daemon-autostart.js) — so any kit script that shells out to `ruflo`
+# (proof P2/P8/P12, health's ruflo_timeout, init/session activation steps, …)
+# would silently CREATE the daemons the kit polices. Pin the upstream-honored
+# opt-out for all children of every lib/ script. An explicit operator value is
+# respected; an explicit `ruflo daemon start` is unaffected (the daemon command
+# itself is exempt from autostart, so this never blocks deliberate use).
+[[ -z "${RUFLO_DAEMON_AUTOSTART:-}" ]] && export RUFLO_DAEMON_AUTOSTART=0
+
 # ── Logging (single source of truth) ────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 pass()   { echo -e "  ${GREEN}✓${NC} $1"; }
