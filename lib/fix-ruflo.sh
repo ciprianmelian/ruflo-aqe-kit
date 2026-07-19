@@ -742,6 +742,56 @@ PJS
   fi
 }
 
+# avgLoss honesty (AVGLOSS-HONESTY-V1): the intelligence-stats path surfaces the
+# LoRA INFERENCE adaptation norm under a training-loss name —
+#   avgLoss: Math.round(realLora.avgAdaptationNorm * 10000) / 10000
+# so any consumer reading `avgLoss` as a loss is misled. We do NOT remove the
+# field (external readers may key on it); we ADD an honestly-named sibling
+# `avgAdaptationNorm` carrying the same value plus a provenance comment. Self-
+# retiring via defect_gate on the literal mislabel — an upstream rename skips the
+# patch. Idempotent (AVGLOSS-HONESTY-V1), reversible (.avgloss-bak), rc-checked.
+# $1 = a @claude-flow/memory dir; hooks-tools.js is a sibling under cli/.
+wire_avgloss_honesty() {
+  [[ "$DRY_RUN" -ne 1 ]] || return 0
+  local cfroot ht
+  cfroot="$(cd "$1/.." 2>/dev/null && pwd)" || return 0   # .../node_modules/@claude-flow
+  ht="$cfroot/cli/dist/src/mcp-tools/hooks-tools.js"
+  [[ -f "$ht" ]] || return 0
+  grep -q "AVGLOSS-HONESTY-V1" "$ht" && { pass "avgLoss honesty sibling already present (AVGLOSS-HONESTY-V1)"; return 0; }
+  # Self-retire: only patch while the literal mislabel is present in dist.
+  defect_gate "$ht" 'avgLoss: Math\.round\(realLora\.avgAdaptationNorm' "AVGLOSS-HONESTY-V1 (avgLoss carries the adaptation norm)" || return 0
+  [[ -f "$ht.avgloss-bak" ]] || cp "$ht" "$ht.avgloss-bak"
+  local patcher; patcher="$(mktemp)"
+  cat > "$patcher" <<'PJS'
+const fs = require('fs'); const F = process.argv[2];
+let s = fs.readFileSync(F, 'utf8');
+if (s.includes('AVGLOSS-HONESTY-V1')) { process.exit(0); }
+const anchor = "                avgLoss: Math.round(realLora.avgAdaptationNorm * 10000) / 10000,";
+if (!s.includes(anchor)) { console.error('ANCHOR_NOT_FOUND'); process.exit(2); }
+const add = [
+anchor,
+"                // AVGLOSS-HONESTY-V1: avgLoss above is a LEGACY MISLABEL — it carries the",
+"                // LoRA inference adaptation norm (avgAdaptationNorm), NOT a training loss.",
+"                // Expose the honestly-named sibling; avgLoss is kept for backward compat.",
+"                avgAdaptationNorm: Math.round(realLora.avgAdaptationNorm * 10000) / 10000,",
+].join('\n');
+s = s.replace(anchor, add);
+fs.writeFileSync(F, s);
+PJS
+  node "$patcher" "$ht"; local rc=$?; rm -f "$patcher"
+  # rc=2 = ANCHOR_NOT_FOUND: file untouched — warn rather than claim a false ✓.
+  if [[ $rc -ne 0 ]]; then
+    warn "AVGLOSS-HONESTY-V1 anchor not found in hooks-tools.js (dist drift) — NOT applied"
+    return 0
+  fi
+  if node --check "$ht" 2>/dev/null; then
+    fix "Added honest avgAdaptationNorm sibling next to the legacy avgLoss mislabel (AVGLOSS-HONESTY-V1)"
+  else
+    warn "AVGLOSS-HONESTY-V1 produced invalid hooks-tools.js — restoring backup"
+    cp "$ht.avgloss-bak" "$ht"
+  fi
+}
+
 # ruflo-route-capture → the reward trains the EXPLORED pick, not the exploited [0].
 #   ε: RUFLO_ROUTE_EPSILON env overrides (0 = fully disabled, regression-safe + Gate 3
 #      control arm); else linear decay 0.15 → 0.05 floor over the first 200 routed tasks,
@@ -939,6 +989,7 @@ force_nested_agentdb() {
     wire_real_spawn "$memdir"
     wire_semantic_rerank "$memdir"
     wire_lora_adapt "$memdir"
+    wire_avgloss_honesty "$memdir"
     wire_route_exploration "$memdir"
     ensure_sona_embed_384 "$memdir"
     install_native_builds "$memdir"

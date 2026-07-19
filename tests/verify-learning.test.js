@@ -36,13 +36,29 @@ function stubBin({ hnsw = 'true', daemon = 'stopped' } = {}) {
   fs.chmodSync(path.join(b, 'ruflo'), 0o755);
   return b;
 }
+// A known-good dist stub carrying BOTH sona-seam sentinels, so probe #11
+// (probe_seam_sentinels) is PINNED to PASS here regardless of the live global's
+// patch state. These fixtures are about issue #4 hollow detection, not the seam
+// probe; a dedicated suite (verify-learning-seam.test.js) exercises #11's PASS/
+// FAIL/not-assessable branches. Without this pin the #4 tests would couple to
+// whether the machine's global ruflo happens to be patched.
+function goodDistSrc() {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vldist-'));
+  fs.mkdirSync(path.join(d, 'memory'), { recursive: true });
+  fs.mkdirSync(path.join(d, 'mcp-tools'), { recursive: true });
+  fs.writeFileSync(path.join(d, 'memory', 'intelligence.js'), '// SONA-TRAIN-V1\n');
+  fs.writeFileSync(path.join(d, 'mcp-tools', 'hooks-tools.js'), '// RUFLO-LORA-ADAPT-V1\n');
+  return d;
+}
 function runVerify(target, extra = [], stub = {}) {
   const b = stubBin(stub);
+  const dist = goodDistSrc();
   const r = spawnSync('bash', [VERIFY, target, ...extra], {
     encoding: 'utf8', timeout: 20000,
-    env: { ...process.env, PATH: `${b}:${process.env.PATH}` },
+    env: { ...process.env, PATH: `${b}:${process.env.PATH}`, KIT_RUFLO_DIST_SRC: dist },
   });
   fs.rmSync(b, { recursive: true, force: true });
+  fs.rmSync(dist, { recursive: true, force: true });
   return r;
 }
 function mkTarget() {
