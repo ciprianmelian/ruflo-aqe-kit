@@ -802,6 +802,25 @@ else
   pass "exit(1) defect not found in pre-bash block — nothing to heal (self-retired)"
 fi
 
+# ── Step 9: ONNX model-cache seed (MODEL-CACHE-SEED-V1) ──────────────────────
+# transformers.js ignores TRANSFORMERS_CACHE and caches MiniLM weights INSIDE
+# the global package (@huggingface/transformers/.cache) — wiped on every
+# `npm i -g agentic-qe`, forcing a ~25MB re-download on the next embed (and
+# breaking first-embed offline). fix-aqe runs after every AQE reinstall in the
+# documented A3b flow, so heal here: harvest whatever caches exist into the
+# per-user vault, then reseed any freshly-wiped package cache from it.
+# Both operations are merge-update + best-effort (see common.sh).
+header "9" "ONNX model-cache seed (MODEL-CACHE-SEED-V1)"
+info "vault: $(kit_model_vault) · $(kit_preserve_model_caches) · $(kit_restore_model_caches)"
+GNM_MC="$(npm root -g 2>/dev/null)"
+# v3 caches onnx/model.onnx (fp32) or onnx/model_quantized.onnx depending on dtype — accept either.
+MC_ONNX_DIR="$GNM_MC/agentic-qe/node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/onnx"
+if [[ -n "$GNM_MC" ]] && ls "$MC_ONNX_DIR"/model*.onnx >/dev/null 2>&1; then
+  pass "AQE MiniLM weights present in package cache (disk-hit on next embed)"
+else
+  warn "AQE MiniLM weights not in package cache — first embed will download (network needed)"
+fi
+
 echo -e "\n============================================"
 echo " fix-aqe complete — ${FIXES} change(s)"
 for l in "${FIX_LOG[@]:-}"; do [[ -n "$l" ]] && echo "   • $l"; done

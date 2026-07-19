@@ -110,15 +110,17 @@ else
   pass "claude CLI: $CLAUDE_BIN"
 fi
 
-# Tier 6.5: persistent ONNX/transformers cache. Without this, each npx cache
-# wipe (upgrade scripts, manual cleanups) re-downloads ~25MB of model
-# weights — Xenova/all-MiniLM-L6-v2 in particular — every time. Point
-# TRANSFORMERS_CACHE at a stable per-user dir; both ruflo and AQE pick it up.
-# Overridable via RUFLO_MODEL_CACHE env var.
+# Tier 6.5: persistent ONNX/transformers weight VAULT (MODEL-CACHE-SEED-V1).
+# NOTE: transformers.js does NOT read TRANSFORMERS_CACHE (both installed majors
+# hard-default to a cache dir INSIDE the package — see common.sh) — the export
+# below is kept only as a courtesy for other consumers. What actually prevents
+# the ~25MB Xenova/all-MiniLM-L6-v2 re-download after installs is the vault +
+# kit_preserve/restore_model_caches (wired into upgrade.sh and fix-aqe Step 9),
+# which reseed the package-local caches. Overridable via RUFLO_MODEL_CACHE.
 RUFLO_MODEL_CACHE="${RUFLO_MODEL_CACHE:-$HOME/.cache/ruflo-models}"
 mkdir -p "$RUFLO_MODEL_CACHE"
 export TRANSFORMERS_CACHE="$RUFLO_MODEL_CACHE"
-pass "ONNX model cache: $RUFLO_MODEL_CACHE (TRANSFORMERS_CACHE exported)"
+pass "ONNX model vault: $RUFLO_MODEL_CACHE (reseeds package caches via MODEL-CACHE-SEED-V1)"
 
 if [[ "$ERRORS" -gt 0 ]]; then
   fail "missing prerequisites — aborting"

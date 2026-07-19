@@ -430,3 +430,49 @@ sweep_stray_aqe_dirs() {
     fi
   done < <(find_stray_aqe_dirs "$target")
 }
+
+# ── ONNX model-cache vault (MODEL-CACHE-SEED-V1) ─────────────────────────────
+# transformers.js NEVER reads TRANSFORMERS_CACHE — both installed majors
+# (@xenova v2 on the ruflo side, @huggingface v3 on the AQE side) hard-default
+# their weights cache to a dir INSIDE the package (env.js DEFAULT_CACHE_DIR =
+# <pkg>/.cache; the env-var string is absent from both dists), and AQE's
+# pipeline() call passes no cache_dir. So every `npm i -g ruflo|agentic-qe`
+# wipes the ~25MB MiniLM weights and the next embed re-downloads them (observed:
+# agentic-qe's @huggingface/transformers/.cache recreated on the 2026-07-17
+# 3.12.2 upgrade — exactly what the old Tier-6.5 TRANSFORMERS_CACHE export was
+# meant to prevent, but that export is inert for these loaders). These helpers
+# preserve/restore the PACKAGE-LOCAL caches through a per-user vault instead.
+# The ruvector loader ($HOME/.ruvector/models) is already HOME-anchored and
+# upgrade-proof — deliberately not managed here.
+#   vault layout: $RUFLO_MODEL_CACHE/hf-v3/  ← @huggingface/transformers (AQE)
+#                 $RUFLO_MODEL_CACHE/Xenova/ ← @xenova/transformers (ruflo; the
+#                 legacy npx-harvest also merged into the vault root, so Xenova/
+#                 doubles as the v2 namespace)
+# Best-effort + idempotent (merge-update, never deletes); honor DRY_RUN.
+kit_model_vault() { echo "${RUFLO_MODEL_CACHE:-$HOME/.cache/ruflo-models}"; }
+_kit_cache_sync() {  # <src-dir> <dst-dir> — merge-update copy; exit 1 if src absent
+  local src="$1" dst="$2"
+  [[ -d "$src" ]] || return 1
+  [[ "${DRY_RUN:-0}" -eq 1 ]] && { echo "[dry-run] would sync $src → $dst"; return 0; }
+  mkdir -p "$dst"
+  if command -v rsync >/dev/null 2>&1; then rsync -a --update "$src/" "$dst/" 2>/dev/null
+  else cp -R "$src/." "$dst/" 2>/dev/null; fi
+}
+kit_preserve_model_caches() {  # live package caches → vault. Echoes: PRESERVED:n
+  local gnm n=0; gnm="$(npm root -g 2>/dev/null)" || { echo "PRESERVED:0"; return 0; }
+  _kit_cache_sync "$gnm/agentic-qe/node_modules/@huggingface/transformers/.cache" \
+                  "$(kit_model_vault)/hf-v3" && n=$((n+1))
+  _kit_cache_sync "$gnm/ruflo/node_modules/@xenova/transformers/.cache/Xenova" \
+                  "$(kit_model_vault)/Xenova" && n=$((n+1))
+  echo "PRESERVED:$n"
+}
+kit_restore_model_caches() {   # vault → freshly-installed package caches. Echoes: RESTORED:n
+  local gnm n=0; gnm="$(npm root -g 2>/dev/null)" || { echo "RESTORED:0"; return 0; }
+  local aqe="$gnm/agentic-qe/node_modules/@huggingface/transformers"
+  local ruf="$gnm/ruflo/node_modules/@xenova/transformers"
+  # Restore only into packages that exist (never mkdir a package dir), and only
+  # from the matching vault namespace (v2/v3 layouts are similar but not mixed).
+  [[ -d "$aqe" ]] && _kit_cache_sync "$(kit_model_vault)/hf-v3"  "$aqe/.cache" && n=$((n+1))
+  [[ -d "$ruf" ]] && _kit_cache_sync "$(kit_model_vault)/Xenova" "$ruf/.cache/Xenova" && n=$((n+1))
+  echo "RESTORED:$n"
+}
