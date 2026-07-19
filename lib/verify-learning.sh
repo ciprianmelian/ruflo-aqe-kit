@@ -18,6 +18,7 @@ set -uo pipefail
 #   #6 dimension guard (vectors 384-dim AND blob == dim*4)                   FAIL-on-corruption
 #   #9 graphAdapter not wiring relationships (graph_edges 0)                 WARN
 #   #10 SONA table unpopulated (sona_patterns 0)                            WARN
+#   #11 sona-seam sentinels (SONA-TRAIN-V1 + RUFLO-LORA-ADAPT-V1 in dist)   FAIL
 #   #7 model router liveness (totalDecisions / routing_outcomes)            INFO
 #
 # Usage:
@@ -153,6 +154,44 @@ probe_lora_backend() {
   fi
 }
 
+# #11 sona-seam sentinels: the SONA learning loop is closed by two kit dist
+# patches applied to the INSTALLED global ruflo — SONA-TRAIN-V1 (memory/
+# intelligence.js: endTrajectory drives LoRAAdapter.train()) and RUFLO-LORA-ADAPT-V1
+# (mcp-tools/hooks-tools.js: route-time adapt() consumes the trained delta). If a
+# ruflo upgrade wipes either patch the JS LoRA arm silently reverts to write-only
+# — and the #3 totalUpdates>0∧adaptations==0 tripwire stays GREEN because training
+# also stops (totalUpdates freezes). So assert the seams directly: grep the dist
+# for both sentinels. This probe reads the GLOBAL dist (not the target); the src
+# root resolves via KIT_RUFLO_DIST_SRC (test override) else `npm root -g`. No dist
+# on disk at all ⇒ WARN not-assessable (offline / no global install); a dist file
+# present but its sentinel ABSENT ⇒ FAIL (the loop reverted — re-run fix-ruflo).
+seam_dist_src() {
+  if [[ -n "${KIT_RUFLO_DIST_SRC:-}" ]]; then echo "$KIT_RUFLO_DIST_SRC"; return; fi
+  local g; g="$(npm root -g 2>/dev/null || echo '')"
+  [[ -n "$g" ]] && echo "$g/ruflo/node_modules/@claude-flow/cli/dist/src"
+}
+probe_seam_sentinels() {
+  local root intel ht
+  root="$(seam_dist_src)"
+  intel="$root/memory/intelligence.js"
+  ht="$root/mcp-tools/hooks-tools.js"
+  # Not-assessable when the dist can't be located at all, or the two target files
+  # aren't both present (unexpected dist shape / offline) — mirror the "n/a" prereq
+  # convention, but as a WARN so a wiped install is visibly flagged (never a FAIL).
+  if [[ -z "$root" || ! -f "$intel" || ! -f "$ht" ]]; then
+    soft "sona-seam sentinels not assessable — no installed ruflo dist found (offline/no global) — SEAM-SENTINEL-V1 skipped"
+    return
+  fi
+  local miss=""
+  grep -q "SONA-TRAIN-V1" "$intel" || miss+="SONA-TRAIN-V1(intelligence.js) "
+  grep -q "RUFLO-LORA-ADAPT-V1" "$ht" || miss+="RUFLO-LORA-ADAPT-V1(hooks-tools.js) "
+  if [[ -z "$miss" ]]; then
+    ok "sona-seam sentinels present in installed dist (SONA-TRAIN-V1 + RUFLO-LORA-ADAPT-V1)"
+  else
+    bad "sona-seam SENTINEL MISSING in installed dist: ${miss}— SONA learning loop reverted to write-only (an upgrade wiped a kit patch). Run: bin/ruflo-kit fix-ruflo $TARGET_DIR"
+  fi
+}
+
 # #4 native HNSW backend. The authoritative flag lives in the ruvector FLAGS
 # STORE (read via `aqe ruvector status`), NOT config.yaml — and it is ON by
 # default. So `config.yaml` lacking the key is NOT evidence of a problem (the
@@ -263,6 +302,7 @@ if [[ "$JSON" -eq 0 ]]; then
 fi
 probe_reflexion_store
 probe_lora_backend
+probe_seam_sentinels
 probe_hnsw_native
 probe_dimension_guard
 probe_graph_edges
