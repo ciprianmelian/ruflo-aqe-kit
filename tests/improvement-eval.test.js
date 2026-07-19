@@ -128,3 +128,164 @@ describe('improvement-eval: --selftest', () => {
     expect(r.stdout).not.toMatch(/✗/);
   });
 });
+
+// Requiring the tool returns its pure helpers WITHOUT running main (no ruflo spawn).
+const evalMod = require(TOOL);
+
+// A live policy-store tree with one learned artifact; returns its root dir.
+function makeLiveStore(dir, outcomes) {
+  fs.mkdirSync(path.join(dir, '.claude-flow'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude-flow', 'routing-outcomes.json'), JSON.stringify({ outcomes }));
+  return dir;
+}
+
+describe('improvement-eval: frozen baseline (counterfactual store)', () => {
+  it('freezeBaseline writes a manifest with a content-addressed baselineId + source sha256s', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-b-'));
+    try {
+      const live = makeLiveStore(path.join(tmp, 'live'), [{ agent: 'coder', quality: 0.9 }]);
+      const base = path.join(tmp, 'base');
+      const m = evalMod.freezeBaseline(live, base, { stack: { ruflo: '3.32.7' } });
+      expect(m.baselineId).toMatch(/^[0-9a-f]{64}$/);
+      expect(m.sources['.claude-flow/routing-outcomes.json']).toMatch(/^[0-9a-f]{64}$/);
+      expect(m.stack.ruflo).toBe('3.32.7');
+      expect(JSON.parse(fs.readFileSync(evalMod.manifestPath(base), 'utf8')).baselineId).toBe(m.baselineId);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('is idempotent for identical content — same baselineId across re-freezes', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-b-'));
+    try {
+      const live = makeLiveStore(path.join(tmp, 'live'), [{ agent: 'coder', quality: 0.9 }]);
+      const base = path.join(tmp, 'base');
+      const id1 = evalMod.freezeBaseline(live, base, {}).baselineId;
+      const id2 = evalMod.freezeBaseline(live, base, {}).baselineId; // re-freeze, unchanged live
+      expect(id2).toBe(id1);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('a re-freeze after the live policy changes yields a DIFFERENT baselineId (rebaseline resets the series)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-b-'));
+    try {
+      const live = path.join(tmp, 'live'), base = path.join(tmp, 'base');
+      makeLiveStore(live, [{ agent: 'coder', quality: 0.9 }]);
+      const id1 = evalMod.freezeBaseline(live, base, {}).baselineId;
+      makeLiveStore(live, [{ agent: 'tester', quality: 0.1 }]); // policy trained forward
+      const id2 = evalMod.freezeBaseline(live, base, {}).baselineId;
+      expect(id2).not.toBe(id1);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('the control arm reads EXACTLY the frozen store — its snapshot hash === baselineId', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-b-'));
+    try {
+      const live = makeLiveStore(path.join(tmp, 'live'), [{ agent: 'coder', quality: 0.9 }]);
+      const base = path.join(tmp, 'base'), ctrl = path.join(tmp, 'ctrl');
+      const m = evalMod.freezeBaseline(live, base, {});
+      evalMod.snapshotState(base, ctrl); // control sandbox = fresh copy of the frozen baseline
+      expect(evalMod.hashState(ctrl).hash).toBe(m.baselineId);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('treatment vs control read DIFFERENT state once the live policy diverges from the baseline', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-b-'));
+    try {
+      const live = path.join(tmp, 'live'), base = path.join(tmp, 'base');
+      makeLiveStore(live, [{ agent: 'coder', quality: 0.9 }]);
+      evalMod.freezeBaseline(live, base, {});              // control frozen here
+      makeLiveStore(live, [{ agent: 'tester', quality: 0.1 }]); // live trains on
+      const treat = path.join(tmp, 'treat'), ctrl = path.join(tmp, 'ctrl');
+      evalMod.snapshotState(live, treat);
+      evalMod.snapshotState(base, ctrl);
+      expect(evalMod.hashState(treat).hash).not.toBe(evalMod.hashState(ctrl).hash);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  it('snapshotState never writes under the source root (copy, never move)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-b-'));
+    try {
+      const live = makeLiveStore(path.join(tmp, 'live'), [{ agent: 'coder', quality: 0.9 }]);
+      const before = fs.readdirSync(path.join(live, '.claude-flow')).sort();
+      evalMod.snapshotState(live, path.join(tmp, 'dst'));
+      expect(fs.readdirSync(path.join(live, '.claude-flow')).sort()).toEqual(before);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+});
+
+describe('improvement-eval: paired-row collection (hermetic, stubbed ruflo)', () => {
+  // A fake `ruflo` on PATH prints a fixed routing line, so collectSession runs end-to-end
+  // (freeze → sandbox both arms → append a paired row) with NO real routing and NO network.
+  function withStubRuflo(fn) {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-bin-'));
+    for (const name of ['ruflo', 'aqe']) { // stub both so captureStack() never hits a real binary
+      const stub = path.join(bin, name);
+      fs.writeFileSync(stub, '#!/bin/sh\necho "| Agent: tester |"\n');
+      fs.chmodSync(stub, 0o755);
+    }
+    try { return fn(bin); } finally { fs.rmSync(bin, { recursive: true, force: true }); }
+  }
+  function runCollect(liveDir, binDir, baseDir) {
+    const r = spawnSync(process.execPath, [TOOL, '--json', '--seeds', '1', '--baseline-dir', baseDir, '--bench-history', '/dev/null'], {
+      encoding: 'utf8', cwd: liveDir,
+      env: Object.assign({}, process.env, { PATH: binDir + path.delimiter + process.env.PATH }),
+    });
+    return JSON.parse(r.stdout);
+  }
+
+  it('freezes once, records baseline provenance + per-arm store hashes on the paired row', () => {
+    withStubRuflo((bin) => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-c-'));
+      try {
+        const live = makeLiveStore(path.join(tmp, 'live'), [{ agent: 'coder', quality: 0.9 }]);
+        const base = path.join(tmp, 'base');
+        const res = runCollect(live, bin, base);
+        const row = res.session;
+        expect(row).not.toBeNull();
+        expect(row.baselineId).toMatch(/^[0-9a-f]{64}$/);
+        expect(row.controlStateHash).toBe(row.baselineId);          // control read the frozen store
+        expect(row.treatmentStateHash).toBe(row.baselineId);        // n=1: just froze → arms identical
+        expect(row.stateDiffers).toBe(false);                        // honest tie at freeze time
+        expect(typeof row.treatmentAcc).toBe('number');
+        expect(fs.existsSync(evalMod.manifestPath(base))).toBe(true);
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    });
+  });
+
+  it('after the live policy diverges, the SAME baseline is reused and the arms read different state', () => {
+    withStubRuflo((bin) => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-c-'));
+      try {
+        const live = makeLiveStore(path.join(tmp, 'live'), [{ agent: 'coder', quality: 0.9 }]);
+        const base = path.join(tmp, 'base');
+        const first = runCollect(live, bin, base);              // freezes baseline
+        makeLiveStore(live, [{ agent: 'tester', quality: 0.1 }]); // live trains forward
+        const second = runCollect(live, bin, base);             // reuses baseline
+        expect(second.session.baselineId).toBe(first.session.baselineId); // baseline NOT re-frozen
+        expect(second.session.controlStateHash).toBe(first.session.baselineId);
+        expect(second.session.treatmentStateHash).not.toBe(second.session.controlStateHash);
+        expect(second.session.stateDiffers).toBe(true);          // arms now read distinct policy
+        expect(second.n).toBe(2);                                // both rows share the baseline → series of 2
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    });
+  });
+
+  it('--rebaseline re-freezes against current live and warns on stderr', () => {
+    withStubRuflo((bin) => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-c-'));
+      try {
+        const live = makeLiveStore(path.join(tmp, 'live'), [{ agent: 'coder', quality: 0.9 }]);
+        const base = path.join(tmp, 'base');
+        const first = runCollect(live, bin, base);
+        makeLiveStore(live, [{ agent: 'tester', quality: 0.1 }]);
+        const r = spawnSync(process.execPath, [TOOL, '--json', '--seeds', '1', '--rebaseline', '--baseline-dir', base, '--bench-history', '/dev/null'], {
+          encoding: 'utf8', cwd: live,
+          env: Object.assign({}, process.env, { PATH: bin + path.delimiter + process.env.PATH }),
+        });
+        expect(r.stderr).toMatch(/rebaseline/i);
+        expect(r.stderr).toMatch(/RESETS/);
+        const rebased = JSON.parse(r.stdout);
+        expect(rebased.session.baselineId).not.toBe(first.session.baselineId); // new frozen point
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    });
+  });
+});

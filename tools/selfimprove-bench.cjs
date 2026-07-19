@@ -195,7 +195,8 @@ function appendHistory(row) {
   // (a prior audit caught exactly that: +8.3pp that was purely the normalization change).
   const SCORER = 'norm-v1';
   // NOTE: timestamp passed by env so the harness stays deterministic/replayable.
-  const row = { ts: process.env.BENCH_TS || '', scorerVersion: SCORER, accuracyPct: routing.accuracyPct, accuracyRawPct: routing.accuracyRawPct, meanConfidencePct: routing.meanConfidencePct, methodCounts: routing.methodCounts, rewardDistinct: state.rewardDistinctValues, rewardConstant: state.rewardIsConstant, qSpread: state.qSpread, loraSumAbsB: state.loraSumAbsB, loraUpdates: state.loraTotalUpdates, aqe: { qMean: aqe.qMean, qSpread: aqe.qSpread, rewardDistinct: aqe.rewardDistinct, confidenceMean: aqe.confidenceMean } };
+  // ts must never be empty — unordered rows can't be read as a session sequence.
+  const row = { ts: process.env.BENCH_TS || new Date().toISOString(), scorerVersion: SCORER, accuracyPct: routing.accuracyPct, accuracyRawPct: routing.accuracyRawPct, meanConfidencePct: routing.meanConfidencePct, methodCounts: routing.methodCounts, rewardDistinct: state.rewardDistinctValues, rewardConstant: state.rewardIsConstant, qSpread: state.qSpread, loraSumAbsB: state.loraSumAbsB, loraUpdates: state.loraTotalUpdates, aqe: { qMean: aqe.qMean, qSpread: aqe.qSpread, rewardDistinct: aqe.rewardDistinct, confidenceMean: aqe.confidenceMean } };
   appendHistory(row);
   const series = prior.concat([row]);
   // ONLY compare like-with-like: rows scored under the current scorer definition.
