@@ -46,3 +46,8 @@ CLAUDE copy.md
 CLAUDE.md
 # npm distribution research — local planning doc, not published with the kit
 docs/NPM-DISTRIBUTION-RESEARCH-2026-07-18.md
+# intelligence/memory audit — local snapshot report, not published with the kit
+docs/INTELLIGENCE-EXEC-SUMMARY.jsx
+docs/INTELLIGENCE-EXEC-SUMMARY.html
+# memory-grounded project two-pager — local memory-proof snapshot, not kit source
+docs/KIT-MEMORY-GROUNDED-2PAGER.md

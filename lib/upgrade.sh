@@ -86,6 +86,12 @@ else
   pass "No ~/.npm/_npx to snapshot"
 fi
 
+# MODEL-CACHE-SEED-V1: harvest the PACKAGE-LOCAL transformers weight caches into
+# the vault BEFORE the install wipes ruflo's. transformers.js never reads
+# TRANSFORMERS_CACHE (see common.sh) — the package-local dirs are the live ones.
+info "Preserving package-local ONNX weight caches → $(kit_model_vault)"
+info "  $(kit_preserve_model_caches)"
+
 # ── 4. Upgrade global ruflo ──────────────────────────────────────────────────
 header "4/9" "Upgrade ruflo to $LATEST_RUFLO"
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -105,18 +111,21 @@ else
     fail "npm install -g ruflo@latest failed — see ${LOG_FILE}.npm-install.log"
     exit 2
   fi
+  # MODEL-CACHE-SEED-V1: reseed the fresh package's transformers cache from the
+  # vault so the first post-upgrade embed is a disk hit, not a re-download.
+  info "Restoring ONNX weight caches from vault: $(kit_restore_model_caches)"
 fi
 
 # ── 5. Wipe npx cache ────────────────────────────────────────────────────────
 header "5/9" "Wipe npx cache (forces fresh @claude-flow/memory + agentdb)"
 
-# Tier 6.5: preserve the ~25MB ONNX model cache that lives inside npx subtrees
-# before wiping. Without this, the next session re-downloads
-# Xenova/all-MiniLM-L6-v2 from scratch (slow on every upgrade). Copy
-# *.cache contents into a stable per-user location; both ruflo and AQE will
-# read it back via TRANSFORMERS_CACHE (init-ruflo-aqe-agentdb.sh exports it).
-# Prefer rsync (faster on large trees, file-wise update semantics); fall back
-# to `cp -R` when rsync isn't available.
+# Tier 6.5 (legacy npx harvest): merge any ~25MB ONNX model caches still living
+# inside npx subtrees into the vault before wiping. NOTE: nothing reads the
+# vault via TRANSFORMERS_CACHE — transformers.js ignores that env var
+# (MODEL-CACHE-SEED-V1, common.sh); the vault is read back by
+# kit_restore_model_caches, which reseeds the PACKAGE-LOCAL caches after
+# installs. Prefer rsync (faster on large trees, file-wise update semantics);
+# fall back to `cp -R` when rsync isn't available.
 PRESERVE_MODELS="${RUFLO_MODEL_CACHE:-$HOME/.cache/ruflo-models}"
 if [[ -d "$HOME/.npm/_npx" ]]; then
   RSYNC_CMD="rsync -a --update"
