@@ -295,6 +295,14 @@ probe_swarm_smoke() {
 # invariant; an instant-fail probe just measures the writer's timing, not the
 # store's health (observed: P13 flapped whenever the live aqe-mcp was writing).
 probe_stores_writable() {
+  # Missing instrument ≠ locked stores: without the sqlite3 CLI every lock test
+  # errors and used to mis-read as "locked/unwritable with no live holder"
+  # (observed 2026-07-20, rust-r8n adoption on a sqlite3-less Ubuntu host).
+  # Still FAIL — PROVED must not be earned with a blind probe — but say why.
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    record_probe "stores-writable" FAIL "sqlite3 CLI not installed - writability not assessable (S1 prereq; install sqlite3)"
+    return
+  fi
   local rels=(".swarm/memory.db" ".agentic-qe/memory.db" "agentdb.db")
   local rel db checked=0 missing=0 locked="" held=""
   for rel in "${rels[@]}"; do
