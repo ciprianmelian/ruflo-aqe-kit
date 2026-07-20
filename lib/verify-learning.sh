@@ -43,19 +43,24 @@ kit_resolve ${FWD[@]+"${FWD[@]}"}
 kit_require_target
 cd "$TARGET_DIR"
 
-# ── safe sqlite/file helpers (copied from health.sh — not in common.sh) ──────
+# ── safe sqlite/file helpers ─────────────────────────────────────────────────
+# Store reads go through kit_sqlite_ro (common.sh, KIT-SQLITE-SHIM-V1): sqlite3
+# CLI first, else node + the global ruflo's better-sqlite3. Before the shim, a
+# sqlite3-less host read every count as 0 and graded a genuinely HOLLOW loop as
+# "partial" (observed 2026-07-20, rust-r8n adoption) — the exact "looks healthy,
+# is hollow" masking this script exists to kill.
 num_or_zero() { local n="$1"; [[ "$n" =~ ^[0-9]+$ ]] && echo "$n" || echo 0; }
 sqlite_count_safe() {
   local db="$1" sql="$2"
   [[ -f "$db" ]] || { echo 0; return; }
-  local out; out="$(sqlite3 -readonly "$db" "$sql" 2>/dev/null || echo 0)"
+  local out; out="$(kit_sqlite_ro "$db" "$sql" 2>/dev/null || echo 0)"
   num_or_zero "${out:-0}"
 }
 table_exists() {
   local db="$1" t="$2"
   [[ -f "$db" ]] || return 1
   local out
-  out="$(sqlite3 -readonly "$db" \
+  out="$(kit_sqlite_ro "$db" \
     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$t' LIMIT 1;" 2>/dev/null || true)"
   [[ "${out:-}" == "1" ]]
 }
@@ -299,6 +304,15 @@ if [[ "$JSON" -eq 0 ]]; then
   header "verify-learning" "ruflo + AQE self-learning loop liveness (read-only)"
   kit_banner
   echo ""
+fi
+# Instrument transparency (KIT-SQLITE-SHIM-V1): with NO sqlite backend at all
+# every count below reads 0 and a hollow store would grade as fresh — surface
+# that masking as a WARN (verdict can then never be better than "partial").
+SQLITE_BACKEND="$(kit_sqlite_backend)"
+if [[ "$SQLITE_BACKEND" == "none" ]]; then
+  soft "no sqlite instrument (sqlite3 CLI absent, global better-sqlite3 unloadable) — all store counts read 0; verdict may MASK a hollow loop"
+elif [[ "$SQLITE_BACKEND" == "node" ]]; then
+  note "store reads via node better-sqlite3 fallback (sqlite3 CLI not installed)"
 fi
 probe_reflexion_store
 probe_lora_backend

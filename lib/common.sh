@@ -215,6 +215,45 @@ kit_sqlite_backup() {
   [[ -s "$dest" ]]
 }
 
+# kit_sqlite_backend — which sqlite instrument this host has (KIT-SQLITE-SHIM-V1).
+# Echoes exactly one of: cli | node | none. `node` means the global ruflo's
+# better-sqlite3 actually require()s (a dir with a broken/ABI-stale native build
+# reads as none, not node). Exit 0 for cli/node, 1 for none.
+kit_sqlite_backend() {
+  if command -v sqlite3 >/dev/null 2>&1; then echo cli; return 0; fi
+  local bs; bs="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
+  if [[ -d "$bs" ]] && node -e 'require(process.argv[1])' "$bs" >/dev/null 2>&1; then
+    echo node; return 0
+  fi
+  echo none; return 1
+}
+
+# kit_sqlite_rw_check "<db>" — momentary write-lock test: BEGIN IMMEDIATE;
+# ROLLBACK (zero mutation), 3s busy timeout on EITHER arm (KIT-SQLITE-SHIM-V1).
+# rc 0 = lock acquired + released cleanly
+# rc 1 = lock NOT acquirable within 3s (busy/locked/corrupt) or db missing
+# rc 2 = no instrument on this host (no sqlite3 CLI, global better-sqlite3
+#        absent or unloadable) — "not assessable", distinct from "locked"
+kit_sqlite_rw_check() {
+  local db="$1"
+  [[ -f "$db" ]] || return 1
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 -cmd ".timeout 3000" "$db" "BEGIN IMMEDIATE; ROLLBACK;" >/dev/null 2>&1
+    return $?
+  fi
+  local bs; bs="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
+  [[ -d "$bs" ]] || return 2
+  node -e '
+    let B; try { B = require(process.argv[1]); } catch (e) { process.exit(2); }
+    try {
+      const db = new B(process.argv[2], { timeout: 3000, fileMustExist: true });
+      db.exec("BEGIN IMMEDIATE; ROLLBACK;");
+      db.close();
+      process.exit(0);
+    } catch (e) { process.exit(1); }
+  ' "$bs" "$db" 2>/dev/null
+}
+
 # ── MCP stdio handshake probe (generalized from fix-brain Step 4) ────────────
 # mcp_initialize_probe <timeout-s> <cmd> [args...] — spawn the server, send ONE
 # JSON-RPC `initialize`, echo exactly one token: PROBE_OK | PROBE_NORESP |
@@ -351,21 +390,23 @@ ruvector_search_roots() {
 #   assert_vector_dim_ok <db> <table> <embedding_col> <dim_col> <expected_dim>
 # Echoes exactly one token (no exit — caller decides severity):
 #   OK | EMPTY | NO_TABLE | DIM_MISMATCH:<first-offending-dim> | BLOB_MISMATCH:<rows>
-# Pure read-only (sqlite3 -readonly). Self-contained (inlines the table check) so
-# it works from common.sh without depending on health.sh's table_exists.
+# Pure read-only (kit_sqlite_ro: sqlite3 -readonly when the CLI exists, else the
+# node better-sqlite3 arm — KIT-SQLITE-SHIM-V1). Self-contained (inlines the
+# table check) so it works from common.sh without depending on health.sh's
+# table_exists.
 assert_vector_dim_ok() {
   local db="$1" tbl="$2" col="$3" dimc="$4" exp="$5"
   [[ -f "$db" ]] || { echo "NO_TABLE"; return; }
-  sqlite3 -readonly "$db" \
+  kit_sqlite_ro "$db" \
     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$tbl' LIMIT 1;" \
     2>/dev/null | grep -q 1 || { echo "NO_TABLE"; return; }
-  local n; n="$(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM $tbl;" 2>/dev/null || echo 0)"
+  local n; n="$(kit_sqlite_ro "$db" "SELECT COUNT(*) FROM $tbl;" 2>/dev/null || echo 0)"
   [[ "${n:-0}" -eq 0 ]] && { echo "EMPTY"; return; }
   local baddim
-  baddim="$(sqlite3 -readonly "$db" "SELECT $dimc FROM $tbl WHERE $dimc<>$exp LIMIT 1;" 2>/dev/null)"
+  baddim="$(kit_sqlite_ro "$db" "SELECT $dimc FROM $tbl WHERE $dimc<>$exp LIMIT 1;" 2>/dev/null)"
   [[ -n "$baddim" ]] && { echo "DIM_MISMATCH:$baddim"; return; }
   local badblob
-  badblob="$(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM $tbl WHERE length($col)<>$dimc*4;" 2>/dev/null || echo 0)"
+  badblob="$(kit_sqlite_ro "$db" "SELECT COUNT(*) FROM $tbl WHERE length($col)<>$dimc*4;" 2>/dev/null || echo 0)"
   [[ "${badblob:-0}" -ne 0 ]] && { echo "BLOB_MISMATCH:$badblob"; return; }
   echo "OK"
 }
