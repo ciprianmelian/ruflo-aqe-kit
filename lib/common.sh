@@ -162,6 +162,59 @@ kit_npm_global_install() {
   return 1
 }
 
+# ── SQLite access shims (seed of the sqlite shim — snapshot/adopt use these;
+# a later task extends them). Primary: the sqlite3 CLI when `command -v sqlite3`
+# hits. Fallback: node + better-sqlite3 resolved from the GLOBAL ruflo install
+# ("$(npm root -g)/ruflo/node_modules/better-sqlite3") — the one native build
+# the kit already guarantees (NPM-ALLOW-SCRIPTS-V1). Both are WAL-safe: reads
+# open readonly; backup uses the sqlite online-backup API (never a raw cp of a
+# live db). Return nonzero on any failure; callers own their messaging.
+#
+# kit_sqlite_ro "<db>" "<sql>" — read-only query; rows to stdout, '|'-separated
+# columns (sqlite3 CLI default list mode; the node arm mirrors it).
+kit_sqlite_ro() {
+  local db="$1" sql="$2"
+  [[ -f "$db" ]] || return 1
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 -readonly "$db" "$sql" 2>/dev/null
+  else
+    local bs; bs="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
+    [[ -d "$bs" ]] || return 1
+    node -e '
+      const B = require(process.argv[1]);
+      const db = new B(process.argv[2], { readonly: true, fileMustExist: true });
+      const st = db.prepare(process.argv[3]);
+      if (st.reader) {
+        const out = [];
+        for (const row of st.raw().iterate()) out.push(row.map((v) => (v === null ? "" : String(v))).join("|"));
+        if (out.length) console.log(out.join("\n"));
+      }
+      db.close();
+    ' "$bs" "$db" "$sql" 2>/dev/null
+  fi
+}
+
+# kit_sqlite_backup "<db>" "<dest>" — WAL-safe online backup of <db> to <dest>
+# (parent dirs created). Exit 0 iff the backup landed non-empty.
+kit_sqlite_backup() {
+  local db="$1" dest="$2"
+  [[ -f "$db" ]] || return 1
+  mkdir -p "$(dirname "$dest")" 2>/dev/null
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" ".backup '$dest'" 2>/dev/null
+  else
+    local bs; bs="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
+    [[ -d "$bs" ]] || return 1
+    node -e '
+      const B = require(process.argv[1]);
+      const db = new B(process.argv[2], { readonly: true, fileMustExist: true });
+      db.backup(process.argv[3]).then(() => { db.close(); process.exit(0); })
+        .catch(() => { process.exit(1); });
+    ' "$bs" "$db" "$dest" 2>/dev/null
+  fi
+  [[ -s "$dest" ]]
+}
+
 # ── MCP stdio handshake probe (generalized from fix-brain Step 4) ────────────
 # mcp_initialize_probe <timeout-s> <cmd> [args...] — spawn the server, send ONE
 # JSON-RPC `initialize`, echo exactly one token: PROBE_OK | PROBE_NORESP |
