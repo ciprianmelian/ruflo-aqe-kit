@@ -122,6 +122,17 @@ for i in "${!STAGE_NAME[@]}"; do
 done
 echo ""
 
+# ── Daemon staleness (DAEMON-STALE-DIST-V1 — detection-only, kills nothing) ──
+# A daemon that started BEFORE fix-ruflo's newest dist patch keeps running the
+# pre-patch code even though the stage table above just reported the patch
+# applied. Surface that here — only when >=1 daemon is running at all.
+_DSTALE="$(kit_daemon_staleness)"
+if [[ -n "$_DSTALE" ]]; then
+  echo " daemon staleness (detection-only — nothing is stopped for you)"
+  while IFS= read -r _dl; do echo "  $_dl"; done <<< "$_DSTALE"
+  echo ""
+fi
+
 if [[ "$HARD_FAIL" -eq 1 ]]; then
   echo -e "  ${RED}✗ one or more fix stages hard-failed${NC} — see output above"
   echo "============================================"

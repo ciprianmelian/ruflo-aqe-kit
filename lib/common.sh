@@ -293,6 +293,75 @@ global_bsqlite_loads() {
   node -e "const p=require.resolve('better-sqlite3',{paths:['$groot/agentdb','$groot']});if(!p.startsWith('$groot'))process.exit(3);require(p)" >/dev/null 2>&1
 }
 
+# ── Daemon staleness audit (DAEMON-STALE-DIST-V1 — detection-only) ───────────
+# A running daemon keeps the dist it loaded at SPAWN time: the kit dist patches
+# fix-ruflo applies (SONA-TRAIN-V1 / RUFLO-LORA-ADAPT-V1) are INERT inside any
+# daemon that started before the patch landed — every on-disk grep (status
+# sentinels, proof, verify-learning #11) reads green while the resident process
+# still runs pre-patch code. These helpers DETECT that; they NEVER kill anything
+# (a deliberate operator daemon is allowed — Patch 50 semantics). Parse +
+# classification live in tools/daemon-staleness.cjs (pure, unit-testable);
+# discovery is this small function, overridable in tests.
+#
+# kit_daemon_ps_lines — one "<pid> <etimes> <args...>" line per running daemon.
+# Discovery mirrors BOTH existing sites: status.sh's 'ruflo daemon' and proof
+# P14's argv-anchored 'bin/cli.js daemon start'; pids merged + deduped.
+kit_daemon_ps_lines() {
+  local pids p line
+  pids="$( { pgrep -f 'bin/cli.js daemon start' 2>/dev/null; pgrep -f 'ruflo daemon' 2>/dev/null; } | sort -un)"
+  [[ -n "$pids" ]] || return 0
+  for p in $pids; do
+    # etimes (elapsed seconds) where supported; BSD ps only has etime
+    # ([[dd-]hh:]mm:ss) — the cjs classifier parses both token shapes.
+    line="$(ps -o pid= -o etimes= -o args= -p "$p" 2>/dev/null | sed 's/^[[:space:]]*//')"
+    [[ -z "$line" ]] && line="$(ps -o pid= -o etime= -o args= -p "$p" 2>/dev/null | sed 's/^[[:space:]]*//')"
+    [[ -n "$line" ]] && printf '%s\n' "$line"
+  done
+  return 0
+}
+
+# kit_daemon_dist_newest_mtime — newest mtime (epoch) among the kit-patched
+# dist files fix-ruflo owns (the SAME files verify-learning probe #11 greps:
+# memory/intelligence.js + mcp-tools/hooks-tools.js). Root resolves via
+# KIT_RUFLO_DIST_SRC (test override) else `npm root -g`. rc 1 when neither
+# file is found (offline / no global install).
+kit_daemon_dist_newest_mtime() {
+  local root g f m best=""
+  if [[ -n "${KIT_RUFLO_DIST_SRC:-}" ]]; then
+    root="$KIT_RUFLO_DIST_SRC"
+  else
+    g="$(npm root -g 2>/dev/null || echo '')"
+    [[ -n "$g" ]] || return 1
+    root="$g/ruflo/node_modules/@claude-flow/cli/dist/src"
+  fi
+  for f in "$root/memory/intelligence.js" "$root/mcp-tools/hooks-tools.js"; do
+    [[ -f "$f" ]] || continue
+    # GNU stat (-c) first, BSD stat (-f) fallback — no readlink -f / coreutils dep.
+    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"
+    [[ "$m" =~ ^[0-9]+$ ]] || continue
+    if [[ -z "$best" || "$m" -gt "$best" ]]; then best="$m"; fi
+  done
+  [[ -n "$best" ]] || return 1
+  echo "$best"
+}
+
+# kit_daemon_staleness — the audit: one line per running daemon (pid, workspace,
+# started-at, STALE|FRESH, suspicion tags) plus one consequence+remedy WARNING
+# line when >=1 daemon is STALE. Prints NOTHING when no daemon runs. No dist
+# mtime resolvable => everything classifies FRESH (never claim staleness we
+# cannot prove). Detection-only: exit 0 always, kills nothing.
+kit_daemon_staleness() {
+  local cjs="$KIT_TOOLS/daemon-staleness.cjs" lines newest
+  [[ -f "$cjs" ]] || return 0
+  lines="$(kit_daemon_ps_lines)"
+  [[ -n "$lines" ]] || return 0
+  newest="$(kit_daemon_dist_newest_mtime 2>/dev/null || echo '')"
+  local dsargs=(--home "$HOME")
+  [[ -n "$newest" ]] && dsargs=(--newest-mtime "$newest" "${dsargs[@]}")
+  printf '%s\n' "$lines" | node "$cjs" "${dsargs[@]}" 2>/dev/null
+  return 0
+}
+
 # ── Tabular-output number parsers (HEALTH-COMMA-V1) ──────────────────────────
 # ruflo >=3.32 prints thousands separators in `memory stats` / intelligence
 # tables (`| Total Entries |  1,921 |`): the old digit-grep returned the `1`
