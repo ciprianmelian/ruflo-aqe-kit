@@ -385,6 +385,14 @@ probe_daemon_gates() {
   if [[ "${dcount:-0}" -gt 0 ]]; then
     [[ "$verdict" != "FAIL" ]] && verdict="WARN"
     detail="$detail · $dcount daemon proc(s) running (operator?)"
+    # DAEMON-STALE-DIST-V1: a daemon that started BEFORE the newest kit dist
+    # patch is running pre-patch code (dist patches inert in it until:
+    # ruflo daemon stop && ruflo daemon start — deliberate starts are the
+    # operator's; auto-spawned strays are safe to stop). Detection-only detail
+    # enrichment; verdict semantics UNCHANGED (running daemons stay WARN at most).
+    local scount
+    scount="$(kit_daemon_staleness 2>/dev/null | grep -cE ' STALE( |$)')"
+    [[ "${scount:-0}" -gt 0 ]] && detail="$detail · $scount stale-dist daemon(s)"
   fi
   record_probe "daemon-gates" "$verdict" "$detail"
 }
