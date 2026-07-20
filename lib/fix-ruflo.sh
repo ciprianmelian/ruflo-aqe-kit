@@ -1824,11 +1824,24 @@ if command -v claude &>/dev/null; then
       warn "MCP registration exists but may need review"
     fi
 
+    # DRYRUN-PROBE-NONFATAL-V1: the Connected/Failed verdict below comes from
+    # `claude mcp list`, which LIVE-probes every registered server at call time
+    # (spawn + handshake against a timeout). Its outcome depends on transient
+    # server state — a slow/warming server reads "Failed" on run A and
+    # "Connected" on run B — not on anything this script would change. In
+    # dry-run that flap must never flip the exit code (observed: two
+    # back-to-back `sync --dry-run` runs disagreed 0↔1 on exactly this probe),
+    # so report it as an explicitly non-deterministic observation instead of a
+    # manual-action error. Live (non-dry-run) behavior is unchanged.
     if echo "$MCP_LIST" | grep "claude-flow" | grep -q "Connected"; then
       pass "MCP server connected"
     elif echo "$MCP_LIST" | grep "claude-flow" | grep -q "Failed"; then
-      fail "MCP server failed — restart Claude Code after fixes"
-      ((ERRORS++)) || true
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        warn "MCP server probe reports Failed (live-state-dependent, non-deterministic — not counted in dry-run; DRYRUN-PROBE-NONFATAL-V1)"
+      else
+        fail "MCP server failed — restart Claude Code after fixes"
+        ((ERRORS++)) || true
+      fi
     fi
   else
     info "No claude-flow MCP entry — adding"

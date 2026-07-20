@@ -67,9 +67,23 @@ run_fix() {
   header "$label" "running${_DRY_TAG}"
   local out rc
   out="$(bash "$script" "$TARGET_DIR" ${_dryflag[@]+"${_dryflag[@]}"} 2>&1)"; rc=$?
-  local changes; changes="$(parse_changes "$out")"
+  # DRYRUN-WOULD-COUNT-V1: in dry-run every stage applies 0 changes by design,
+  # so the stage's own change counter truthfully reads 0 while its transcript is
+  # full of "[dry-run] Would:" lines — the old summary then claimed
+  # "complete (0 change(s))" against a dozens-line plan. In dry-run, count the
+  # stage's [dry-run] would-action lines instead and LABEL them as would-changes
+  # (per-stage line + CHANGES column). Non-dry-run counting is untouched.
+  local changes chg_disp
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    changes="$(grep -c '\[dry-run\]' <<< "$out")"
+    chg_disp="$changes would-change(s)"
+    changes="$changes would"
+  else
+    changes="$(parse_changes "$out")"
+    chg_disp="$changes change(s)"
+  fi
   if [[ "$rc" -eq 0 ]]; then
-    pass "$label complete ($changes change(s))"
+    pass "$label complete ($chg_disp)"
     record "$label" ok "$changes" ""
   elif grep -qE "$complete_re" <<< "$out"; then
     warn "$label completed with manual actions (exit $rc)"
