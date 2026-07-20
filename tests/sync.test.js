@@ -30,12 +30,23 @@ const COMPLETE = {
 // prints its completion line + a parseable change count, exits with `code`.
 // When `omitComplete` is set the completion marker is suppressed (to simulate a
 // crash that never reached the end → sync must treat a nonzero exit as HARD).
-function fixStub(name, { code = 0, changes = 1, omitComplete = false } = {}) {
+// `wouldLines` emits that many "[dry-run] Would: …" plan lines when invoked
+// with --dry-run — mirroring what the real fix scripts print (the input for
+// sync's DRYRUN-WOULD-COUNT-V1 counting).
+function fixStub(name, { code = 0, changes = 1, wouldLines = 0, omitComplete = false } = {}) {
   const token = omitComplete ? 'partial output only' : COMPLETE[name];
+  const would = Array.from(
+    { length: wouldLines },
+    (_, i) => `  echo "  → [dry-run] Would: planned action ${i + 1}"`
+  ).join('\n');
   return `#!/usr/bin/env bash
 target="$1"; dry=0
 for a in "$@"; do [ "$a" = "--dry-run" ] && dry=1; done
 if [ "$dry" -eq 0 ]; then : > "$target/${name}.touched"; fi
+if [ "$dry" -eq 1 ]; then
+${would || '  :'}
+  :
+fi
 echo "${token} — ${changes} change(s)"
 echo "Fixes applied:    ${changes}"
 exit ${code}
@@ -139,14 +150,76 @@ describe('sync.sh: summary table', () => {
     }
   });
 
-  it('parses the change count from a stage completion line', () => {
+  it('parses the change count from a stage completion line (non-dry-run)', () => {
     const kit = mkKit({ 'fix-aqe.sh': { changes: 7 } });
     try {
-      const { out } = runSync(kit, target, ['--dry-run']);
+      const { out } = runSync(kit, target);
       // fix-aqe row should carry its parsed change count (7). Strip ANSI first
       // so the column colouring doesn't break the row match.
       const plain = out.replace(/\[[0-9;]*m/g, '');
       expect(plain).toMatch(/fix-aqe\s+ok\s+7/);
+    } finally {
+      fs.rmSync(kit, { recursive: true, force: true });
+    }
+  });
+});
+
+// Strip ANSI colour codes so column/row regexes match the rendered table.
+const stripAnsi = (s) => s.replace(/\[[0-9;]*m/g, '');
+
+describe('sync.sh: DRYRUN-WOULD-COUNT-V1 — dry-run counts would-actions truthfully', () => {
+  it('reports a non-zero would-change count when a stage emits [dry-run] Would: lines', () => {
+    const kit = mkKit({ 'fix-ruflo.sh': { wouldLines: 5 }, 'fix-aqe.sh': { wouldLines: 2 } });
+    try {
+      const { code, out } = runSync(kit, target, ['--dry-run']);
+      const plain = stripAnsi(out);
+      // Per-stage completion lines carry the labeled would-count …
+      expect(plain).toMatch(/fix-ruflo complete \(5 would-change\(s\)\)/);
+      expect(plain).toMatch(/fix-aqe complete \(2 would-change\(s\)\)/);
+      // … and the summary CHANGES column carries the same labeled numbers.
+      expect(plain).toMatch(/fix-ruflo\s+ok\s+5 would/);
+      expect(plain).toMatch(/fix-aqe\s+ok\s+2 would/);
+      expect(code).toBe(0);
+    } finally {
+      fs.rmSync(kit, { recursive: true, force: true });
+    }
+  });
+
+  it('a stage with no would-lines reads 0 would-change(s) — never the live counter', () => {
+    // The stub prints "… — 3 change(s)" / "Fixes applied: 3" even in dry-run
+    // (like the real scripts' summary footers); dry-run must NOT parse those.
+    const kit = mkKit({ 'fix-statusbar.sh': { changes: 3, wouldLines: 0 } });
+    try {
+      const { out } = runSync(kit, target, ['--dry-run']);
+      const plain = stripAnsi(out);
+      expect(plain).toMatch(/fix-statusbar complete \(0 would-change\(s\)\)/);
+      expect(plain).toMatch(/fix-statusbar\s+ok\s+0 would/);
+    } finally {
+      fs.rmSync(kit, { recursive: true, force: true });
+    }
+  });
+
+  it('non-dry-run counting is untouched (no would labels, completion-line count)', () => {
+    const kit = mkKit({ 'fix-ruflo.sh': { changes: 4, wouldLines: 5 } });
+    try {
+      const { out } = runSync(kit, target);
+      const plain = stripAnsi(out);
+      expect(plain).toMatch(/fix-ruflo complete \(4 change\(s\)\)/);
+      expect(plain).toMatch(/fix-ruflo\s+ok\s+4\s/);
+      expect(plain).not.toMatch(/would-change/);
+      expect(plain).not.toMatch(/\d+ would/);
+    } finally {
+      fs.rmSync(kit, { recursive: true, force: true });
+    }
+  });
+
+  it('a dry-run stage that warns (nonzero exit + marker) still shows its would-count', () => {
+    const kit = mkKit({ 'fix-ruflo.sh': { code: 1, wouldLines: 3 } });
+    try {
+      const { code, out } = runSync(kit, target, ['--dry-run']);
+      const plain = stripAnsi(out);
+      expect(plain).toMatch(/fix-ruflo\s+warn\s+3 would/);
+      expect(code).toBe(0); // completed-with-warnings is never a sync hard-fail
     } finally {
       fs.rmSync(kit, { recursive: true, force: true });
     }
