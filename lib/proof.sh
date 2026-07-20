@@ -295,21 +295,28 @@ probe_swarm_smoke() {
 # invariant; an instant-fail probe just measures the writer's timing, not the
 # store's health (observed: P13 flapped whenever the live aqe-mcp was writing).
 probe_stores_writable() {
-  # Missing instrument ≠ locked stores: without the sqlite3 CLI every lock test
-  # errors and used to mis-read as "locked/unwritable with no live holder"
-  # (observed 2026-07-20, rust-r8n adoption on a sqlite3-less Ubuntu host).
-  # Still FAIL — PROVED must not be earned with a blind probe — but say why.
-  if ! command -v sqlite3 >/dev/null 2>&1; then
-    record_probe "stores-writable" FAIL "sqlite3 CLI not installed - writability not assessable (S1 prereq; install sqlite3)"
+  # KIT-SQLITE-SHIM-V1: the lock test runs through kit_sqlite_rw_check — the
+  # sqlite3 CLI when present, else node + the global ruflo's better-sqlite3
+  # (same BEGIN IMMEDIATE; ROLLBACK, same 3s busy timeout). A sqlite3-less host
+  # therefore gets a REAL probe (it used to hard-FAIL "not assessable" — observed
+  # 2026-07-20, rust-r8n adoption on a sqlite3-less Ubuntu host). Only a host
+  # with NEITHER instrument still FAILs: PROVED must not be earned blind.
+  local backend; backend="$(kit_sqlite_backend)"
+  if [[ "$backend" == "none" ]]; then
+    record_probe "stores-writable" FAIL "no sqlite instrument (sqlite3 CLI absent, global better-sqlite3 unloadable) - writability not assessable"
     return
   fi
+  # Transparency: when the lock test ran on the node fallback, say so in the
+  # detail — the verdict semantics are identical, but the instrument differs.
+  local fbnote=""
+  [[ "$backend" == "node" ]] && fbnote=" [via node better-sqlite3 fallback - sqlite3 CLI absent]"
   local rels=(".swarm/memory.db" ".agentic-qe/memory.db" "agentdb.db")
   local rel db checked=0 missing=0 locked="" held=""
   for rel in "${rels[@]}"; do
     db="$TARGET_DIR/$rel"
     if [[ ! -f "$db" ]]; then missing=$((missing + 1)); continue; fi
     checked=$((checked + 1))
-    if ! sqlite3 -cmd ".timeout 3000" "$db" "BEGIN IMMEDIATE; ROLLBACK;" >/dev/null 2>&1; then
+    if ! kit_sqlite_rw_check "$db"; then
       # A LIVE writer (aqe-mcp / claude-flow MCP mid-write) yields transient
       # SQLITE_BUSY or even SQLITE_IOERR on WAL checkpoints — that is "not
       # assessable right now", not "broken". FAIL is reserved for a store that
@@ -319,15 +326,15 @@ probe_stores_writable() {
     fi
   done
   if [[ -n "$locked" ]]; then
-    record_probe "stores-writable" FAIL "locked/unwritable with no live holder: $locked"
+    record_probe "stores-writable" FAIL "locked/unwritable with no live holder: ${locked}${fbnote}"
   elif [[ -n "$held" ]]; then
-    record_probe "stores-writable" WARN "held by live writer: ${held}- writability not assessable mid-session"
+    record_probe "stores-writable" WARN "held by live writer: ${held}- writability not assessable mid-session${fbnote}"
   elif [[ "$checked" -eq 0 ]]; then
     record_probe "stores-writable" WARN "no sqlite stores present yet (fresh target)"
   elif [[ "$missing" -gt 0 ]]; then
-    record_probe "stores-writable" WARN "$checked store(s) writable; $missing absent"
+    record_probe "stores-writable" WARN "$checked store(s) writable; $missing absent${fbnote}"
   else
-    record_probe "stores-writable" PASS "$checked store(s) take a write lock cleanly"
+    record_probe "stores-writable" PASS "$checked store(s) take a write lock cleanly${fbnote}"
   fi
 }
 
@@ -406,16 +413,50 @@ probe_statusline_truth() {
   cat > "$driver" <<'NODE'
 'use strict';
 const { spawn, execSync } = require('node:child_process');
-const [SL, TARGET, SWARMDB] = process.argv.slice(2);
-function sqliteCount(sql) {
+const [SL, TARGET, SWARMDB, BSQLITE] = process.argv.slice(2);
+// KIT-SQLITE-SHIM-V1: pick the recount instrument ONCE — sqlite3 CLI first,
+// else node + the global ruflo's better-sqlite3 (path passed in as BSQLITE).
+// With NEITHER, the independent recount is honestly UNAVAILABLE: the old code
+// silently returned 0 on every error, and a silent 0 could false-PASS drift
+// (any statusline rendering vectorCount<=5 would "match" a blind instrument).
+let mode = null, bdb = null;
+try {
+  execSync('sqlite3 -version', { timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] });
+  mode = 'cli';
+} catch (e) { /* CLI absent */ }
+if (!mode) {
   try {
-    const o = execSync('sqlite3 -readonly "' + SWARMDB + '" "' + sql + '"',
-      { timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-    const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0;
-  } catch (e) { return 0; }
+    const B = require(BSQLITE);
+    bdb = new B(SWARMDB, { readonly: true, fileMustExist: true });
+    mode = 'node';
+  } catch (e) { /* better-sqlite3 absent/unloadable too */ }
+}
+function sqliteCount(sql) {
+  // Instrument present: a per-query error means "missing table" → 0 (the audit
+  // formula sums over tables that may legitimately not exist yet).
+  if (mode === 'cli') {
+    try {
+      const o = execSync('sqlite3 -readonly "' + SWARMDB + '" "' + sql + '"',
+        { timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      const n = parseInt(o, 10); return Number.isFinite(n) ? n : 0;
+    } catch (e) { return 0; }
+  }
+  if (mode === 'node') {
+    try {
+      const n = Number(bdb.prepare(sql).pluck().get());
+      return Number.isFinite(n) ? n : 0;
+    } catch (e) { return 0; }
+  }
+  return null;
+}
+if (mode === null) {
+  // No instrument at all: refuse the comparison instead of comparing against a
+  // silent 0 — an explicit FAIL is the honest verdict here.
+  console.log('FAIL|independent recount unavailable (no sqlite3 CLI and no loadable global better-sqlite3) - refusing silent-0 comparison');
+  process.exit(0);
 }
 // Independent 4-query sum — the exact audit formula, computed here (not trusting
-// the statusline's own arithmetic). Missing tables error out to 0 under -readonly.
+// the statusline's own arithmetic). Missing tables count as 0 on either arm.
 const indep =
   sqliteCount("SELECT COUNT(*) FROM memory_entries WHERE embedding IS NOT NULL") +
   sqliteCount("SELECT COUNT(*) FROM pattern_embeddings") +
@@ -441,11 +482,13 @@ child.on('exit', () => {
   if (!(typeof t.testCases === 'number' && typeof t.testFiles === 'number' && t.testCases >= t.testFiles))
     problems.push('testCases(' + t.testCases + ') < testFiles(' + t.testFiles + ')');
   if (t.countMethod !== 'regex-scan') problems.push("countMethod='" + t.countMethod + "' != regex-scan");
-  if (problems.length) return finish('FAIL|' + problems.join('; '));
-  finish('PASS|vectorCount ' + sw.vectorCount + ' ~ sqlite ' + indep + '; testCases ' + t.testCases + ' >= testFiles ' + t.testFiles + '; regex-scan');
+  const fb = (mode === 'node') ? ' [recount via node better-sqlite3 fallback - sqlite3 CLI absent]' : '';
+  if (problems.length) return finish('FAIL|' + problems.join('; ') + fb);
+  finish('PASS|vectorCount ' + sw.vectorCount + ' ~ sqlite ' + indep + '; testCases ' + t.testCases + ' >= testFiles ' + t.testFiles + '; regex-scan' + fb);
 });
 NODE
-  res="$(node "$driver" "$KIT_ASSETS/statusline.cjs" "$TARGET_DIR" "$swarmdb" 2>/dev/null)"
+  res="$(node "$driver" "$KIT_ASSETS/statusline.cjs" "$TARGET_DIR" "$swarmdb" \
+    "${GROOT:+$GROOT/ruflo/node_modules/better-sqlite3}" 2>/dev/null)"
   rm -f "$driver"
   local verdict detail
   verdict="${res%%|*}"; detail="${res#*|}"

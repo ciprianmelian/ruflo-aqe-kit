@@ -124,14 +124,17 @@ if [[ -f "$BRAIN_KB/forge-mcp-all.mjs" ]]; then
   [[ -z "$BRAIN_VER" ]] && BRAIN_VER="$(node -p "require('$BRAIN_KB/package.json').version" 2>/dev/null || echo '')"
 fi
 
-# ── Learning stores (sqlite3 -readonly; n/a when sqlite3 absent) ─────────────
+# ── Learning stores (KIT-SQLITE-SHIM-V1: sqlite3 CLI first, else the global
+# ruflo's better-sqlite3 via node — counts appear either way; only a host with
+# NEITHER instrument reads n/a) ──────────────────────────────────────────────
+SQLITE_BACKEND="$(kit_sqlite_backend)"   # cli | node | none
 SQLITE_OK=0
-command -v sqlite3 >/dev/null 2>&1 && SQLITE_OK=1
-# count <db> <table> -> integer, or '' when sqlite3 missing / db missing / no table
+[[ "$SQLITE_BACKEND" != "none" ]] && SQLITE_OK=1
+# count <db> <table> -> integer, or '' when no backend / db missing / no table
 lstore_count() {
   local db="$1" tbl="$2"
   [[ "$SQLITE_OK" -eq 1 && -f "$db" ]] || { echo ''; return; }
-  sqlite3 -readonly "$db" \
+  kit_sqlite_ro "$db" \
     "SELECT COUNT(*) FROM $tbl;" 2>/dev/null | grep -E '^[0-9]+$' | head -1
 }
 ADB="$TARGET_DIR/agentdb.db"
@@ -160,7 +163,7 @@ build_json() {
   SENTINEL_ITEMS="$SENTINEL_ITEMS" HOOK_BLOCK_EXIT2="$HOOK_BLOCK_EXIT2" DREAM_LOCKFIX_COUNT="$DREAM_LOCKFIX_COUNT" \
   DAEMON_RUNNING="$DAEMON_RUNNING" DAEMON_PIDS="$DAEMON_PIDS" \
   MCP_SERVERS="$MCP_SERVERS" BRAIN_PRESENT="$BRAIN_PRESENT" BRAIN_SIZE="$BRAIN_SIZE" BRAIN_VER="$BRAIN_VER" \
-  L_EPISODES="$L_EPISODES" L_SKILLS="$L_SKILLS" L_EXPERIENCES="$L_EXPERIENCES" L_PATTERNS="$L_PATTERNS" SQLITE_OK="$SQLITE_OK" \
+  L_EPISODES="$L_EPISODES" L_SKILLS="$L_SKILLS" L_EXPERIENCES="$L_EXPERIENCES" L_PATTERNS="$L_PATTERNS" SQLITE_OK="$SQLITE_OK" SQLITE_BACKEND="$SQLITE_BACKEND" \
   DAEMON_AUTOSTART="$DAEMON_AUTOSTART" HEALTH_PRESENT="$HEALTH_PRESENT" HEALTH_ISO="$HEALTH_ISO" \
   node -e '
     const e = process.env;
@@ -206,6 +209,7 @@ build_json() {
         experiences: num(e.L_EXPERIENCES),
         patterns: num(e.L_PATTERNS),
         sqlite: bool(e.SQLITE_OK),
+        sqliteBackend: str(e.SQLITE_BACKEND),
       },
       config: {
         daemonAutoStart: str(e.DAEMON_AUTOSTART),
@@ -238,9 +242,10 @@ if [[ "$MODE" == "hints" ]]; then
   fi
   echo "  sentinels: $SENT_PRESENT/$SENT_TOTAL ruflo dist · exit2 $(_yesno "$HOOK_BLOCK_EXIT2") · dream-lockfix $DREAM_LOCKFIX_COUNT"
   if [[ "$SQLITE_OK" -eq 1 ]]; then
-    echo "  learning:  episodes $(_or_na "$L_EPISODES") · skills $(_or_na "$L_SKILLS") · experiences $(_or_na "$L_EXPERIENCES") · patterns $(_or_na "$L_PATTERNS")"
+    _fb=""; [[ "$SQLITE_BACKEND" == "node" ]] && _fb=" (node fallback)"
+    echo "  learning:  episodes $(_or_na "$L_EPISODES") · skills $(_or_na "$L_SKILLS") · experiences $(_or_na "$L_EXPERIENCES") · patterns $(_or_na "$L_PATTERNS")${_fb}"
   else
-    echo "  learning:  n/a (sqlite3 not installed)"
+    echo "  learning:  n/a (no sqlite backend: sqlite3 CLI and global better-sqlite3 both unavailable)"
   fi
   exit 0
 fi
@@ -306,12 +311,13 @@ else
   info "ruvnet-brain KB not installed (optional: bin/ruflo-kit fix-brain $TARGET_DIR --download)"
 fi
 
-header "learning" "structured stores (sqlite3 -readonly)"
+header "learning" "structured stores (read-only via kit_sqlite_ro)"
 if [[ "$SQLITE_OK" -eq 1 ]]; then
   pass "agentdb.db: episodes $(_or_na "$L_EPISODES") · skills $(_or_na "$L_SKILLS")"
   pass ".agentic-qe/memory.db: experiences $(_or_na "$L_EXPERIENCES") · patterns $(_or_na "$L_PATTERNS")"
+  [[ "$SQLITE_BACKEND" == "node" ]] && info "counts via node better-sqlite3 fallback (sqlite3 CLI not installed)"
 else
-  info "sqlite3 not installed — learning store counts unavailable (n/a)"
+  info "no sqlite backend (sqlite3 CLI and global better-sqlite3 both unavailable) — learning store counts n/a"
 fi
 
 header "config" "operational settings"
