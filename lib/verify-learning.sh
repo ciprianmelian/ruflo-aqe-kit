@@ -19,6 +19,7 @@ set -uo pipefail
 #   #9 graphAdapter not wiring relationships (graph_edges 0)                 WARN
 #   #10 SONA table unpopulated (sona_patterns 0)                            WARN
 #   #11 sona-seam sentinels (SONA-TRAIN-V1 + RUFLO-LORA-ADAPT-V1 in dist)   FAIL
+#   #12 capture-arm inflow (INFLOW-LIVENESS-V1: hooks wired + pool fresh)   FAIL-if-unwired / WARN-stale
 #   #7 model router liveness (totalDecisions / routing_outcomes)            INFO
 #
 # Usage:
@@ -197,6 +198,65 @@ probe_seam_sentinels() {
   fi
 }
 
+# #12 capture-arm inflow liveness (INFLOW-LIVENESS-V1, Patch 67). The pool
+# every harvest replays — captured_experiences — only grows while a capture
+# hook is wired in .claude/settings.json (kit_aqe_capture_wired, common.sh).
+# A `--force` re-init that clobbers settings kills the arm with NO other
+# symptom: the pool reads "fully harvested", adaptations keep growing (the
+# ruflo arm still trains), and Patch-63 HOLLOW semantics stay green because
+# there are no eligible UNharvested rows. Observed on the adopted Rust
+# workflow-platform target (hooks died
+# 2026-07-19 17:42 via `ruflo init --wizard --force`; pool frozen at 4,402;
+# found only by a manual settings-snapshot diff). FAIL requires PROOF the arm
+# once existed: rows with source LIKE 'cli-hook-%' are written only by the
+# Claude Code hook subprocesses, so hook-origin rows + no hook wired = the arm
+# was killed. A pool without hook-origin rows (middleware-only capture, ADR-051
+# — or a pre-source schema) is a WARN: capture may be by design fleet-driven,
+# and FAILing it would false-positive every middleware-only project (caught by
+# the fresh-target fixtures on first run). When wired, a staleness advisory
+# compares the newest experience against the newest session record — sessions
+# much newer than the last capture suggest the hooks fire but never land
+# (timeout/npx cold-start class) → WARN, never FAIL (a chat-only session
+# legitimately captures nothing).
+probe_capture_inflow() {
+  local pool wired=0 exp_ts gap_h
+  pool="$(count_tbl "$AQE_DB" captured_experiences)"
+  kit_aqe_capture_wired "$TARGET_DIR" && wired=1
+  if [[ "$pool" -eq 0 ]]; then
+    if [[ "$wired" -eq 1 ]]; then
+      note "capture inflow wired, pool empty — experiences appear once live sessions do real work (#12)"
+    else
+      note "no capture hooks and empty pool — AQE capture not configured here (#12)"
+    fi
+    return
+  fi
+  if [[ "$wired" -eq 0 ]]; then
+    local cli_rows
+    cli_rows="$(sqlite_count_safe "$AQE_DB" "SELECT COUNT(*) FROM captured_experiences WHERE source LIKE 'cli-hook-%';")"
+    if [[ "$cli_rows" -gt 0 ]]; then
+      bad "capture arm UNWIRED: $cli_rows hook-captured experience(s) (source cli-hook-%) exist but .claude/settings.json has NO aqe capture hook (post-edit/post-task/post-command) — the arm that captured them is GONE and the pool is FROZEN; every future harvest replays nothing new. A --force re-init likely clobbered the hooks. Restore the stock aqe hook set, then: ruflo-kit fix-aqe $TARGET_DIR (INFLOW-LIVENESS-V1)"
+    else
+      soft "capture hooks not wired ($pool experience(s), none hook-originated — middleware/fleet capture only): Claude-session work is NOT being captured; wire the stock aqe hooks if that is unintended (#12)"
+    fi
+    return
+  fi
+  exp_ts="$(kit_sqlite_ro "$AQE_DB" "SELECT MAX(completed_at) FROM captured_experiences;" 2>/dev/null | head -1)"
+  # Hours the newest session record post-dates the newest capture; -1 = not
+  # assessable (no session records / unparseable timestamp). Date math in node
+  # (portable across GNU/BSD date).
+  gap_h="$(EXP_TS="$exp_ts" node -e '
+    const fs=require("fs"),p=".claude-flow/sessions";
+    let m=0;try{for(const f of fs.readdirSync(p))if(/^session-.*\.json$/.test(f))m=Math.max(m,fs.statSync(p+"/"+f).mtimeMs);}catch(e){}
+    const e=Date.parse((process.env.EXP_TS||"").replace(" ","T")+"Z");
+    if(!m||isNaN(e)){process.stdout.write("-1");process.exit(0);}
+    process.stdout.write(String(Math.floor((m-e)/3600000)));' 2>/dev/null || echo -1)"
+  if [[ "$gap_h" =~ ^[0-9]+$ ]] && [[ "$gap_h" -gt 24 ]]; then
+    soft "capture inflow STALE: newest experience is ${gap_h}h older than the newest session record (newest capture: ${exp_ts:-unknown}) — hooks are wired but may not be landing (check .agentic-qe/hooks-health.log) (#12)"
+  else
+    ok "capture inflow live: hooks wired, pool=$pool (newest capture: ${exp_ts:-unknown}) (#12)"
+  fi
+}
+
 # #4 native HNSW backend. The authoritative flag lives in the ruvector FLAGS
 # STORE (read via `aqe ruvector status`), NOT config.yaml — and it is ON by
 # default. So `config.yaml` lacking the key is NOT evidence of a problem (the
@@ -317,6 +377,7 @@ fi
 probe_reflexion_store
 probe_lora_backend
 probe_seam_sentinels
+probe_capture_inflow
 probe_hnsw_native
 probe_dimension_guard
 probe_graph_edges

@@ -148,6 +148,10 @@ L_EPISODES="$(lstore_count "$ADB" episodes)"
 L_SKILLS="$(lstore_count "$ADB" skills)"
 L_EXPERIENCES="$(lstore_count "$AQE_DB" captured_experiences)"
 L_PATTERNS="$(lstore_count "$AQE_DB" qe_patterns)"
+# INFLOW-LIVENESS-V1 (Patch 67): structural check that a capture hook is wired,
+# so a frozen pool ("--force re-init clobbered the hooks") is visible in status.
+CAPTURE_WIRED=0
+kit_aqe_capture_wired "$TARGET_DIR" && CAPTURE_WIRED=1
 
 # ── Config: daemon auto-start mode + last health snapshot ────────────────────
 DAEMON_AUTOSTART="${RUFLO_DAEMON_MODE:-off}"
@@ -169,6 +173,7 @@ build_json() {
   DAEMON_RUNNING="$DAEMON_RUNNING" DAEMON_PIDS="$DAEMON_PIDS" \
   MCP_SERVERS="$MCP_SERVERS" BRAIN_PRESENT="$BRAIN_PRESENT" BRAIN_SIZE="$BRAIN_SIZE" BRAIN_VER="$BRAIN_VER" \
   L_EPISODES="$L_EPISODES" L_SKILLS="$L_SKILLS" L_EXPERIENCES="$L_EXPERIENCES" L_PATTERNS="$L_PATTERNS" SQLITE_OK="$SQLITE_OK" SQLITE_BACKEND="$SQLITE_BACKEND" \
+  CAPTURE_WIRED="$CAPTURE_WIRED" \
   DAEMON_AUTOSTART="$DAEMON_AUTOSTART" HEALTH_PRESENT="$HEALTH_PRESENT" HEALTH_ISO="$HEALTH_ISO" \
   node -e '
     const e = process.env;
@@ -213,6 +218,7 @@ build_json() {
         skills: num(e.L_SKILLS),
         experiences: num(e.L_EXPERIENCES),
         patterns: num(e.L_PATTERNS),
+        captureInflowWired: bool(e.CAPTURE_WIRED),
         sqlite: bool(e.SQLITE_OK),
         sqliteBackend: str(e.SQLITE_BACKEND),
       },
@@ -324,6 +330,11 @@ header "learning" "structured stores (read-only via kit_sqlite_ro)"
 if [[ "$SQLITE_OK" -eq 1 ]]; then
   pass "agentdb.db: episodes $(_or_na "$L_EPISODES") · skills $(_or_na "$L_SKILLS")"
   pass ".agentic-qe/memory.db: experiences $(_or_na "$L_EXPERIENCES") · patterns $(_or_na "$L_PATTERNS")"
+  if [[ "$CAPTURE_WIRED" -eq 1 ]]; then
+    pass "capture inflow wired (aqe post-edit/post-task hooks present in .claude/settings.json)"
+  elif [[ "${L_EXPERIENCES:-0}" =~ ^[0-9]+$ && "${L_EXPERIENCES:-0}" -gt 0 ]]; then
+    warn "capture arm UNWIRED — $L_EXPERIENCES experience(s) exist but no aqe capture hook in .claude/settings.json: the pool is FROZEN (INFLOW-LIVENESS-V1). Restore the stock aqe hooks, then: ruflo-kit fix-aqe $TARGET_DIR"
+  fi
   [[ "$SQLITE_BACKEND" == "node" ]] && info "counts via node better-sqlite3 fallback (sqlite3 CLI not installed)"
 else
   info "no sqlite backend (sqlite3 CLI and global better-sqlite3 both unavailable) — learning store counts n/a"

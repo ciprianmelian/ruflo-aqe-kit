@@ -293,6 +293,26 @@ global_bsqlite_loads() {
   node -e "const p=require.resolve('better-sqlite3',{paths:['$groot/agentdb','$groot']});if(!p.startsWith('$groot'))process.exit(3);require(p)" >/dev/null 2>&1
 }
 
+# ── AQE capture-arm wiring check (INFLOW-LIVENESS-V1, Patch 67) ──────────────
+# The AQE experience pool (.agentic-qe/memory.db captured_experiences) only
+# grows while a capture hook is WIRED in the target's .claude/settings.json.
+# A `--force` re-init that clobbers settings kills the arm silently: every
+# existing symptom then reads healthy ("pool fully harvested", adaptations
+# growing) while the pool is actually FROZEN (observed on an adopted target: hooks died
+# 2026-07-19 17:42, found only through a manual forensic diff). This helper is
+# the shared structural check for verify-learning #12, status, and adopt.
+# Matches BOTH generations of the stock shape: the aqe ≥3.13 bridge
+# (`aqe-hook.cjs" post-edit ...`) and the legacy direct CLI
+# (`aqe|agentic-qe hooks post-edit ...`), any of post-edit/post-task/post-command.
+# Exit 0 = wired, 1 = not wired (or no settings.json).
+kit_aqe_capture_wired() {
+  local tdir="${1:-$TARGET_DIR}" settings
+  settings="$tdir/.claude/settings.json"
+  [[ -f "$settings" ]] || return 1
+  # NB: in the JSON file the quote after aqe-hook.cjs is escaped (\") — match it optionally.
+  grep -qE 'aqe-hook\.cjs\\?" +(post-edit|post-task|post-command)|(aqe|agentic-qe) +hooks +post-(edit|task|command)' "$settings"
+}
+
 # ── Daemon staleness audit (DAEMON-STALE-DIST-V1 — detection-only) ───────────
 # A running daemon keeps the dist it loaded at SPAWN time: the kit dist patches
 # fix-ruflo applies (SONA-TRAIN-V1 / RUFLO-LORA-ADAPT-V1) are INERT inside any

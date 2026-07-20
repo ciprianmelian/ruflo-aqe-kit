@@ -138,12 +138,41 @@ header "A3" "recount + preservation verdict"
 preservation_diff "$BASELINE"; DIFF_RC=$?
 [[ "$DIFF_RC" -eq 2 ]] && exit 1   # snapshot said ok but baseline is missing — hard error
 
+# ── A4: capture-hook parity (INFLOW-LIVENESS-V1, Patch 67) ──────────────────
+# Preservation proves no store SHRANK — it cannot prove the pool still GROWS.
+# If the target accumulated captured_experiences under a pre-adoption hook set
+# that a later `--force` re-init clobbered, adoption inherits a FROZEN pool
+# with zero symptoms (observed on the adopted Rust workflow-platform target
+# 2026-07-19/20). Non-fatal: adoption
+# preserved memory correctly; this surfaces the pre-existing dead arm loudly.
+header "A4" "capture-hook parity (inflow liveness)"
+CAPTURE_PARITY="wired"
+_pool="$(kit_sqlite_ro "$TARGET_DIR/.agentic-qe/memory.db" \
+  "SELECT COUNT(*) FROM captured_experiences;" 2>/dev/null | head -1)"
+[[ "$_pool" =~ ^[0-9]+$ ]] || _pool=0
+_cli_rows="$(kit_sqlite_ro "$TARGET_DIR/.agentic-qe/memory.db" \
+  "SELECT COUNT(*) FROM captured_experiences WHERE source LIKE 'cli-hook-%';" 2>/dev/null | head -1)"
+[[ "$_cli_rows" =~ ^[0-9]+$ ]] || _cli_rows=0
+if kit_aqe_capture_wired "$TARGET_DIR"; then
+  pass "aqe capture hooks present in .claude/settings.json (pool: $_pool experience(s))"
+elif [[ "$_cli_rows" -gt 0 ]]; then
+  CAPTURE_PARITY="UNWIRED"
+  warn "capture arm UNWIRED: $_cli_rows hook-captured experience(s) exist but the hook set that captured them is GONE from .claude/settings.json — the pool is frozen and harvests will replay nothing new. Restore the stock aqe hook set, then: ruflo-kit fix-aqe $TARGET_DIR"
+elif [[ "$_pool" -gt 0 ]]; then
+  CAPTURE_PARITY="middleware-only"
+  info "pool has $_pool experience(s), none hook-originated (middleware/fleet capture) — no Claude-session capture hook wired"
+else
+  CAPTURE_PARITY="none"
+  info "no capture hooks and empty pool — AQE capture was never configured here"
+fi
+
 echo ""
 echo "============================================"
 echo " adopt summary"
 echo "============================================"
 echo "  setup/proof:  $([[ "$SETUP_RC" -eq 0 ]] && echo "PROVED (exit 0)" || echo "NOT PROVED (exit $SETUP_RC)")"
 echo "  preservation: ${PRESERVE_VERDICT}"
+echo "  capture arm:  ${CAPTURE_PARITY}"
 echo ""
 
 # Overall exit: VIOLATED dominates (exit 2); else setup's proof verdict.
