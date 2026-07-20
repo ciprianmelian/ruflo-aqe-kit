@@ -87,14 +87,32 @@ describe('statusline Tests probe (getLocalTestCount)', () => {
       write(d, 'tests/a.test.js', "it('one', () => {});\nit('two', () => {});\n");
       write(d, 'tests/visual/b.spec.ts', "test('three', () => {});\n");
       write(d, 'packages/ui/src/c.test.ts', "describe('x', () => { it('four', () => {}); });\n");
-      write(d, 'apps/web/d.spec.tsx', '// no cases in this stub\n');
+      write(d, 'apps/web/d.spec.tsx', '// no cases in this stub\n'); // 0 cases → not a testFile
       write(d, 'src/notatest.ts');                     // must NOT count
       write(d, 'node_modules/pkg/x.test.js', "it('never', () => {});\n"); // must NOT count (excluded)
     });
     const j = renderJSON(d);
-    expect(j.tests.testFiles).toBe(4);
-    expect(j.tests.testCases).toBe(4); // 2 + 1 + 1 + 0 real it()/test() calls
+    // testFiles counts only files where the scan FOUND cases (a zero-case stub
+    // is not evidence of a test) — keeps testCases >= testFiles by construction.
+    expect(j.tests.testFiles).toBe(3);
+    expect(j.tests.testCases).toBe(4); // 2 + 1 + 1 real it()/test() calls
     expect(j.tests.countMethod).toBe('regex-scan');
+    fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  it('counts Rust #[test]/#[tokio::test] and Python def test_ cases (non-JS targets)', () => {
+    // A Rust target rendered testCases(0) < testFiles(5) and FAILed proof P15
+    // (2026-07-20, rust-r8n adoption): the case regex was JS-only and the file
+    // matcher counted docker-compose.test.yml as a test file.
+    const d = mkProject((d) => {
+      write(d, 'tests/env.rs', '#[test]\nfn a() {}\n#[tokio::test]\nasync fn b() {}\n');   // .rs under tests/ needs no test_ name
+      write(d, 'tests/bin/test_runner.rs', 'fn main() {} // harness, 0 cases\n');
+      write(d, 'tests/docker-compose.test.yml', 'services: {}\n');                          // 0 cases → not a testFile
+      write(d, 'tests/test_suite.py', 'def test_one():\n    pass\ndef test_two():\n    pass\n');
+    });
+    const j = renderJSON(d);
+    expect(j.tests.testCases).toBe(4);  // 2 rust attrs + 2 python defs
+    expect(j.tests.testFiles).toBe(2);  // only the files with found cases
     fs.rmSync(d, { recursive: true, force: true });
   });
 

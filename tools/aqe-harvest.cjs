@@ -16,7 +16,16 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
 
 (async () => {
   const PROJ = process.cwd();
-  const nodeBase = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules');
+  // Global node_modules: `npm root -g` is the truth (a custom npm prefix like
+  // ~/.npm-global diverges from the execPath-derived guess, e.g. system node at
+  // /usr/bin/node with globals elsewhere); execPath stays as the offline fallback.
+  let nodeBase;
+  try {
+    nodeBase = require('child_process').execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }).toString().trim();
+  } catch (e) {}
+  if (!nodeBase || !fs.existsSync(nodeBase)) {
+    nodeBase = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules');
+  }
   const aqeBase = path.join(nodeBase, 'agentic-qe');
   const cliBase = path.join(nodeBase, 'ruflo', 'node_modules', '@claude-flow', 'cli');
   const adbBase = path.join(nodeBase, 'ruflo', 'node_modules', 'agentdb');
