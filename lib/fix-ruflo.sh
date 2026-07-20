@@ -1756,7 +1756,7 @@ fi
 # tools/adoption-note.cjs so tests drive it in isolation (Step 1 auto-upgrades
 # the toolchain, so the whole script never runs un-dry under test). A CLAUDE.md
 # that already mentions 'ruflo-aqe-kit' WITHOUT the markers (a hand-written
-# kit note, like rust-r8n's) is honored, not duplicated. Idempotent: marker
+# kit note, like the adopted target's) is honored, not duplicated. Idempotent: marker
 # content is re-asserted to canonical; cmp-skip when identical.
 CLAUDE_MD_5J="$TARGET_DIR/CLAUDE.md"
 header "5j/11" "Kit adoption note in CLAUDE.md (KIT-ADOPTION-NOTE-V1)"

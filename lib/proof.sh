@@ -299,7 +299,7 @@ probe_stores_writable() {
   # sqlite3 CLI when present, else node + the global ruflo's better-sqlite3
   # (same BEGIN IMMEDIATE; ROLLBACK, same 3s busy timeout). A sqlite3-less host
   # therefore gets a REAL probe (it used to hard-FAIL "not assessable" — observed
-  # 2026-07-20, rust-r8n adoption on a sqlite3-less Ubuntu host). Only a host
+  # 2026-07-20, Rust-target adoption on a sqlite3-less Ubuntu host). Only a host
   # with NEITHER instrument still FAILs: PROVED must not be earned blind.
   local backend; backend="$(kit_sqlite_backend)"
   if [[ "$backend" == "none" ]]; then

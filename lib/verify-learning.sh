@@ -47,7 +47,7 @@ cd "$TARGET_DIR"
 # Store reads go through kit_sqlite_ro (common.sh, KIT-SQLITE-SHIM-V1): sqlite3
 # CLI first, else node + the global ruflo's better-sqlite3. Before the shim, a
 # sqlite3-less host read every count as 0 and graded a genuinely HOLLOW loop as
-# "partial" (observed 2026-07-20, rust-r8n adoption) — the exact "looks healthy,
+# "partial" (observed 2026-07-20, Rust-target adoption) — the exact "looks healthy,
 # is hollow" masking this script exists to kill.
 num_or_zero() { local n="$1"; [[ "$n" =~ ^[0-9]+$ ]] && echo "$n" || echo 0; }
 sqlite_count_safe() {

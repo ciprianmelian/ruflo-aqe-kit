@@ -103,7 +103,7 @@ describe('adoption-note.cjs (KIT-ADOPTION-NOTE-V1)', () => {
   });
 
   it('(d) hand-written kit note (mentions ruflo-aqe-kit, no markers) -> skipped untouched', () => {
-    const handWritten = '# rust-r8n style\n\nManaged by the ruflo-aqe-kit clone; see docs.\n';
+    const handWritten = '# adopted-target style\n\nManaged by the ruflo-aqe-kit clone; see docs.\n';
     const file = mkClaudeMd(handWritten);
     const { verdict } = runTool(file);
     expect(verdict).toBe('SKIP_HANDWRITTEN');
