@@ -6,6 +6,9 @@ set -uo pipefail
 #   bin/ruflo-kit status <target>            # human dashboard
 #   bin/ruflo-kit status <target> --json     # machine shape (always valid JSON)
 #   bin/ruflo-kit status <target> --hints     # 4 compact lines (bare-invocation hint)
+#   bin/ruflo-kit status <target> --forensics # + manual-install forensics appendix
+#                                             # (STATUS-FORENSICS-V1; plain-text only —
+#                                             # --json ignores --forensics, JSON unchanged)
 #
 # PORCELAIN, read-only. Everything reported is DISK-DERIVED — we never ask a
 # live MCP/daemon "are you healthy?" (a broken server happily says yes). Sources:
@@ -23,12 +26,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # kit_resolve() warns on flags it doesn't recognize, so strip ours first (same
 # pattern fix-brain.sh uses for --download).
 MODE="human"
+FORENSICS=0
 _KR_ARGS=()
 for a in "$@"; do
   case "$a" in
-    --json)  MODE="json" ;;
-    --hints) MODE="hints" ;;
-    *)       _KR_ARGS+=("$a") ;;
+    --json)      MODE="json" ;;
+    --hints)     MODE="hints" ;;
+    --forensics) FORENSICS=1 ;;
+    *)           _KR_ARGS+=("$a") ;;
   esac
 done
 kit_resolve ${_KR_ARGS[@]+"${_KR_ARGS[@]}"}
@@ -252,6 +257,10 @@ fi
 
 # ── --json: machine shape ────────────────────────────────────────────────────
 if [[ "$MODE" == "json" ]]; then
+  # STATUS-FORENSICS-V1 contract: forensics is plain-text only. --json wins and
+  # the JSON shape is UNCHANGED (consumers parse stdout); note goes to stderr.
+  [[ "$FORENSICS" -eq 1 ]] && \
+    echo "note: --forensics is plain-text only — ignored in --json mode (STATUS-FORENSICS-V1)" >&2
   build_json
   exit 0
 fi
@@ -331,4 +340,147 @@ echo ""
 echo "  Full JSON:  bin/ruflo-kit status $TARGET_DIR --json"
 echo "  Converge:   bin/ruflo-kit sync   $TARGET_DIR"
 echo ""
+
+# ════════════════════════════════════════════════════════════════════════════
+# STATUS-FORENSICS-V1 — read-only manual-install forensics appendix.
+#
+# Appended AFTER the normal status output when --forensics is passed (human
+# mode only; --json ignores it — see above; --hints ignores it silently).
+# ZERO writes anywhere: shell history is only grepped, target files are only
+# stat'ed, npx caches are only listed (cleanup stays fix-ruflo Step 7's job).
+# ════════════════════════════════════════════════════════════════════════════
+if [[ "$FORENSICS" -eq 1 ]]; then
+  echo "============================================"
+  echo " forensics — manual-install evidence (STATUS-FORENSICS-V1, read-only)"
+  echo "============================================"
+
+  # Portable mtime (Linux stat -c, macOS/BSD stat -f) — display only.
+  _f_mtime() {
+    local m
+    m="$(stat -c '%y' "$1" 2>/dev/null | cut -d'.' -f1)"
+    [[ -z "$m" ]] && m="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$1" 2>/dev/null)"
+    echo "${m:-unknown}"
+  }
+
+  # ── 1. Shell history scan ──────────────────────────────────────────────────
+  header "history" "manual-install fingerprints in shell history (grep-only)"
+  _HIST_RAW=""
+  _HIST_SEEN=0
+  for _hf in "$HOME/.bash_history" "$HOME/.zsh_history"; do
+    if [[ -f "$_hf" && -r "$_hf" ]]; then
+      _HIST_SEEN=1
+      _HIST_RAW="${_HIST_RAW}$(cat "$_hf" 2>/dev/null)"$'\n'
+    elif [[ -e "$_hf" ]]; then
+      warn "$(basename "$_hf") exists but is not readable — skipped"
+    fi
+  done
+
+  # Grep the combined history for one category. zsh EXTENDED_HISTORY lines
+  # (': <ts>:<elapsed>;cmd') are stripped to the bare command first.
+  # Dedup (first occurrence kept), then last 20 survivors per category.
+  _hist_scan() {  # $1=ERE  $2=optional exclude-ERE
+    local pat="$1" ex="${2:-}" m
+    m="$(printf '%s\n' "$_HIST_RAW" \
+      | sed -E 's/^: [0-9]+:[0-9]+;//' \
+      | grep -E -e "$pat" 2>/dev/null || true)"
+    if [[ -n "$ex" ]]; then
+      m="$(printf '%s\n' "$m" | grep -Ev -e "$ex" 2>/dev/null || true)"
+    fi
+    printf '%s\n' "$m" | awk 'NF && !seen[$0]++' | tail -n 20
+  }
+
+  _FOUND_ANY=0
+  _forensic_cat() {  # $1=name  $2=why-it-matters  $3=ERE  [$4=exclude-ERE]
+    local name="$1" why="$2" pat="$3" ex="${4:-}" m n
+    m="$(_hist_scan "$pat" "$ex")"
+    [[ -z "$m" ]] && return 0
+    n="$(printf '%s\n' "$m" | grep -c . 2>/dev/null || echo 0)"
+    warn "[$name] $n command(s) — $why"
+    while IFS= read -r _l; do
+      [[ -z "$_l" ]] && continue
+      echo "      \$ $_l"
+    done <<< "$m"
+    _FOUND_ANY=1
+  }
+
+  if [[ "$_HIST_SEEN" -eq 0 ]]; then
+    info "no readable shell history (~/.bash_history, ~/.zsh_history) — history scan skipped"
+  else
+    _forensic_cat "mcp-add-npx" \
+      "npx MCP registration reverts the AgentDB alpha.10 pin — npx reconciles its cache on every call; .mcp.json must launch the GLOBAL 'ruflo' binary" \
+      'claude mcp add.*npx'
+    _forensic_cat "npx-stack-invoke" \
+      "npx runs a CACHE copy of the stack — kit dist patches (sentinels) never apply there" \
+      'npx .*(ruflo|claude-flow|agentic-qe)' 'claude mcp add'
+    _forensic_cat "ruflo-init-force" \
+      "'ruflo init --force' CLOBBERS CLAUDE.md/settings — check CLAUDE.md.pre-ruflo* evidence below; the kit's adopt path never uses --force" \
+      'ruflo init.*--force'
+    _forensic_cat "ruflo-init" \
+      "manual 'ruflo init' bypasses the kit's merge-safe setup — run 'ruflo-kit sync' to reconcile" \
+      'ruflo init' '--force'
+    _forensic_cat "aqe-init" \
+      "aqe init <3.12.1 stripped foreign hooks + statusline — verify hooks survived (sentinels section above)" \
+      'aqe init'
+    _forensic_cat "daemon-ctl" \
+      "the daemon spawns BILLED 'claude --print' calls 24/7 — whoever starts it owns stopping it; trust the pgrep daemon section above, never state files" \
+      'ruflo daemon (start|stop)'
+    _forensic_cat "ruflo-doctor" \
+      "'ruflo doctor --fix' has resurrected the gated daemon (pre-Patch 60 channels) — cross-check daemon truth above" \
+      'ruflo doctor'
+    _forensic_cat "npm-global-install" \
+      "a manual global (re)install/upgrade WIPES kit dist patches — re-run 'ruflo-kit sync <target>' after any bump" \
+      'npm i(nstall)? -g (ruflo|agentic-qe|agentdb)'
+    [[ "$_FOUND_ANY" -eq 0 ]] && pass "no manual-install fingerprints found in shell history"
+  fi
+
+  # ── 2. Target-side evidence ────────────────────────────────────────────────
+  header "target-evidence" "on-disk traces in $TARGET_DIR (stat-only)"
+  _DSTATE="$TARGET_DIR/.claude-flow/daemon-state.json"
+  _DPID="$TARGET_DIR/.claude-flow/daemon.pid"
+  if [[ -e "$_DSTATE" ]]; then
+    warn "daemon-state.json present (mtime $(_f_mtime "$_DSTATE")) — state files LIE; live truth is the pgrep daemon section above"
+  else
+    pass "no .claude-flow/daemon-state.json"
+  fi
+  if [[ -e "$_DPID" ]]; then
+    warn "daemon.pid present (mtime $(_f_mtime "$_DPID")) — a past daemon ran (or still runs — see pgrep above)"
+  else
+    pass "no .claude-flow/daemon.pid"
+  fi
+  _PRE_FOUND=0
+  for _pf in "$TARGET_DIR"/CLAUDE.md.pre-ruflo*; do
+    [[ -e "$_pf" ]] || continue
+    _PRE_FOUND=1
+    warn "$(basename "$_pf") (mtime $(_f_mtime "$_pf")) — leftover backup from a 'ruflo init' that overwrote CLAUDE.md"
+  done
+  [[ "$_PRE_FOUND" -eq 0 ]] && pass "no CLAUDE.md.pre-ruflo* leftovers"
+
+  # ── 3. Stale npx caches (listed the way fix-ruflo Step 7 finds them —
+  #      depth-1 dirs under ~/.npm/_npx — but NEVER removed here) ─────────────
+  header "npx-caches" "~/.npm/_npx entries mentioning the stack (list-only)"
+  _NPX_HITS=0
+  if [[ -d "$HOME/.npm/_npx" ]]; then
+    while IFS= read -r _nd; do
+      [[ -z "$_nd" ]] && continue
+      for _np in claude-flow ruflo agentic-qe; do
+        if [[ -d "$_nd/node_modules/$_np" ]]; then
+          _nv="$(node -e "try{console.log(require('$_nd/node_modules/$_np/package.json').version)}catch{console.log('?')}" 2>/dev/null)"
+          warn "npx cache: $_np@${_nv:-?} at $_nd — cache copies drift from the patched global (fix-ruflo Step 7 cleans stale ones)"
+          _NPX_HITS=$((_NPX_HITS + 1))
+        fi
+      done
+      if [[ -d "$_nd/node_modules/@claude-flow" ]]; then
+        warn "npx cache: @claude-flow/* at $_nd — cache copies drift from the patched global (fix-ruflo Step 7 cleans stale ones)"
+        _NPX_HITS=$((_NPX_HITS + 1))
+      fi
+    done < <(find "$HOME/.npm/_npx" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+  fi
+  [[ "$_NPX_HITS" -eq 0 ]] && pass "no npx caches mentioning claude-flow/ruflo/agentic-qe"
+
+  echo ""
+  echo "  Forensics is READ-ONLY: nothing was modified. Cleanup lives in:"
+  echo "    bin/ruflo-kit fix-ruflo $TARGET_DIR   (npx caches, ghost state)"
+  echo "    bin/ruflo-kit sync      $TARGET_DIR   (full heal cascade)"
+  echo ""
+fi
 exit 0

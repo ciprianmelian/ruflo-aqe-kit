@@ -7,7 +7,7 @@
 #   bin/ruflo-kit setup       /path/to/codebase     # fresh machine → proved stack (install+init+heal+proof)
 #   bin/ruflo-kit adopt       /path/to/codebase     # snapshot → setup → preservation receipt (never --force)
 #   bin/ruflo-kit snapshot    /path/to/codebase     # WAL-safe backup + row-count manifest of learning stores
-#   bin/ruflo-kit status      /path/to/codebase     # one-screen truth (disk-derived; --json)
+#   bin/ruflo-kit status      /path/to/codebase     # one-screen truth (disk-derived; --json; --forensics)
 #   bin/ruflo-kit sync        /path/to/codebase     # one-verb heal (fix cascade; --dry-run)
 #   bin/ruflo-kit proof       /path/to/codebase     # 15-probe disk-evidence proof, run twice (x2)
 #   bin/ruflo-kit init        /path/to/codebase     # first-time bootstrap
@@ -53,7 +53,9 @@ Commands:
   adopt          Adopt an existing codebase: snapshot → setup (never --force) → machine-verified
                  preservation receipt (MEMORY-PRESERVE-PROOF-V1); --verify-only re-checks the diff
   snapshot       WAL-safe backup + per-table row-count manifest of the learning stores; --dry-run
-  status         One-screen truth (versions, sentinels, daemon, learning); --json
+  status         One-screen truth (versions, sentinels, daemon, learning); --json;
+                 --forensics appends a read-only manual-install evidence report
+                 (plain-text only — --json ignores it)
   sync           One-verb heal — run the fix cascade in order; --dry-run
   init           First-time bootstrap of a codebase (ruflo + AQE + AgentDB)
   session        Per-session maintenance (patches, daemon, verification)
