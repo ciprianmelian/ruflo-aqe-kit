@@ -474,24 +474,25 @@ function getLocalTestCount() {
   // sorted list keys a tmpdir cache, so the files are only re-read (regex-scanned)
   // when the suite actually changes — amortized ~0 on the hot render path.
   const matched = [];
-  function walk(dir, depth) {
+  function walk(dir, depth, rsTestRoot) {
     if ((depth || 0) > 5) return;
     try {
       if (!fs.existsSync(dir)) return;
       for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
         if (e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules') {
-          walk(path.join(dir, e.name), (depth || 0) + 1);
-        } else if (e.isFile() && (e.name.includes('.test.') || e.name.includes('.spec.') || e.name.startsWith('test_') || e.name.startsWith('spec_'))) {
+          walk(path.join(dir, e.name), (depth || 0) + 1, rsTestRoot);
+        } else if (e.isFile() && (e.name.includes('.test.') || e.name.includes('.spec.') || e.name.startsWith('test_') || e.name.startsWith('spec_') || (rsTestRoot && e.name.endsWith('.rs')))) {
           matched.push(path.join(dir, e.name));
         }
       }
     } catch { /* ignore */ }
   }
-  // Cover monorepo layouts (packages/*) in addition to the common roots.
+  // Cover monorepo layouts (packages/*) in addition to the common roots. Under
+  // a tests/test root, every .rs file is a candidate (Cargo integration-test
+  // convention has no .test./test_ naming requirement).
   for (const d of ['tests', 'test', '__tests__', 'src', 'v3', 'packages', 'apps']) {
-    walk(path.join(CWD, d), 0);
+    walk(path.join(CWD, d), 0, d === 'tests' || d === 'test');
   }
-  const testFiles = matched.length;
   // Fingerprint the matched set (path + mtime + size) so a code-free render reuses
   // the cached counts; any add/remove/edit changes the key and forces a recount.
   const fps = [];
@@ -504,22 +505,36 @@ function getLocalTestCount() {
   const cacheFile = path.join(os.tmpdir(), 'ruflo-testcases-' + cwdHash + '.json');
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'));
-    if (cached && cached.key === key) {
-      return { testFiles: testFiles, testCases: cached.cases, describes: cached.describes, countMethod: 'regex-scan' };
+    if (cached && cached.key === key && typeof cached.filesWithCases === 'number') {
+      return { testFiles: cached.filesWithCases, testCases: cached.cases, describes: cached.describes, countMethod: 'regex-scan' };
     }
   } catch (e) { /* miss */ }
-  let cases = 0, describes = 0;
+  let cases = 0, describes = 0, filesWithCases = 0;
   const itRe = /\b(?:it|test)\s*\(/g;
   const descRe = /\bdescribe\s*\(/g;
+  const rsRe = /#\[[A-Za-z_:]*test[A-Za-z_:]*\]/g;   // #[test], #[tokio::test], #[rstest]
+  const pyRe = /^\s*def\s+test_/gm;
+  const goRe = /\bfunc\s+Test[A-Z]/g;
   for (const f of matched) {
     try {
       const src = fs.readFileSync(f, 'utf-8');
-      const im = src.match(itRe); if (im) cases += im.length;
-      const dm = src.match(descRe); if (dm) describes += dm.length;
+      let c = 0;
+      if (f.endsWith('.rs')) { const m = src.match(rsRe); if (m) c = m.length; }
+      else if (f.endsWith('.py')) { const m = src.match(pyRe); if (m) c = m.length; }
+      else if (f.endsWith('.go')) { const m = src.match(goRe); if (m) c = m.length; }
+      else {
+        const im = src.match(itRe); if (im) c = im.length;
+        const dm = src.match(descRe); if (dm) describes += dm.length;
+      }
+      if (c > 0) filesWithCases += 1;
+      cases += c;
     } catch (e) {}
   }
-  try { fs.writeFileSync(cacheFile, JSON.stringify({ key: key, cases: cases, describes: describes }), 'utf-8'); } catch (e) {}
-  return { testFiles: testFiles, testCases: cases, describes: describes, countMethod: 'regex-scan' };
+  try { fs.writeFileSync(cacheFile, JSON.stringify({ key: key, cases: cases, describes: describes, filesWithCases: filesWithCases }), 'utf-8'); } catch (e) {}
+  // testFiles = files where the scan FOUND cases: a name-matched harness or
+  // config file with zero countable cases is not evidence of a test, and
+  // counting it breaks the audited testCases >= testFiles invariant.
+  return { testFiles: filesWithCases, testCases: cases, describes: describes, countMethod: 'regex-scan' };
 }
 
 // Minimal local fallback when the CLI is not installed or times out. Builds a
