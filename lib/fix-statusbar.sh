@@ -993,9 +993,22 @@ s = s.replace(/if \(\(_ri\.quality \|\| 0\) > 0\) _rln \+= [^\n]*/, "if ((_ri.de
 // relabel the pattern-count proxy from "DDD Domains"/"DDD" to honest "Learning"/"Learn"
 s = s.split('DDD Domains').join('Learning');
 s = s.split("c.cyan + 'DDD' + c.reset").join("c.cyan + 'Learn' + c.reset");
-// live-detect the GLOBAL ruflo version (add it first in getPkgVersion pkgPaths)
+// live-detect the GLOBAL ruflo version (add it first in getPkgVersion pkgPaths).
+// NPM-ROOT-RESOLVE-V1: execPath derivation only trusted when it holds a global
+// ruflo; else `npm root -g` (custom npm prefixes diverge from the execPath guess).
+// Injected self-contained (require()d inline — target statusline scope unknown).
 if (s.indexOf('const pkgPaths = [') !== -1 && s.indexOf("path.join(_gnm, 'ruflo'") === -1) {
-  s = s.replace('const pkgPaths = [', "const _gnm = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules');\n    const pkgPaths = [\n      path.join(_gnm, 'ruflo', 'package.json'),");
+  var _gnmSnippet = "const _gnm = (function () {\n" +
+    "      var _f = require('fs'), _p = require('path');\n" +
+    "      var _d = _p.join(_p.dirname(_p.dirname(process.execPath)), 'lib', 'node_modules');\n" +
+    "      if (_f.existsSync(_p.join(_d, 'ruflo'))) return _d;\n" +
+    "      try {\n" +
+    "        var _o = require('child_process').execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }).toString().trim();\n" +
+    "        if (_o && _f.existsSync(_o)) return _o;\n" +
+    "      } catch (e) { /* npm missing — keep the derivation */ }\n" +
+    "      return _d;\n" +
+    "    })();";
+  s = s.replace('const pkgPaths = [', _gnmSnippet + "\n    const pkgPaths = [\n      path.join(_gnm, 'ruflo', 'package.json'),");
 }
 fs.writeFileSync(f, s);
 RAIN

@@ -12,6 +12,13 @@ const path = require('path');
 const _err = (...a) => { try { process.stderr.write(a.map(String).join(' ') + '\n'); } catch (e) {} };
 console.log = _err; console.info = _err; console.warn = _err; console.debug = _err;
 
+// NPM-ROOT-RESOLVE-V1: global node_modules via `npm root -g` (custom npm
+// prefixes diverge from the execPath guess); wrapped require so a target that
+// predates _npm-root.cjs degrades to the old inline derivation.
+let npmRootG;
+try { npmRootG = require(path.join(__dirname, '_npm-root.cjs')); }
+catch (e) { npmRootG = () => path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules'); }
+
 (async () => {
   try {
     let subject = process.argv[2] || '';
@@ -25,7 +32,7 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
     if (!subject) { process.stdout.write('{}'); return; }
     const reward = Math.max(0.1, Math.min(1.0, parseFloat(process.argv[3]) || 0.8));
 
-    const nodeBase = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules');
+    const nodeBase = npmRootG();
     const aqeBase = path.join(nodeBase, 'agentic-qe');
     const cliBase = path.join(nodeBase, 'ruflo', 'node_modules', '@claude-flow', 'cli');
     if (!fs.existsSync(aqeBase) || !fs.existsSync(cliBase)) { process.stdout.write('{}'); return; }
