@@ -69,6 +69,22 @@ lora_adaptations() {
   [[ -f "$LORA" ]] || { echo 0; return; }
   node -e "try{process.stdout.write(String((require('$PWD/$LORA').stats||{}).totalAdaptations||0))}catch(e){process.stdout.write('0')}" 2>/dev/null || echo 0
 }
+lora_updates() {
+  [[ -f "$LORA" ]] || { echo 0; return; }
+  node -e "try{process.stdout.write(String((require('$PWD/$LORA').stats||{}).totalUpdates||0))}catch(e){process.stdout.write('0')}" 2>/dev/null || echo 0
+}
+# Installed-dist hooks-tools.js path — mirrors verify-learning.sh seam_dist_src()
+# (probe #11 SEAM-SENTINEL-V1): KIT_RUFLO_DIST_SRC test override, else `npm root -g`.
+prime_dist_ht() {
+  local root=""
+  if [[ -n "${KIT_RUFLO_DIST_SRC:-}" ]]; then
+    root="$KIT_RUFLO_DIST_SRC"
+  else
+    local g; g="$(npm root -g 2>/dev/null || echo '')"
+    [[ -n "$g" ]] && root="$g/ruflo/node_modules/@claude-flow/cli/dist/src"
+  fi
+  [[ -n "$root" ]] && echo "$root/mcp-tools/hooks-tools.js"
+}
 # Does `<tool> <group> --help` advertise <sub>? (existence guard for optional subs)
 sub_exists() { "$@" --help 2>&1 | grep -qE "^\s+$SUB\b"; }
 
@@ -272,6 +288,41 @@ else
     persist_check 11 agentdb.db episodes "$EPI_BEFORE"
   else
     warn "11: harvest failed (see /tmp/fix-learning-11.log) — continuing"; ACT_FAILED=$((ACT_FAILED+1))
+  fi
+fi
+
+# 12 — adapter-apply priming (LORA-APPLY-PRIME-V1). Harvest/train can leave the
+# LoRA trained (totalUpdates>0) yet never APPLIED (totalAdaptations==0) until one
+# real route runs from the target cwd — observed on rust-r8n: 3736 updates, 0
+# adaptations, proof P10 FAIL, until a single manual `ruflo hooks route` flipped
+# it 0->1. This automates exactly that one route. Gated on the RUFLO-LORA-ADAPT-V1
+# dist sentinel (the route-time consumption seam probe #11 asserts) — without it
+# the route path cannot apply the adapter, so warn instead of routing blind.
+# Diagnostic only: never hard-fails the verb (no REQUIRED_FAILED).
+LORA_TU="$(lora_updates)"; LORA_TA="$(lora_adaptations)"
+if [[ "$LORA_TA" -gt 0 || "$LORA_TU" -eq 0 ]]; then
+  pass "12: already satisfied (totalUpdates=$LORA_TU, totalAdaptations=$LORA_TA) — skipping"; ACT_SKIPPED=$((ACT_SKIPPED+1))
+else
+  PRIME_HT="$(prime_dist_ht)"
+  if [[ -z "$PRIME_HT" || ! -f "$PRIME_HT" ]]; then
+    warn "12: adapter trained but unapplied (totalUpdates=$LORA_TU, totalAdaptations=0) — installed ruflo dist not found (offline/no global), cannot verify the RUFLO-LORA-ADAPT-V1 seam; skipping priming route"
+    ACT_SKIPPED=$((ACT_SKIPPED+1))
+  elif ! grep -q "RUFLO-LORA-ADAPT-V1" "$PRIME_HT" 2>/dev/null; then
+    warn "12: adapter trained but unapplied — RUFLO-LORA-ADAPT-V1 sentinel MISSING in installed dist (route path cannot apply the adapter). Run: bin/ruflo-kit fix-ruflo $TARGET_DIR, then re-run fix-learning"
+    ACT_FAILED=$((ACT_FAILED+1))
+  elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    info "12: [dry-run] would run: (cd $TARGET_DIR && RUFLO_DAEMON_AUTOSTART=0 ruflo hooks route -t \"kit adapter priming probe (LORA-APPLY-PRIME-V1)\")"
+    ACT_SKIPPED=$((ACT_SKIPPED+1))
+  else
+    info "12: running: one priming route from the target cwd (LORA-APPLY-PRIME-V1)"
+    (cd "$TARGET_DIR" && RUFLO_DAEMON_AUTOSTART=0 "${RUFLO[@]}" hooks route -t "kit adapter priming probe (LORA-APPLY-PRIME-V1)" >/dev/null 2>&1) || true
+    LORA_TA_AFTER="$(lora_adaptations)"
+    if [[ "$LORA_TA_AFTER" -gt 0 ]]; then
+      pass "12: adapter applied — totalAdaptations 0 -> $LORA_TA_AFTER"; ACT_RUN=$((ACT_RUN+1))
+    else
+      warn "12: priming route ran but totalAdaptations stayed 0 — adapter present but the route path did not apply it; check sentinels (bin/ruflo-kit verify-learning $TARGET_DIR) / run a route from a live session"
+      ACT_FAILED=$((ACT_FAILED+1))
+    fi
   fi
 fi
 
