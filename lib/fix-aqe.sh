@@ -99,7 +99,10 @@ else
   # _derive-outcome.cjs MUST install alongside its consumers: aqe-post-route.cjs and
   # ruflo-train-subagent.cjs `require('./_derive-outcome.cjs')` relative to __dirname,
   # so the oracle has to land in .claude/helpers/ too (listed first for clarity).
-  for h in _derive-outcome.cjs ruflo-train.cjs ruflo-train-subagent.cjs aqe-rag-inject.cjs aqe-post-route.cjs ruflo-route-capture.cjs; do
+  # _npm-root.cjs (NPM-ROOT-RESOLVE-V1) likewise: ruflo-train*.cjs and
+  # aqe-rag-inject.cjs `require('./_npm-root.cjs')` for the honest global
+  # node_modules root (npm root -g, execPath fallback) — same co-install rule.
+  for h in _derive-outcome.cjs _npm-root.cjs ruflo-train.cjs ruflo-train-subagent.cjs aqe-rag-inject.cjs aqe-post-route.cjs ruflo-route-capture.cjs; do
     src="$HELPER_SRC/$h"; dst="$CLAUDE_HELPERS/$h"
     [[ -f "$src" ]] || { warn "missing source $h"; continue; }
     if cmp -s "$src" "$dst" 2>/dev/null; then pass "$h up to date"; continue; fi

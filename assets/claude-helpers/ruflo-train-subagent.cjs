@@ -27,6 +27,13 @@ let deriveOutcome;
 try { ({ deriveOutcome } = require(path.join(__dirname, '_derive-outcome.cjs'))); }
 catch (e) { deriveOutcome = () => ({ reward: 0.7, success: true, signals: { oracleMissing: true } }); }
 
+// NPM-ROOT-RESOLVE-V1: global node_modules via `npm root -g` (custom npm
+// prefixes diverge from the execPath guess); wrapped require so a target that
+// predates _npm-root.cjs degrades to the old inline derivation.
+let npmRootG;
+try { npmRootG = require(path.join(__dirname, '_npm-root.cjs')); }
+catch (e) { npmRootG = () => path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules'); }
+
 const MIN_CHARS = 40;        // skip trivial subagent outputs ("done.")
 const MAX_CHARS = 3500;      // conclusion-weighted slice fed to the embedder
 const LOCK_STALE_MS = 120000;
@@ -87,7 +94,7 @@ function _extractFromTranscript(transcriptPath) {
       ? Math.max(0.1, Math.min(1.0, parseFloat(process.argv[2])))
       : deriveOutcome(transcriptRaw || body).reward;
 
-    const nodeBase = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules');
+    const nodeBase = npmRootG();
     const aqeBase = path.join(nodeBase, 'agentic-qe');
     const cliBase = path.join(nodeBase, 'ruflo', 'node_modules', '@claude-flow', 'cli');
     if (!fs.existsSync(aqeBase) || !fs.existsSync(cliBase)) { process.stdout.write('{}'); return; }

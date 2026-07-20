@@ -15,6 +15,13 @@ const path = require('path');
 const _err = (...a) => { try { process.stderr.write(a.map(String).join(' ') + '\n'); } catch (e) {} };
 console.log = _err; console.info = _err; console.warn = _err; console.debug = _err;
 
+// NPM-ROOT-RESOLVE-V1: global node_modules via `npm root -g` (custom npm
+// prefixes diverge from the execPath guess); wrapped require so a target that
+// predates _npm-root.cjs degrades to the old inline derivation.
+let npmRootG;
+try { npmRootG = require(path.join(__dirname, '_npm-root.cjs')); }
+catch (e) { npmRootG = () => path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules'); }
+
 (async () => {
   try {
     // 1. task text from argv or stdin event JSON
@@ -31,8 +38,8 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
     task = String(task || '').trim();
     if (!task) { process.stdout.write('{}'); return; }
 
-    // 2. resolve the global agentic-qe install from the node binary location
-    const base = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules', 'agentic-qe');
+    // 2. resolve the global agentic-qe install (npm root -g, execPath fallback)
+    const base = path.join(npmRootG(), 'agentic-qe');
     const projDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
     const dbPath = path.join(projDir, '.agentic-qe', 'memory.db');
     if (!fs.existsSync(base) || !fs.existsSync(dbPath)) { process.stdout.write('{}'); return; }

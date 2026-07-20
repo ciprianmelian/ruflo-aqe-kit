@@ -735,15 +735,36 @@ function getCostFromStdin() {
   return null;
 }
 
+// NPM-ROOT-RESOLVE-V1 (statusline inline): the GLOBAL node_modules root. The
+// free execPath derivation is tried first but only TRUSTED when it actually
+// holds a global ruflo; otherwise `npm root -g` is the truth (custom npm
+// prefixes like ~/.npm-global diverge from the execPath guess — the derived
+// path simply doesn't exist there and the version chip froze at the fallback).
+// Memoized per render; self-contained (the canonical statusline installs alone).
+let _globalNmCache = null;
+function getGlobalNodeModules() {
+  if (_globalNmCache) return _globalNmCache;
+  const derived = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules');
+  if (fs.existsSync(path.join(derived, 'ruflo'))) { _globalNmCache = derived; return _globalNmCache; }
+  try {
+    const out = require('child_process')
+      .execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 })
+      .toString().trim();
+    if (out && fs.existsSync(out)) { _globalNmCache = out; return _globalNmCache; }
+  } catch (e) { /* npm missing — keep the derivation */ }
+  _globalNmCache = derived;
+  return _globalNmCache;
+}
+
 // Read package version from the first package.json we find.
 function getPkgVersion() {
   let ver = '0.0.0';   // TRUTH-SL-V1: neutral fallback — live detection below always wins
   try {
     const home = os.homedir();
     // live-detect the GLOBAL ruflo (the kit launches from the global binary, per
-    // CLAUDE.md) — derive lib/node_modules from the node execPath so it tracks real
-    // upgrades instead of returning the baked-in default.
-    const globalNm = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules');
+    // CLAUDE.md) — resolve the global node_modules root honestly (npm root -g
+    // aware) so it tracks real upgrades instead of returning the baked-in default.
+    const globalNm = getGlobalNodeModules();
     const pkgPaths = [
       path.join(globalNm, 'ruflo', 'package.json'),
       path.join(home, '.claude', 'plugins', 'marketplaces', 'ruflo', 'package.json'),
