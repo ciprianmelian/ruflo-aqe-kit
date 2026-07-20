@@ -1748,6 +1748,50 @@ PYEOF
   fi
 fi
 
+# ── Step 5j: Kit adoption note in CLAUDE.md (KIT-ADOPTION-NOTE-V1) ──────────
+# Marker-delimited, kit-managed block appended to the end of the target's
+# CLAUDE.md: heal/check verbs + the deliberate states future operators must NOT
+# "fix" (nested-vs-hoisted AgentDB pin, global-ruflo MCP launch, 3-channel
+# daemon gates) + the re-sync-after-upgrade rule. The mutation logic lives in
+# tools/adoption-note.cjs so tests drive it in isolation (Step 1 auto-upgrades
+# the toolchain, so the whole script never runs un-dry under test). A CLAUDE.md
+# that already mentions 'ruflo-aqe-kit' WITHOUT the markers (a hand-written
+# kit note, like rust-r8n's) is honored, not duplicated. Idempotent: marker
+# content is re-asserted to canonical; cmp-skip when identical.
+CLAUDE_MD_5J="$TARGET_DIR/CLAUDE.md"
+header "5j/11" "Kit adoption note in CLAUDE.md (KIT-ADOPTION-NOTE-V1)"
+ADOPTION_NOTE_TOOL="$KIT_TOOLS/adoption-note.cjs"
+if [[ ! -f "$ADOPTION_NOTE_TOOL" ]]; then
+  warn "tools/adoption-note.cjs missing from kit — adoption note not asserted"
+  ((ERRORS++)) || true
+else
+  C5J_DRY=""
+  [[ "$DRY_RUN" -eq 1 ]] && C5J_DRY="--dry-run"
+  # shellcheck disable=SC2086  # C5J_DRY is intentionally word-split (empty or one flag)
+  C5J_RES="$(node "$ADOPTION_NOTE_TOOL" "$CLAUDE_MD_5J" "$KIT_DIR" $C5J_DRY 2>&1 | tail -1)"
+  case "$C5J_RES" in
+    APPENDED)
+      fix "Appended KIT-ADOPTION-NOTE-V1 block to CLAUDE.md"
+      pass "Kit adoption note appended (marker-delimited)" ;;
+    HEALED)
+      fix "Healed KIT-ADOPTION-NOTE-V1 block to canonical text"
+      pass "Kit adoption note healed to canonical" ;;
+    UNCHANGED)
+      pass "Kit adoption note already canonical (KIT-ADOPTION-NOTE-V1 present)" ;;
+    SKIP_HANDWRITTEN)
+      pass "hand-written kit note present — not duplicating" ;;
+    SKIP_NOFILE)
+      pass "No CLAUDE.md — kit adoption note skipped" ;;
+    WOULD_APPEND)
+      info "[dry-run] Would: append KIT-ADOPTION-NOTE-V1 block to CLAUDE.md" ;;
+    WOULD_HEAL)
+      info "[dry-run] Would: heal KIT-ADOPTION-NOTE-V1 block to canonical text" ;;
+    *)
+      warn "adoption-note tool returned '$C5J_RES' — CLAUDE.md left as-is"
+      ((ERRORS++)) || true ;;
+  esac
+fi
+
 # ── Step 6: Claude MCP registration ─────────────────────────────────────────
 
 header "6/11" "Claude MCP registration"
