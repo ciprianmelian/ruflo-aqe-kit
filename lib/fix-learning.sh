@@ -293,7 +293,7 @@ fi
 
 # 12 — adapter-apply priming (LORA-APPLY-PRIME-V1). Harvest/train can leave the
 # LoRA trained (totalUpdates>0) yet never APPLIED (totalAdaptations==0) until one
-# real route runs from the target cwd — observed on rust-r8n: 3736 updates, 0
+# real route runs from the target cwd — observed on an adopted Rust target: 3736 updates, 0
 # adaptations, proof P10 FAIL, until a single manual `ruflo hooks route` flipped
 # it 0->1. This automates exactly that one route. Gated on the RUFLO-LORA-ADAPT-V1
 # dist sentinel (the route-time consumption seam probe #11 asserts) — without it

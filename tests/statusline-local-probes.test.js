@@ -102,7 +102,7 @@ describe('statusline Tests probe (getLocalTestCount)', () => {
 
   it('counts Rust #[test]/#[tokio::test] and Python def test_ cases (non-JS targets)', () => {
     // A Rust target rendered testCases(0) < testFiles(5) and FAILed proof P15
-    // (2026-07-20, rust-r8n adoption): the case regex was JS-only and the file
+    // (2026-07-20, Rust-target adoption): the case regex was JS-only and the file
     // matcher counted docker-compose.test.yml as a test file.
     const d = mkProject((d) => {
       write(d, 'tests/env.rs', '#[test]\nfn a() {}\n#[tokio::test]\nasync fn b() {}\n');   // .rs under tests/ needs no test_ name

@@ -17,7 +17,7 @@
 //        between-content == canonical     -> UNCHANGED         (cmp-skip)
 //        else                             -> HEALED / WOULD_HEAL
 //   3. file mentions 'ruflo-aqe-kit'      -> SKIP_HANDWRITTEN  (untouched —
-//        a hand-written kit note, like rust-r8n's; honored, not duplicated)
+//        a hand-written kit note, like the adopted target's; honored, not duplicated)
 //   4. else                               -> APPENDED / WOULD_APPEND
 //
 // stdout: exactly one verdict token from the set above. Exit 0 on every
