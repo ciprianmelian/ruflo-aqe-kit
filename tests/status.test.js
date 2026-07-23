@@ -89,10 +89,16 @@ describe('status.sh --json: always-valid machine shape', () => {
 });
 
 describe('status.sh: daemon field matches pgrep truth', () => {
-  it('daemon.running reflects live `pgrep -f "ruflo daemon"` (not a state file)', () => {
+  it('daemon.running reflects live pgrep truth (dual pattern, not a state file)', () => {
+    // Oracle mirrors status.sh's dual pattern: the real daemon cmdline is
+    // `node .../bin/cli.js daemon start` — 'ruflo daemon' alone never matches it
+    // (the 2026-07-20 blindspot; the old single-pattern oracle shared it).
     const pgSnap = () => {
-      const pg = spawnSync('pgrep', ['-f', 'ruflo daemon'], { encoding: 'utf8' });
-      return pg.status === 0 && pg.stdout.trim().length > 0;
+      const hit = (args) => {
+        const pg = spawnSync('pgrep', args, { encoding: 'utf8' });
+        return pg.status === 0 && pg.stdout.trim().length > 0;
+      };
+      return hit(['-f', 'bin/cli.js daemon start']) || hit(['-f', 'ruflo daemon']);
     };
     // Bracket the status call: a daemon can start/stop between two independent
     // pgrep snapshots (a real race in a multi-agent session), so only assert exact

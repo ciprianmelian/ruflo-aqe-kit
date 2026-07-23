@@ -101,7 +101,12 @@ if [[ -n "$GROOT" && -d "$GROOT/agentic-qe/dist" ]]; then
 fi
 
 # ── Daemon state via pgrep (state files lie — Patch 50) ──────────────────────
-DAEMON_PIDS="$(pgrep -f 'ruflo daemon' 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')"
+# Dual pattern (mirrors common.sh kit_daemon_ps_lines / proof P14): `ruflo daemon start`
+# execs the nested @claude-flow/cli, so the surviving cmdline is `node .../bin/cli.js
+# daemon start ...` — the literal 'ruflo daemon' never appears in it and that pattern
+# alone missed EVERY real daemon (observed live 2026-07-20: a running workspace daemon
+# reported as "stopped").
+DAEMON_PIDS="$( { pgrep -f 'bin/cli.js daemon start' 2>/dev/null; pgrep -f 'ruflo daemon' 2>/dev/null; } | sort -un | tr '\n' ' ' | sed 's/ *$//')"
 DAEMON_RUNNING=0
 [[ -n "$DAEMON_PIDS" ]] && DAEMON_RUNNING=1
 
