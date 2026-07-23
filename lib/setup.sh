@@ -199,8 +199,10 @@ header "S6" "daemon policy (no action)"
 info "the ruflo daemon is OPT-IN and OFF by design — billed 24/7 if started (Patch 50)"
 info "gates: RUFLO_DAEMON_MODE + .agentic-qe/config.yaml daemonAutoStart:false"
 info "setup NEVER starts or stops the daemon"
-# Detect exactly as lib/status.sh does (pgrep on the process, not state files).
-if pgrep -f 'ruflo daemon' >/dev/null 2>&1; then
+# Detect exactly as lib/status.sh does (pgrep on the process, not state files) —
+# dual pattern: the real daemon cmdline is `node .../bin/cli.js daemon start`, which
+# 'ruflo daemon' alone never matches (2026-07-20 blindspot).
+if { pgrep -f 'bin/cli.js daemon start' 2>/dev/null; pgrep -f 'ruflo daemon' 2>/dev/null; } | grep -q .; then
   warn "a ruflo daemon is RUNNING (pre-existing — not started by setup); stop with: ruflo daemon stop"
   record_stage "S6" warn "daemon pre-existing"
 else
