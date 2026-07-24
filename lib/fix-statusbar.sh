@@ -1336,6 +1336,39 @@ else
   pass "statusline-v3.cjs already dual (skipped)"
 fi
 
+# ── Step 2.5: Self-healing guard (STATUSLINE-GUARD-V1, Patch 68) ───────────
+# Upstream session machinery clobbers statusline.cjs with its stock bar via a
+# DELAYED detached child (observed twice on a fresh target, both ~2-15 min
+# after session start) — a session-start assert loses that race by design.
+# Instead: snapshot the FINAL, node--check-verified statusline.cjs (post patch
+# cascade, so the version chip survives restores) as the pristine dotfile
+# .statusline.canonical.cjs, install the guard, and let Step 3 wire it as the
+# FIRST step of the statusLine command — every ~5s refresh heals before it
+# renders, so no clobber survives a single tick. Restores are logged to
+# .claude-flow/statusline-guard.log (countable evidence, not anecdote).
+echo -e "\n${CYAN}[2.5/4]${NC} Installing self-healing guard (STATUSLINE-GUARD-V1)"
+GUARD_ASSET="$KIT_ASSETS/statusline-guard.cjs"
+GUARD_FILE=".claude/helpers/statusline-guard.cjs"
+CANON_SNAP=".claude/helpers/.statusline.canonical.cjs"
+if [[ ! -f "$GUARD_ASSET" ]]; then
+  warn "kit asset statusline-guard.cjs missing — guard skipped"
+elif [[ ! -f "$STATUSLINE_FILE" ]] || ! node --check "$STATUSLINE_FILE" 2>/dev/null; then
+  warn "statusline.cjs absent or fails node --check — refusing to snapshot a broken canonical"
+elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+  info "[dry-run] would install $GUARD_FILE + snapshot $CANON_SNAP"
+else
+  if cmp -s "$GUARD_ASSET" "$GUARD_FILE" 2>/dev/null; then
+    pass "guard already installed"
+  else
+    cp "$GUARD_ASSET" "$GUARD_FILE" && pass "installed statusline-guard.cjs"
+  fi
+  if cmp -s "$STATUSLINE_FILE" "$CANON_SNAP" 2>/dev/null; then
+    pass "canonical snapshot current"
+  else
+    cp "$STATUSLINE_FILE" "$CANON_SNAP" && pass "snapshotted verified statusline → .statusline.canonical.cjs"
+  fi
+fi
+
 # ── Step 3: Patch .claude/settings.json statusLine.command ────────────────
 echo -e "\n${CYAN}[3/4]${NC} Patching .claude/settings.json statusLine command"
 
@@ -1346,7 +1379,10 @@ else
 const fs = require('fs');
 const file = '.claude/settings.json';
 const s = JSON.parse(fs.readFileSync(file, 'utf-8'));
-const desired = 'sh -c \'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/statusline.cjs" 2>/dev/null || node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/statusline-v3.cjs" 2>/dev/null || echo "▊ RuFlo + Agentic QE v3"\'';
+// STATUSLINE-GUARD-V1: the guard runs FIRST on every refresh tick — it restores
+// the canonical statusline.cjs if anything rewrote it, then the render proceeds.
+// Falls back to the ungated chain when the guard file is absent (pre-68 target).
+const desired = 'sh -c \'node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/statusline-guard.cjs" 2>/dev/null; node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/statusline.cjs" 2>/dev/null || node "${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/statusline-v3.cjs" 2>/dev/null || echo "▊ RuFlo + Agentic QE v3"\'';
 s.statusLine = s.statusLine || { type: 'command', refreshMs: 5000, enabled: true };
 if (s.statusLine.command !== desired) {
   s.statusLine.command = desired;
