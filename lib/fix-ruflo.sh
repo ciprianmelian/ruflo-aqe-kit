@@ -1792,6 +1792,45 @@ else
   esac
 fi
 
+# ── Step 5k: Skill-plugin manifest normalization (PLUGIN-MANIFEST-REPO-V1) ───
+# `ruflo init` registers the core skill via the external skills.sh CLI, which
+# installs a skill folder whose plugin.json carries an npm-package.json-shaped
+# `repository` OBJECT — Claude Code's plugin schema wants a STRING, so the
+# whole skill folder refuses to load ("invalid manifest ... repository:
+# expected string, received object"). The generator is upstream content fetched
+# at install time (not patchable here); the sweep normalizes object→url string
+# in every <root>/*/.claude-plugin/plugin.json under the known plugin roots.
+# Self-retiring: no manifests / already-string ⇒ no-op. The skill folder is
+# also TRANSIENT (observed created+deleted within minutes on a live target) —
+# NOFILES is a normal, healthy outcome, not a miss.
+header "5k/11" "Skill-plugin manifest normalization (PLUGIN-MANIFEST-REPO-V1)"
+PMFIX_TOOL="$KIT_TOOLS/plugin-manifest-fix.cjs"
+if [[ ! -f "$PMFIX_TOOL" ]]; then
+  warn "tools/plugin-manifest-fix.cjs missing from kit — manifest sweep skipped"
+  ((ERRORS++)) || true
+else
+  C5K_DRY=""
+  [[ "$DRY_RUN" -eq 1 ]] && C5K_DRY="--dry-run"
+  # shellcheck disable=SC2086  # C5K_DRY is intentionally word-split (empty or one flag)
+  C5K_OUT="$(node "$PMFIX_TOOL" "$TARGET_DIR" $C5K_DRY 2>&1)"
+  C5K_RES="$(printf '%s\n' "$C5K_OUT" | tail -1)"
+  printf '%s\n' "$C5K_OUT" | grep -E '^(FIXED|WOULD_FIX|SKIP_BAD|SKIP_NOURL):' | sed 's/^/  → /' || true
+  case "$C5K_RES" in
+    RESULT:FIXED:*)
+      fix "Normalized ${C5K_RES##*:} plugin manifest(s): repository object → url string"
+      pass "plugin manifest(s) normalized (${C5K_RES##*:})" ;;
+    RESULT:WOULD_FIX:*)
+      info "[dry-run] Would: normalize ${C5K_RES##*:} plugin manifest(s) repository object → url string" ;;
+    RESULT:UNCHANGED)
+      pass "plugin manifests present and schema-valid (repository already a string)" ;;
+    RESULT:NOFILES)
+      pass "no skill-plugin manifests present (skills.sh folder is transient — normal)" ;;
+    *)
+      warn "plugin-manifest-fix returned '$C5K_RES' — manifests left as-is"
+      ((ERRORS++)) || true ;;
+  esac
+fi
+
 # ── Step 6: Claude MCP registration ─────────────────────────────────────────
 
 header "6/11" "Claude MCP registration"
