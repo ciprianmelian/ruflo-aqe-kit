@@ -134,11 +134,33 @@ function runSync(kit, target) {
   return { code: r.status, out: stripAnsi(r.stdout + r.stderr) };
 }
 
-// The PRE-ROUND-1 lib/sync.sh, recovered from git HEAD (round 1 was
-// uncommitted at write time, so HEAD still holds the completion-regex bug)
-// — used only to PROVE round 1's teeth (its tests must fail against it).
+// The PRE-ROUND-1 lib/sync.sh — used only to PROVE round 1's teeth (its tests
+// must fail against it).
+//
+// PINNED TO A SHA, NOT `HEAD`. This originally read `HEAD:lib/sync.sh`, which
+// was correct while round 1 was uncommitted — HEAD genuinely held the buggy
+// version. The moment those fixes landed (ac124a8), HEAD became the FIXED
+// source and this stopped being a pre-fix baseline at all.
+//
+// The failure mode is worth noting: the beforeAll() sanity assertion below
+// caught it correctly — but a throwing beforeAll makes vitest report the suite
+// as "11 skipped", not "failed". Skipped reads as benign in a summary, so this
+// hid in plain sight while four sibling suites went visibly red for the same
+// root cause. A silently skipped suite is the "cannot tell" failure in its
+// purest form.
+//
+// It also evaded the repo-wide sweep that found those four, because that swept
+// for the literal string `show HEAD:` and this spells it as separate argv
+// array elements — `['show', 'HEAD:lib/sync.sh']`. A grep is only as good as
+// the spelling it asks for.
+//
+// 0561b7c = Patch 71, the last commit before the SEVERE-FIX-V1 work. Verified
+// to still contain the pre-round-1 `'Log:'` completion-regex mechanism; do not
+// "modernise" this back to HEAD.
+const PRE_ROUND1_REF = '0561b7c';
+
 function preRound1SyncSh() {
-  return execFileSync('git', ['show', 'HEAD:lib/sync.sh'], { cwd: REPO, encoding: 'utf8' });
+  return execFileSync('git', ['show', `${PRE_ROUND1_REF}:lib/sync.sh`], { cwd: REPO, encoding: 'utf8' });
 }
 
 // The POST-ROUND-1 / PRE-ROUND-2 lib/sync.sh — i.e. exactly what shipped

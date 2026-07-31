@@ -67,8 +67,22 @@ const KIT = path.join(REPO_ROOT, 'bin', 'ruflo-kit');
 // identical tool, in every case that isn't a genuine divergence).
 let OLD_KIT_DIR;
 let OLD_KIT;
+
+// PINNED TO A SHA, NOT `HEAD`. This read `HEAD:bin/ruflo-kit`, which was a
+// correct pre-change baseline only while B20 was uncommitted. Once it landed
+// (ac124a8) HEAD became the FIXED dispatcher, so the three "teeth" tests below
+// — which assert the OLD dispatcher produces NO notice and NO refusal — began
+// failing against a dispatcher that now correctly produces both.
+//
+// 0561b7c = Patch 71, the last commit before B20. Verified to contain ZERO
+// occurrences of `_kit_dispatcher_divergent_path` (HEAD has 4), so it is a
+// genuine pre-change baseline. Do not "modernise" this back to HEAD: a teeth
+// test pointed at post-fix code either fails loudly or, worse, passes while
+// proving nothing.
+const PRE_CHANGE_REF = '0561b7c';
+
 beforeAll(() => {
-  const oldSrc = execFileSync('git', ['show', 'HEAD:bin/ruflo-kit'], { cwd: REPO_ROOT, encoding: 'utf8' });
+  const oldSrc = execFileSync('git', ['show', `${PRE_CHANGE_REF}:bin/ruflo-kit`], { cwd: REPO_ROOT, encoding: 'utf8' });
   OLD_KIT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ruflo-kit-prechange-'));
   fs.mkdirSync(path.join(OLD_KIT_DIR, 'bin'));
   OLD_KIT = path.join(OLD_KIT_DIR, 'bin', 'ruflo-kit');

@@ -44,8 +44,34 @@ HARD_FAIL=0
 
 # Extract a change count from a stage's output: "complete — N change(s)"
 # (fix-aqe/fix-brain) or "Fixes applied:    N" (fix-ruflo). '-' when neither.
+#
+# PARSE-CHANGES-ANSI-V1: strip ANSI SGR escapes BEFORE extracting digits.
+# fix-ruflo prints its count COLOURED — the literal bytes are
+# `Fixes applied:    <ESC>[0;32m1<ESC>[0m` — so the old
+# `grep -oE '[0-9]+' | head -1` matched the **0 inside the colour code**
+# `[0;32m` and never reached the count. sync therefore reported fix-ruflo as
+# "0 change(s)" ALWAYS, regardless of how much work it did.
+#
+# Observed live on the 3.33.0 -> 3.34.0 upgrade: the bump wiped all 5 dist
+# sentinels + the nested agentdb pin, fix-ruflo re-applied every one of them,
+# and sync printed "fix-ruflo ok 0". That is the single moment an operator MOST
+# needs to know work happened — a bare "0 changes" reads as "the bump disturbed
+# nothing", the exact opposite of the truth.
+#
+# The first branch was never affected: `complete — [0-9]+ change` anchors on
+# literal text, so the captured substring contains only the real number. Only
+# the `Fixes applied:` fallback was reachable by the bug — but the strip is
+# applied to the whole input so a future coloured `complete —` line cannot
+# reintroduce it.
+#
+# BSD sed (macOS) does not honour `\x1b`; the ESC byte is embedded via bash
+# ANSI-C quoting ($'...') so this works on both BSD and GNU sed.
 parse_changes() {
-  local out="$1" n
+  local out n
+  # shellcheck disable=SC2001  # ${var//glob/} cannot express [0-9;]*[A-Za-z];
+  # doing it with globs needs `shopt -s extglob` plus *([0-9;]), which is both
+  # less readable and a shell-option side effect inside a helper. sed is right.
+  out="$(sed $'s/\033\\[[0-9;]*[A-Za-z]//g' <<< "$1")"
   n="$(grep -oE 'complete — [0-9]+ change' <<< "$out" | grep -oE '[0-9]+' | head -1)"
   [[ -z "$n" ]] && n="$(grep -E 'Fixes applied:' <<< "$out" | grep -oE '[0-9]+' | head -1)"
   [[ -z "$n" ]] && n="-"
