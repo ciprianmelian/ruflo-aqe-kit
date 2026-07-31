@@ -52,11 +52,20 @@ function mkGroot(base) {
   const names = [];
   for (let i = 0; i < 25; i++) { src += `class C${i} {}\n`; names.push(`C${i}`); }
   fs.writeFileSync(path.join(nested, 'index.js'), src + `module.exports = { ${names.join(', ')} };\n`);
-  // better-sqlite3 resolvable from agentdb's context (global_bsqlite_loads).
+  // better-sqlite3 resolvable from agentdb's context (global_bsqlite_loads),
+  // AND a genuinely working Database stub — P6 bsqlite (SQLITE-DEEP-V1) now
+  // deep-probes resolve -> require() -> `new Database(':memory:')` ->
+  // `SELECT 1` -> close, so a bare `module.exports = {}` (require()-only
+  // healthy) would read as 'broken' (not a constructor) and wrongly FAIL
+  // every test in this file that expects an all-green default fixture.
   const bs = path.join(groot, 'agentdb', 'node_modules', 'better-sqlite3');
   fs.mkdirSync(bs, { recursive: true });
   fs.writeFileSync(path.join(bs, 'package.json'), JSON.stringify({ name: 'better-sqlite3', version: '11.8.1', main: 'index.js' }));
-  fs.writeFileSync(path.join(bs, 'index.js'), 'module.exports = {};\n');
+  fs.writeFileSync(path.join(bs, 'index.js'), [
+    "module.exports = function FakeDatabase(file) {",
+    "  return { prepare(sql) { return { get() { return { ok: 1 }; } }; }, close() {} };",
+    "};",
+  ].join('\n') + '\n');
   return groot;
 }
 
@@ -77,7 +86,7 @@ function mkBin(base, groot, callLog, { ruflo = 'normal', sqlite = 'shim' } = {})
     rufloBody = `#!/usr/bin/env bash
 ${logLine('ruflo')}
 if [ "$1" = "--version" ]; then echo "3.32.2"; exit 0; fi
-if [ "$1" = "mcp" ] && [ "$2" = "start" ]; then sleep 0.3; exit 0; fi
+if [ "$1" = "mcp" ] && [ "$2" = "start" ]; then echo '{"jsonrpc":"2.0","id":1,"result":{}}'; sleep 0.2; exit 0; fi
 if [ "$1" = "hooks" ] && [ "$2" = "route" ]; then
   n=$(( $(cat "${counter}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "${counter}"
   if [ "$n" -eq 1 ]; then echo "route: coder"; fi
@@ -89,7 +98,7 @@ exit 0
     rufloBody = `#!/usr/bin/env bash
 ${logLine('ruflo')}
 if [ "$1" = "--version" ]; then echo "3.32.2"; exit 0; fi
-if [ "$1" = "mcp" ] && [ "$2" = "start" ]; then sleep 0.3; exit 0; fi
+if [ "$1" = "mcp" ] && [ "$2" = "start" ]; then echo '{"jsonrpc":"2.0","id":1,"result":{}}'; sleep 0.2; exit 0; fi
 if [ "$1" = "hooks" ] && [ "$2" = "route" ]; then echo "route: coder → hierarchical"; exit 0; fi
 exit 0
 `;
@@ -156,6 +165,26 @@ function writeKitAsset(kit, opts) {
   return asset;
 }
 
+// Write the TARGET's INSTALLED `.claude/helpers/statusline.cjs` (F6 / P15 now
+// renders this file preferentially — see lib/proof.sh probe_statusline_truth).
+// Same controllable --json shape as writeKitAsset, PLUS the literal
+// DAEMON-AUTOSTART-3-V1 string P14's daemon-gates probe greps for, so tests
+// that don't care about P15 still satisfy P14 by default.
+function writeInstalledStatusline(target, opts) {
+  const omit = new Set((opts && opts.omit) || []);
+  const tests = { testFiles: opts.testFiles, testCases: opts.testCases };
+  if (!omit.has('countMethod')) tests.countMethod = opts.countMethod;
+  const payload = { swarmdb: { vectorCount: opts.vectorCount }, tests };
+  const sl = path.join(target, '.claude', 'helpers', 'statusline.cjs');
+  fs.mkdirSync(path.dirname(sl), { recursive: true });
+  fs.writeFileSync(sl,
+    '#!/usr/bin/env node\n' +
+    '// DAEMON-AUTOSTART-3-V1 child-env pin present (test fixture)\n' +
+    `if (process.argv.includes('--json')) console.log(${JSON.stringify(JSON.stringify(payload))});\n`);
+  fs.chmodSync(sl, 0o755);
+  return sl;
+}
+
 // Populate a target's .swarm/memory.db with M memory_entries rows that have a
 // non-null embedding — the dominant term of P15's independent audit sum (the
 // other three tables are absent → 0). Uses the REAL sqlite3 (build with
@@ -198,9 +227,12 @@ function mkTarget(base) {
   // and the installed statusline carrying the DAEMON-AUTOSTART-3-V1 child-env pin.
   fs.writeFileSync(path.join(target, 'claude-flow.config.json'),
     JSON.stringify({ daemon: { autostart: false } }, null, 2) + '\n');
-  fs.mkdirSync(path.join(target, '.claude', 'helpers'), { recursive: true });
-  fs.writeFileSync(path.join(target, '.claude', 'helpers', 'statusline.cjs'),
-    '// installed statusline stub — DAEMON-AUTOSTART-3-V1 child-env pin present\n');
+  // Default installed statusline: vectorCount 0 matches the shimmed sqlite3's
+  // indep sum of 0 (the shim prints nothing → every COUNT parses to 0) within
+  // the ±5 tolerance, so P15 PASSes by default (mirrors mkKit's kit-asset
+  // default before the F6 fix). P15-specific tests overwrite this via
+  // writeInstalledStatusline with a real sqlite3 db (build({ sqlite: 'real' })).
+  writeInstalledStatusline(target, { vectorCount: 0, testFiles: 2, testCases: 10, countMethod: 'regex-scan' });
   return target;
 }
 
@@ -339,27 +371,32 @@ describe('proof.sh P14 daemon-gates', () => {
 });
 
 // ── P15 statusline-truth ─────────────────────────────────────────────────────
-// The TRUTH-STATUSLINE-V1 contract: the canonical statusline's --json must
-// re-derive from disk. P15 renders $KIT_ASSETS/statusline.cjs and cross-checks
+// The TRUTH-STATUSLINE-V1 contract: the statusline's --json must re-derive
+// from disk. F6 fix: P15 now renders the TARGET's INSTALLED statusline
+// (`.claude/helpers/statusline.cjs`), not the kit's own asset — the kit asset
+// is only a fresh-target fallback (see the dedicated F6 regression tests in
+// tests/proof-truth-hardening.test.js for the "old bug" scenario this fixes:
+// an installed file can diverge from an honest kit asset). P15 cross-checks
 // swarmdb.vectorCount against a fresh sqlite audit sum over .swarm/memory.db
 // (±5), and requires tests.testCases>=testFiles with countMethod 'regex-scan'.
 // These build with REAL sqlite3 so the ground-truth sum is meaningful; the
-// canonical asset is a controllable stub (writeKitAsset).
+// installed statusline is a controllable stub (writeInstalledStatusline).
 
 describe('proof.sh P15 statusline-truth', () => {
   it('vectorCount == sqlite sum (N==M) + valid tests block → PASS', () => {
-    const { run, kit, target } = build({ sqlite: 'real' });
+    const { run, target } = build({ sqlite: 'real' });
     const m = seedSwarmVectors(target, 7);
-    writeKitAsset(kit, { vectorCount: m, testFiles: 2, testCases: 10, countMethod: 'regex-scan' });
+    writeInstalledStatusline(target, { vectorCount: m, testFiles: 2, testCases: 10, countMethod: 'regex-scan' });
     const j = JSON.parse(run(['--single', '--json']).stdout.trim());
     const p = probe(j, 'statusline-truth');
     expect(p.verdict).toBe('PASS');
+    expect(p.detail).toMatch(/^\[installed\]/);
   });
 
   it('vectorCount drifted N+50 beyond the ±5 tolerance → FAIL', () => {
-    const { run, kit, target } = build({ sqlite: 'real' });
+    const { run, target } = build({ sqlite: 'real' });
     const m = seedSwarmVectors(target, 7);
-    writeKitAsset(kit, { vectorCount: m + 50, testFiles: 2, testCases: 10, countMethod: 'regex-scan' });
+    writeInstalledStatusline(target, { vectorCount: m + 50, testFiles: 2, testCases: 10, countMethod: 'regex-scan' });
     const j = JSON.parse(run(['--single', '--json']).stdout.trim());
     const p = probe(j, 'statusline-truth');
     expect(p.verdict).toBe('FAIL');
@@ -367,9 +404,9 @@ describe('proof.sh P15 statusline-truth', () => {
   });
 
   it('tests block without countMethod=regex-scan → FAIL', () => {
-    const { run, kit, target } = build({ sqlite: 'real' });
+    const { run, target } = build({ sqlite: 'real' });
     const m = seedSwarmVectors(target, 7);
-    writeKitAsset(kit, { vectorCount: m, testFiles: 2, testCases: 10, omit: ['countMethod'] });
+    writeInstalledStatusline(target, { vectorCount: m, testFiles: 2, testCases: 10, omit: ['countMethod'] });
     const j = JSON.parse(run(['--single', '--json']).stdout.trim());
     const p = probe(j, 'statusline-truth');
     expect(p.verdict).toBe('FAIL');
@@ -382,5 +419,16 @@ describe('proof.sh P15 statusline-truth', () => {
     const j = JSON.parse(run(['--single', '--json']).stdout.trim());
     const p = probe(j, 'statusline-truth');
     expect(p.verdict).toBe('WARN');
+  });
+
+  it('no installed statusline at all → falls back to the kit asset (fresh target)', () => {
+    const { run, kit, target } = build({ sqlite: 'real' });
+    const m = seedSwarmVectors(target, 3);
+    fs.rmSync(path.join(target, '.claude', 'helpers', 'statusline.cjs'), { force: true });
+    writeKitAsset(kit, { vectorCount: m, testFiles: 2, testCases: 10, countMethod: 'regex-scan' });
+    const j = JSON.parse(run(['--single', '--json']).stdout.trim());
+    const p = probe(j, 'statusline-truth');
+    expect(p.verdict).toBe('PASS');
+    expect(p.detail).toMatch(/^\[kit-asset-fallback/);
   });
 });

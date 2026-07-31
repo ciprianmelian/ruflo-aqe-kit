@@ -39,9 +39,52 @@ RVF_ARTIFACTS="agentdb.rvf agentdb.rvf.idmap.json ruvector.db .agentic-qe/aqe.rv
 
 json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
+# ── Backup journal-mode normalization (F8 root cause) ────────────────────────
+# `kit_sqlite_backup` (common.sh) does a real online backup, so the copy is a
+# valid, complete database — but SQLite persists the SOURCE db's journal_mode
+# in the file header. ruflo/AQE/AgentDB all run WAL, so the fresh backup copy
+# still declares "wal" even though no live writer is attached to it. A
+# `sqlite3 -readonly` open (kit_sqlite_ro, used for every enumeration/count
+# below) then requires a `-shm`/`-wal` sidecar to service WAL reads and cannot
+# create one under -readonly — it fails SQLITE_CANTOPEN (rc 14) on every call,
+# deterministically, not just under "transient lock" conditions. Root-caused
+# 2026-07-31 by reproducing the empirical defect (all 3 stores manifesting
+# empty "{}") against this host's live WAL-mode stores directly — see
+# docs/gauntlet-2026-07-31 B7 report. Fix: flip the DISPOSABLE backup
+# copy (never the live source) to journal_mode=DELETE with one writable
+# connection, so every subsequent -readonly read against it succeeds. Best-
+# effort: if this fails (no sqlite3 CLI and no working better-sqlite3 arm),
+# store_counts_json below still fails LOUDLY rather than silently emitting {}.
+_snapshot_normalize_journal() {
+  local db="$1"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" "PRAGMA journal_mode=DELETE;" >/dev/null 2>&1
+  else
+    local bs; bs="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
+    [[ -d "$bs" ]] || return 1
+    node -e '
+      const B = require(process.argv[1]);
+      const db = new B(process.argv[2]);
+      db.pragma("journal_mode = DELETE");
+      db.close();
+    ' "$bs" "$db" >/dev/null 2>&1
+  fi
+}
+
 # Per-table row counts of one sqlite db → a JSON object fragment {"tbl":N,...}.
+# Returns nonzero and prints NOTHING if the table ENUMERATION itself is
+# unusable (query error, or zero tables found) — the caller must treat that as
+# a loud failure, never silently write it into the manifest as "{}". An
+# enumeration failure and a genuinely empty store are not the same thing: a
+# store present at snapshot time (this function is only ever called on one
+# that already exists and just backed up successfully) always has tables.
 store_counts_json() {
-  local db="$1" t n first=1 out="" tq
+  local db="$1" t n first=1 out="" tq tables rc
+  tables="$(kit_sqlite_ro "$db" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;")"
+  rc=$?
+  if [[ "$rc" -ne 0 || -z "$tables" ]]; then
+    return 1
+  fi
   while IFS= read -r t; do
     [[ -z "$t" ]] && continue
     tq="$(printf '%s' "$t" | sed 's/"/""/g')"   # sqlite identifier-quote escape
@@ -50,8 +93,9 @@ store_counts_json() {
     [[ "$first" -eq 0 ]] && out="$out,"
     out="$out\"$(json_escape "$t")\":$n"
     first=0
-  done < <(kit_sqlite_ro "$db" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;")
+  done <<< "$tables"
   printf '{%s}' "$out"
+  return 0
 }
 
 echo "============================================"
@@ -116,12 +160,20 @@ CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # the consistent copy IS the receipt) ─────────────────────────────────────────
 header "1" "sqlite stores (WAL-safe online backup)"
 COUNTS_JSON=""; _first=1; SNAP_FAIL=0
+UNREADABLE_STORES=()
 for rel in $PRESENT_SQLITE; do
   if kit_sqlite_backup "$TARGET_DIR/$rel" "$DEST/$rel"; then
-    cj="$(store_counts_json "$DEST/$rel")"
-    pass "backed up $rel ($cj)"
+    _snapshot_normalize_journal "$DEST/$rel"   # best-effort; store_counts_json is the real gate
     [[ "$_first" -eq 0 ]] && COUNTS_JSON="$COUNTS_JSON,"
-    COUNTS_JSON="$COUNTS_JSON\"$(json_escape "$rel")\":$cj"
+    if cj="$(store_counts_json "$DEST/$rel")"; then
+      pass "backed up $rel ($cj)"
+      COUNTS_JSON="$COUNTS_JSON\"$(json_escape "$rel")\":$cj"
+    else
+      fail "backed up $rel but per-table counts UNREADABLE (enumeration query failed or found zero tables on a store that backed up successfully — F8; see docs/gauntlet-2026-07-31) — treating snapshot as INCOMPLETE"
+      UNREADABLE_STORES+=("$rel")
+      COUNTS_JSON="$COUNTS_JSON\"$(json_escape "$rel")\":\"UNREADABLE\""
+      SNAP_FAIL=1
+    fi
     _first=0
   else
     fail "sqlite backup FAILED for $rel"
@@ -158,6 +210,18 @@ if [[ "${#CORRUPT_LIST[@]}" -gt 0 ]]; then
   done
 fi
 
+# unreadableStores (F8): stores that backed up successfully but whose
+# per-table counts could not be read — adopt.sh must refuse to grade
+# PRESERVED off a baseline that lists any of these (NOT ASSESSABLE instead).
+UNREADABLE_JSON=""; _first=1
+if [[ "${#UNREADABLE_STORES[@]}" -gt 0 ]]; then
+  for u in "${UNREADABLE_STORES[@]}"; do
+    [[ "$_first" -eq 0 ]] && UNREADABLE_JSON="$UNREADABLE_JSON,"
+    UNREADABLE_JSON="$UNREADABLE_JSON\"$(json_escape "$u")\""
+    _first=0
+  done
+fi
+
 MANIFEST="$DEST/manifest.json"
 {
   printf '{'
@@ -167,6 +231,7 @@ MANIFEST="$DEST/manifest.json"
   printf '"dir":"%s",' "$(json_escape "$DEST")"
   printf '"createdAt":"%s",' "$CREATED_AT"
   printf '"counts":{%s},' "$COUNTS_JSON"
+  printf '"unreadableStores":[%s],' "$UNREADABLE_JSON"
   printf '"rvf":[%s],' "$RVF_JSON"
   printf '"corruptArtifacts":[%s]' "$CORRUPT_JSON"
   printf '}\n'
@@ -180,7 +245,8 @@ POINTER="$POINTER_DIR/adoption-baseline.json"
   printf '{'
   printf '"dir":"%s",' "$(json_escape "$DEST")"
   printf '"createdAt":"%s",' "$CREATED_AT"
-  printf '"counts":{%s}' "$COUNTS_JSON"
+  printf '"counts":{%s},' "$COUNTS_JSON"
+  printf '"unreadableStores":[%s]' "$UNREADABLE_JSON"
   printf '}\n'
 } > "$POINTER"
 pass "baseline pointer written: $POINTER"

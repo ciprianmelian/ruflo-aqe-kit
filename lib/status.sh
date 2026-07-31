@@ -158,6 +158,36 @@ L_PATTERNS="$(lstore_count "$AQE_DB" qe_patterns)"
 CAPTURE_WIRED=0
 kit_aqe_capture_wired "$TARGET_DIR" && CAPTURE_WIRED=1
 
+# SQLITE-ROOTS-V1 (Wave-2 B3, 2026-07-31): kit_sqlite_backend above answers
+# "can the KIT itself read/write a db file" — it does NOT tell you whether
+# every real resolution root `ruflo memory`/AgentDB actually load from (see
+# kit_bsqlite_candidate_roots, common.sh) is loadable. A broken/ABI-stale
+# native build nested inside one of those roots (confirmed possible: the
+# hoisted agentdb floor ships its own nested better-sqlite3, distinct from the
+# sibling build every other check looks at) would silently degrade that path
+# to WASM with no other signal.
+#
+# TRI-STATE, not a boolean (round 2, critic-confirmed gap): a flat "no gap"
+# read is indistinguishable from "nothing could be assessed" (e.g. `npm`
+# itself broken — kit_bsqlite_gap alone reads rc=1 either way). BSQLITE_VERDICT
+# is one of healthy | gap | not-assessable; BSQLITE_CHECKED/BSQLITE_TOTAL let
+# both JSON and the human view say plainly when 0 of N roots were assessable
+# instead of rendering that as clean.
+BSQLITE_ROOT_LINES="$(kit_bsqlite_native_status 2>/dev/null)"
+_bsqlite_verdict_line="$(kit_bsqlite_verdict 2>/dev/null)"
+BSQLITE_VERDICT="${_bsqlite_verdict_line%%|*}"
+[[ -z "$BSQLITE_VERDICT" ]] && BSQLITE_VERDICT="not-assessable"
+_bsqlite_rest="${_bsqlite_verdict_line#*|}"
+BSQLITE_CHECKED="${_bsqlite_rest%%|*}"
+BSQLITE_TOTAL="${_bsqlite_rest#*|}"
+[[ "$BSQLITE_CHECKED" =~ ^[0-9]+$ ]] || BSQLITE_CHECKED=0
+[[ "$BSQLITE_TOTAL" =~ ^[0-9]+$ ]] || BSQLITE_TOTAL=0
+# Back-compat boolean some callers may still expect — derived from the
+# verdict, but NEVER the primary signal (that would reintroduce the exact
+# conflation this round fixed).
+BSQLITE_GAP=0
+[[ "$BSQLITE_VERDICT" == "gap" ]] && BSQLITE_GAP=1
+
 # ── Config: daemon auto-start mode + last health snapshot ────────────────────
 DAEMON_AUTOSTART="${RUFLO_DAEMON_MODE:-off}"
 HEALTH_FILE="$TARGET_DIR/.claude-flow/data/health-last.json"
@@ -178,6 +208,8 @@ build_json() {
   DAEMON_RUNNING="$DAEMON_RUNNING" DAEMON_PIDS="$DAEMON_PIDS" \
   MCP_SERVERS="$MCP_SERVERS" BRAIN_PRESENT="$BRAIN_PRESENT" BRAIN_SIZE="$BRAIN_SIZE" BRAIN_VER="$BRAIN_VER" \
   L_EPISODES="$L_EPISODES" L_SKILLS="$L_SKILLS" L_EXPERIENCES="$L_EXPERIENCES" L_PATTERNS="$L_PATTERNS" SQLITE_OK="$SQLITE_OK" SQLITE_BACKEND="$SQLITE_BACKEND" \
+  BSQLITE_ROOT_LINES="$BSQLITE_ROOT_LINES" BSQLITE_GAP="$BSQLITE_GAP" \
+  BSQLITE_VERDICT="$BSQLITE_VERDICT" BSQLITE_CHECKED="$BSQLITE_CHECKED" BSQLITE_TOTAL="$BSQLITE_TOTAL" \
   CAPTURE_WIRED="$CAPTURE_WIRED" \
   DAEMON_AUTOSTART="$DAEMON_AUTOSTART" HEALTH_PRESENT="$HEALTH_PRESENT" HEALTH_ISO="$HEALTH_ISO" \
   node -e '
@@ -226,6 +258,20 @@ build_json() {
         captureInflowWired: bool(e.CAPTURE_WIRED),
         sqlite: bool(e.SQLITE_OK),
         sqliteBackend: str(e.SQLITE_BACKEND),
+        sqliteNativeRoots: lines(e.BSQLITE_ROOT_LINES).map((l) => {
+          const [root, state, resolved] = l.split("|");
+          return { root, state, resolved: resolved === "-" ? null : resolved };
+        }),
+        // Tri-state (round 2, SQLITE-ROOTS-V1): "healthy" | "gap" | "not-assessable".
+        // sqliteNativeGap is a derived boolean kept for back-compat — it is
+        // ONLY true for "gap" and false for BOTH "healthy" and
+        // "not-assessable", so a consumer that reads sqliteNativeGap alone
+        // still cannot tell those two apart. Read sqliteNativeVerdict (or
+        // sqliteNativeRootsChecked === 0) to get the honest answer.
+        sqliteNativeVerdict: str(e.BSQLITE_VERDICT) || "not-assessable",
+        sqliteNativeRootsChecked: num(e.BSQLITE_CHECKED),
+        sqliteNativeRootsTotal: num(e.BSQLITE_TOTAL),
+        sqliteNativeGap: bool(e.BSQLITE_GAP),
       },
       config: {
         daemonAutoStart: str(e.DAEMON_AUTOSTART),
@@ -344,6 +390,24 @@ if [[ "$SQLITE_OK" -eq 1 ]]; then
 else
   info "no sqlite backend (sqlite3 CLI and global better-sqlite3 both unavailable) — learning store counts n/a"
 fi
+case "$BSQLITE_VERDICT" in
+  gap)
+    warn "better-sqlite3 native roots: GAP — $BSQLITE_CHECKED/$BSQLITE_TOTAL root(s) assessable, at least one build present but unloadable (silent WASM-fallback risk — SQLITE-ROOTS-V1). Details:"
+    while IFS='|' read -r _root _state _resolved; do
+      [[ -z "$_root" ]] && continue
+      [[ "$_state" == "broken" ]] && warn "  $_root -> $_resolved (present, fails to load)"
+    done <<< "$BSQLITE_ROOT_LINES"
+    ;;
+  healthy)
+    pass "better-sqlite3 native roots: healthy ($BSQLITE_CHECKED/$BSQLITE_TOTAL root(s) assessable, all load cleanly — SQLITE-ROOTS-V1)"
+    ;;
+  *)
+    # not-assessable — MUST NOT render as pass/healthy: 0 roots ever loaded
+    # is a distinct state from "verified clean" (round-2 fix; a flat boolean
+    # here previously read identically to healthy — see kit_bsqlite_verdict).
+    info "better-sqlite3 native roots: not assessable (0/$BSQLITE_TOTAL root(s) had a build to load-test — e.g. no npm root resolvable) — SQLITE-ROOTS-V1"
+    ;;
+esac
 
 header "config" "operational settings"
 if [[ "$HEALTH_PRESENT" -eq 1 ]]; then

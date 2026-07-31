@@ -1,16 +1,36 @@
 #!/usr/bin/env node
-// ruvnet-brain MCP launcher.
-// Resolves (or, when published, fetches) the RuvNet brain bundle, then runs the brain's own
-// stdio MCP server (forge-mcp-all.mjs, tool: search_ruvnet) as a transparent stdio proxy.
+// ruvnet-brain MCP launcher — INTENTIONALLY DEGRADED v1-style stdio proxy.
+//
+// This is the CI/clean-clone fallback that lib/fix-brain.sh uses only when the gitignored
+// vendor/ruvnet-brain checkout is absent. Upstream's own plugin/mcp/server.mjs was rewritten
+// in the 4.0.x line into a stateful v2 "Stable Spine" shell that owns the client MCP
+// handshake itself, hot-swaps a warm child brain process between calls, tracks a lease file,
+// adds a 240s timeout/outage alarm (kb/brain-alarm.mjs, with an opt-in ntfy.sh push), and
+// exposes two extra tools — ruvnet_cli_help / ruvnet_cli_run, general managed-CLI execution —
+// via a sibling managed-cli-interface.mjs. We deliberately do NOT vendor that v2 machinery
+// here: the extra CLI-execution tools and outbound alarm widen this file's surface well past
+// the kit's "one MCP tool" (search_ruvnet) design, for a fallback path that is rarely
+// exercised. What THIS v1 proxy still gives you: a working search_ruvnet, because the KB's own
+// forge-mcp-all.mjs (spawned below) still answers the same JSON-RPC tool contract this proxy
+// relies on (initialize/tools-list/tools-call) — verified end-to-end against a fixture KB. That
+// file is NOT unchanged: the same 4.0-series commits gave it a v2-only `brain/warmup` RPC (only
+// v2's hot-swap shell ever calls it) plus small answer-path tweaks (answerFromCards gained
+// { allowGuideAnswers: true }, searchAll gained { allowFullCorpus: false }). This v1 proxy never
+// calls brain/warmup and simply forwards whatever forge-mcp-all.mjs returns, so those tweaks
+// ride along transparently — the compatibility is at the protocol/tool-contract level, not
+// byte-identity. What it does NOT give you vs upstream v2: hot-swap-without-restart, the
+// timeout/outage alarm, and the two ruvnet_cli_* tools.
+//
+// Full analysis: docs/gauntlet-2026-07-31/brain-ledger.md entry E1.
+// BRAIN-FALLBACK-DEGRADED-V1 — documented against upstream v4.0.2 (commit 453ae58).
+// Drift tripwire: tests/brain-fallback-drift.test.js (fails if upstream moves past this
+// reference point without the decision above being re-reviewed).
 //
 // Brain location resolution order:
 //   1) $RUVNET_BRAIN_KB                          (explicit override — used for local/dev)
 //   2) $RUVNET_BRAIN_HOME/kb                      (custom home)
 //   3) ~/.cache/ruvnet-brain/kb                   (default install cache)
 // Model cache: $KB_MODEL_CACHE, else <home>/models (first query downloads HF models there).
-//
-// Phase 3 (publish): if the brain is absent and $RUVNET_BRAIN_RELEASE is set, download+unzip
-// the release bundle into the cache before launching. Until then we fail loudly with guidance.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';

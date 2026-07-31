@@ -1150,6 +1150,614 @@ if [[ "$AGENTDB_FORCED_ANY" -eq 0 ]]; then
   warn "No GLOBAL ruflo @claude-flow/memory controller-registry found — install ruflo globally (npm i -g ruflo) so .mcp.json's 'ruflo mcp start' resolves, then re-run."
 fi
 
+# ── Step 3c: ruvector MCP shell-injection patch (RUVECTOR-EXECSAFE-V1) ───────
+#
+# Upstream vendor/ruvector commit 9612e8e3 ("eliminate MCP shell command
+# injection", released as ruvector 0.2.39) replaced every shell-interpolated
+# `execSync(\`cmd ${sanitizeShellArg(x)}\`)` call in ruvector's OWN
+# bin/mcp-server.js (hooks_* + workers_* MCP tool handlers) with argv-only
+# `execFileSync`. MCP tool arguments are untrusted; sanitizeShellArg is a
+# blocklist, and blocklists escaping into a real shell are exactly the class
+# of bug this eliminates outright by never invoking a shell at all.
+#
+# Not a clean version bump: agentdb (pinned 3.0.0-alpha.10, see Step 3b)
+# declares `"ruvector": "^0.1.99"`. The fix shipped in the 0.2.x line; the
+# newest 0.1.x release (0.1.100, the ceiling of that peer range) predates the
+# fix by ~5 months and there is no later 0.1.x carrying it. Forcing 0.2.39+
+# here would recreate the exact "invalid" peer-range state already observed
+# elsewhere in this tree (ruflo's OWN nested agentdb/ruvector@0.2.40 is
+# flagged invalid against agentdb's identical ^0.1.99 declaration) — so this
+# is a defect_gate dist patch, not a bump, mirroring upstream's post-fix code
+# as ground truth. Also covers hooks_route_enhanced (same execSync +
+# sanitizeShellArg shape, one case block outside 9612e8e3's own diff): vendor
+# history shows the in-process rewrite of that handler (drops the subprocess
+# entirely) actually PREDATES 9612e8e3 — it's already present at 9612e8e3's
+# own parent commit, not a later one. Our patch here takes the shallower
+# execFileSync-argv route for that handler (still spawns a real CLI
+# subprocess, just with no shell involved) rather than mirroring upstream's
+# deeper in-process rewrite — a different remediation shape, same "no shell"
+# safety property, applied because it's the identical injection class
+# sitting in the same file.
+#
+# Fail-closed by construction: the patcher only writes the file (and only
+# stamps the RUVECTOR-EXECSAFE-V1 sentinel) when EVERY one of the 30 known
+# injection sites is accounted for — either converted in this run or already
+# converted by an earlier one. A single site that matches neither its old nor
+# new shape (future upstream/dist drift on exactly one handler) blocks the
+# whole write; nothing is stamped, ERRORS is incremented, and the file stays
+# genuinely re-checkable on every future run instead of silently freezing on
+# a partial fix. Idempotent (RUVECTOR-EXECSAFE-V1 sentinel + zero execSync(
+# remaining — the sentinel alone is never trusted), reversible
+# (.execsafe-bak), self-retires the moment an installed copy no longer greps
+# execSync( at all (confirmed true today for ruflo's own nested
+# ruvector@0.2.40 — it already ships the fix).
+header "3c/11" "ruvector MCP shell-injection patch (RUVECTOR-EXECSAFE-V1)"
+
+patch_ruvector_execsafe() {
+  local f="$1"
+  local defect; defect="$(dist_defect_present "$f" 'execSync\(')"
+  case "$defect" in
+    NO_FILE) return 0 ;;
+    ABSENT)
+      pass "ruvector MCP server already clean (no execSync): $f"
+      return 0
+      ;;
+  esac
+  # NOTE: no "sentinel present -> skip" shortcut here on purpose. defect_gate
+  # above already confirmed execSync( genuinely still exists in $f, so a
+  # sentinel on disk at this point can only mean a prior PARTIAL write (the
+  # exact bug this fail-closed design prevents going forward, or a legacy
+  # artifact from an older version of this patch) — never "fully done" (that
+  # case already returned via the ABSENT branch above). Falling through lets
+  # the engine re-attempt the remaining site(s) instead of freezing forever.
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would patch ruvector MCP shell injection: $f"
+    return 0
+  fi
+
+  [[ -f "$f.execsafe-bak" ]] || cp "$f" "$f.execsafe-bak"
+
+  local spec; spec="$(mktemp)"
+  cat > "$spec" <<'SPEC_EOF'
+###OLD###
+        let cmd = 'npx ruvector hooks init';
+        if (args.force) cmd += ' --force';
+        if (args.pretrain) cmd += ' --pretrain';
+        if (args.build_agents) cmd += ` --build-agents ${sanitizeShellArg(args.build_agents)}`;
+
+        try {
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 60000 });
+###NEW###
+        const commandArgs = ['hooks', 'init'];
+        if (args.force) commandArgs.push('--force');
+        if (args.pretrain) commandArgs.push('--pretrain');
+        if (args.build_agents) commandArgs.push('--build-agents', args.build_agents);
+
+        try {
+          const output = runRuvectorCli(commandArgs, { timeout: 60000 });
+###END###
+###OLD###
+        let cmd = 'npx ruvector hooks pretrain';
+        if (args.depth) cmd += ` --depth ${sanitizeNumericArg(args.depth, 3)}`;
+        if (args.skip_git) cmd += ' --skip-git';
+        if (args.verbose) cmd += ' --verbose';
+
+        try {
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 120000 });
+###NEW###
+        const commandArgs = ['hooks', 'pretrain'];
+        if (args.depth) commandArgs.push('--depth', sanitizeNumericArg(args.depth, 3));
+        if (args.skip_git) commandArgs.push('--skip-git');
+        if (args.verbose) commandArgs.push('--verbose');
+
+        try {
+          const output = runRuvectorCli(commandArgs, { timeout: 120000 });
+###END###
+###OLD###
+        let cmd = 'npx ruvector hooks build-agents';
+        if (args.focus) cmd += ` --focus ${sanitizeShellArg(args.focus)}`;
+        if (args.include_prompts) cmd += ' --include-prompts';
+
+        try {
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 30000 });
+###NEW###
+        const commandArgs = ['hooks', 'build-agents'];
+        if (args.focus) commandArgs.push('--focus', args.focus);
+        if (args.include_prompts) commandArgs.push('--include-prompts');
+
+        try {
+          const output = runRuvectorCli(commandArgs, { timeout: 30000 });
+###END###
+###OLD###
+          const output = execSync('npx ruvector hooks verify', { encoding: 'utf-8', timeout: 15000 });
+###NEW###
+          const output = runRuvectorCli(['hooks', 'verify'], { timeout: 15000 });
+###END###
+###OLD###
+        let cmd = 'npx ruvector hooks doctor';
+        if (args.fix) cmd += ' --fix';
+
+        try {
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 15000 });
+###NEW###
+        const commandArgs = ['hooks', 'doctor'];
+        if (args.fix) commandArgs.push('--fix');
+
+        try {
+          const output = runRuvectorCli(commandArgs, { timeout: 15000 });
+###END###
+###OLD###
+          const safeFile = sanitizeShellArg(args.file);
+          const output = execSync(`npx ruvector hooks ast-analyze "${safeFile}" --json`, { encoding: 'utf-8', timeout: 30000 });
+###NEW###
+          const output = runRuvectorCli(['hooks', 'ast-analyze', args.file, '--json'], { timeout: 30000 });
+###END###
+###OLD###
+          const filesArg = args.files.map(f => `"${sanitizeShellArg(f)}"`).join(' ');
+          const threshold = parseInt(args.threshold, 10) || 10;
+          const output = execSync(`npx ruvector hooks ast-complexity ${filesArg} --threshold ${threshold}`, { encoding: 'utf-8', timeout: 60000 });
+###NEW###
+          const threshold = parseInt(args.threshold, 10) || 10;
+          const output = runRuvectorCli(
+            ['hooks', 'ast-complexity', ...args.files, '--threshold', threshold],
+            { timeout: 60000 },
+          );
+###END###
+###OLD###
+          const cmd = args.commit ? `npx ruvector hooks diff-analyze "${sanitizeShellArg(args.commit)}" --json` : 'npx ruvector hooks diff-analyze --json';
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 60000 });
+###NEW###
+          const commandArgs = ['hooks', 'diff-analyze'];
+          if (args.commit) commandArgs.push(args.commit);
+          commandArgs.push('--json');
+          const output = runRuvectorCli(commandArgs, { timeout: 60000 });
+###END###
+###OLD###
+          const cmd = args.commit ? `npx ruvector hooks diff-classify "${sanitizeShellArg(args.commit)}"` : 'npx ruvector hooks diff-classify';
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 30000 });
+###NEW###
+          const commandArgs = ['hooks', 'diff-classify'];
+          if (args.commit) commandArgs.push(args.commit);
+          const output = runRuvectorCli(commandArgs, { timeout: 30000 });
+###END###
+###OLD###
+          const topK = parseInt(args.top_k, 10) || 5;
+          const commits = parseInt(args.commits, 10) || 50;
+          const output = execSync(`npx ruvector hooks diff-similar -k ${topK} --commits ${commits}`, { encoding: 'utf-8', timeout: 120000 });
+###NEW###
+          const topK = parseInt(args.top_k, 10) || 5;
+          const commits = parseInt(args.commits, 10) || 50;
+          const output = runRuvectorCli(
+            ['hooks', 'diff-similar', '-k', topK, '--commits', commits],
+            { timeout: 120000 },
+          );
+###END###
+###OLD###
+          const safeFile = sanitizeShellArg(args.file);
+          const output = execSync(`npx ruvector hooks coverage-route "${safeFile}"`, { encoding: 'utf-8', timeout: 15000 });
+###NEW###
+          const output = runRuvectorCli(['hooks', 'coverage-route', args.file], { timeout: 15000 });
+###END###
+###OLD###
+          const filesArg = args.files.map(f => `"${sanitizeShellArg(f)}"`).join(' ');
+          const output = execSync(`npx ruvector hooks coverage-suggest ${filesArg}`, { encoding: 'utf-8', timeout: 30000 });
+###NEW###
+          const output = runRuvectorCli(['hooks', 'coverage-suggest', ...args.files], { timeout: 30000 });
+###END###
+###OLD###
+          const filesArg = args.files.map(f => `"${sanitizeShellArg(f)}"`).join(' ');
+          const output = execSync(`npx ruvector hooks graph-mincut ${filesArg}`, { encoding: 'utf-8', timeout: 60000 });
+###NEW###
+          const output = runRuvectorCli(['hooks', 'graph-mincut', ...args.files], { timeout: 60000 });
+###END###
+###OLD###
+          const filesArg = args.files.map(f => `"${sanitizeShellArg(f)}"`).join(' ');
+          const method = sanitizeShellArg(args.method || 'louvain');
+          const clusters = parseInt(args.clusters, 10) || 3;
+          const output = execSync(`npx ruvector hooks graph-cluster ${filesArg} --method ${method} --clusters ${clusters}`, { encoding: 'utf-8', timeout: 60000 });
+###NEW###
+          const method = args.method || 'louvain';
+          const clusters = parseInt(args.clusters, 10) || 3;
+          const output = runRuvectorCli(
+            ['hooks', 'graph-cluster', ...args.files, '--method', method, '--clusters', clusters],
+            { timeout: 60000 },
+          );
+###END###
+###OLD###
+          const filesArg = args.files.map(f => `"${sanitizeShellArg(f)}"`).join(' ');
+          const output = execSync(`npx ruvector hooks security-scan ${filesArg}`, { encoding: 'utf-8', timeout: 120000 });
+###NEW###
+          const output = runRuvectorCli(['hooks', 'security-scan', ...args.files], { timeout: 120000 });
+###END###
+###OLD###
+          const safeQuery = sanitizeShellArg(args.query);
+          const topK = parseInt(args.top_k, 10) || 5;
+          let cmd = `npx ruvector hooks rag-context "${safeQuery}" -k ${topK}`;
+          if (args.rerank) cmd += ' --rerank';
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 30000 });
+###NEW###
+          const topK = parseInt(args.top_k, 10) || 5;
+          const commandArgs = ['hooks', 'rag-context', args.query, '-k', topK];
+          if (args.rerank) commandArgs.push('--rerank');
+          const output = runRuvectorCli(commandArgs, { timeout: 30000 });
+###END###
+###OLD###
+          const days = parseInt(args.days, 10) || 30;
+          const top = parseInt(args.top, 10) || 10;
+          const output = execSync(`npx ruvector hooks git-churn --days ${days} --top ${top}`, { encoding: 'utf-8', timeout: 30000 });
+###NEW###
+          const days = parseInt(args.days, 10) || 30;
+          const top = parseInt(args.top, 10) || 10;
+          const output = runRuvectorCli(
+            ['hooks', 'git-churn', '--days', days, '--top', top],
+            { timeout: 30000 },
+          );
+###END###
+###OLD###
+          const safeTask = sanitizeShellArg(args.task);
+          let cmd = `npx ruvector hooks route-enhanced "${safeTask}"`;
+          if (args.file) cmd += ` --file "${sanitizeShellArg(args.file)}"`;
+          const output = execSync(cmd, { encoding: 'utf-8', timeout: 30000 });
+###NEW###
+          const commandArgs = ['hooks', 'route-enhanced', args.task];
+          if (args.file) commandArgs.push('--file', args.file);
+          const output = runRuvectorCli(commandArgs, { timeout: 30000 });
+###END###
+###OLD###
+        const prompt = sanitizeShellArg(args.prompt);
+        try {
+          const result = execSync(`npx agentic-flow@alpha workers dispatch "${prompt.replace(/"/g, '\\"')}"`, {
+            encoding: 'utf-8',
+            timeout: 30000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+        const prompt = String(args.prompt);
+        try {
+          const result = runNpxPackage('agentic-flow@alpha', ['workers', 'dispatch', prompt], {
+            timeout: 30000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          const cmdArgs = args.workerId ? `workers status ${sanitizeShellArg(args.workerId)}` : 'workers status';
+          const result = execSync(`npx agentic-flow@alpha ${cmdArgs}`, {
+            encoding: 'utf-8',
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const commandArgs = ['workers', 'status'];
+          if (args.workerId) commandArgs.push(String(args.workerId));
+          const result = runNpxPackage('agentic-flow@alpha', commandArgs, {
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          const cmdArgs = args.json ? 'workers results --json' : 'workers results';
+          const result = execSync(`npx agentic-flow@alpha ${cmdArgs}`, {
+            encoding: 'utf-8',
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const commandArgs = ['workers', 'results'];
+          if (args.json) commandArgs.push('--json');
+          const result = runNpxPackage('agentic-flow@alpha', commandArgs, {
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          const result = execSync('npx agentic-flow@alpha workers triggers', {
+            encoding: 'utf-8',
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const result = runNpxPackage('agentic-flow@alpha', ['workers', 'triggers'], {
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          const result = execSync('npx agentic-flow@alpha workers stats', {
+            encoding: 'utf-8',
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const result = runNpxPackage('agentic-flow@alpha', ['workers', 'stats'], {
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          const result = execSync('npx agentic-flow@alpha workers presets', {
+            encoding: 'utf-8',
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const result = runNpxPackage('agentic-flow@alpha', ['workers', 'presets'], {
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          const result = execSync('npx agentic-flow@alpha workers phases', {
+            encoding: 'utf-8',
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const result = runNpxPackage('agentic-flow@alpha', ['workers', 'phases'], {
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          let cmd = `npx agentic-flow@alpha workers create "${name}" --preset ${preset}`;
+          if (triggers) cmd += ` --triggers "${triggers}"`;
+          const result = execSync(cmd, {
+            encoding: 'utf-8',
+            timeout: 30000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const commandArgs = ['workers', 'create', name, '--preset', preset];
+          if (triggers) commandArgs.push('--triggers', triggers);
+          const result = runNpxPackage('agentic-flow@alpha', commandArgs, {
+            timeout: 30000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+        const name = sanitizeShellArg(args.name);
+        const targetPath = sanitizeShellArg(args.path || '.');
+        try {
+          const result = execSync(`npx agentic-flow@alpha workers run "${name}" --path "${targetPath}"`, {
+            encoding: 'utf-8',
+            timeout: 120000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+        const name = String(args.name);
+        const targetPath = String(args.path || '.');
+        try {
+          const result = runNpxPackage('agentic-flow@alpha', ['workers', 'run', name, '--path', targetPath], {
+            timeout: 120000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          const result = execSync('npx agentic-flow@alpha workers custom', {
+            encoding: 'utf-8',
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const result = runNpxPackage('agentic-flow@alpha', ['workers', 'custom'], {
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+          let cmd = 'npx agentic-flow@alpha workers init-config';
+          if (args.force) cmd += ' --force';
+          const result = execSync(cmd, {
+            encoding: 'utf-8',
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+          const commandArgs = ['workers', 'init-config'];
+          if (args.force) commandArgs.push('--force');
+          const result = runNpxPackage('agentic-flow@alpha', commandArgs, {
+            timeout: 15000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+###OLD###
+        const configFile = sanitizeShellArg(args.file || 'workers.yaml');
+        try {
+          const result = execSync(`npx agentic-flow@alpha workers load-config --file "${configFile}"`, {
+            encoding: 'utf-8',
+            timeout: 30000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###NEW###
+        const configFile = String(args.file || 'workers.yaml');
+        try {
+          const result = runNpxPackage('agentic-flow@alpha', ['workers', 'load-config', '--file', configFile], {
+            timeout: 30000,
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+###END###
+SPEC_EOF
+
+  local patcher; patcher="$(mktemp)"
+  cat > "$patcher" <<'PJS'
+// RUVECTOR-EXECSAFE-V1 patcher engine. Exit codes (bash wrapper depends on these):
+//   0 = written (every known injection site accounted for) OR nothing to do
+//   2 = ANCHOR_NOT_FOUND — file doesn't look like the ruvector mcp-server.js
+//       this patch knows how to read at all (helper anchor missing) or NONE
+//       of the known pairs matched in either old or new shape. No write.
+//   3 = PARTIAL — at least one but not all pairs are accounted for. This is
+//       the fail-closed gate: a single unmatched anchor blocks the ENTIRE
+//       write (and the sentinel), rather than silently shipping a file that
+//       is only mostly fixed. No write.
+//   4 = WRITE_FAILED — fs.writeFileSync threw (e.g. EACCES). No corruption:
+//       the throw happens before any bytes are written to F.
+//   5 = READ_FAILED — fs.readFileSync(F) threw (e.g. ENOENT/EACCES).
+const fs = require('fs');
+const F = process.argv[2];
+const SPEC = process.argv[3];
+
+let s;
+try {
+  s = fs.readFileSync(F, 'utf8');
+} catch (e) {
+  console.error(`READ_FAILED:${e.code || e.message}`);
+  process.exit(5);
+}
+
+// Truly nothing to do: sentinel present AND zero execSync( left. A sentinel
+// alongside a remaining execSync( (a partial write from an older, buggy
+// version of this same patch) is NOT trusted as "done" — fall through so the
+// pairs loop below gets a chance to finish the job instead of freezing on it
+// forever. (In normal use the bash wrapper's defect_gate on execSync\( already
+// keeps this script from ever being invoked on a genuinely clean file; this
+// is defense-in-depth for direct/standalone invocation.)
+if (s.includes('RUVECTOR-EXECSAFE-V1') && !/execSync\(/.test(s)) {
+  console.error('ALREADY_CLEAN');
+  process.exit(0);
+}
+
+const helperAnchor = "function sanitizeNumericArg(arg, defaultVal) {\n  const n = parseInt(arg, 10);\n  return Number.isFinite(n) && n > 0 ? n : (defaultVal || 0);\n}\n";
+if (!s.includes(helperAnchor)) { console.error('ANCHOR_NOT_FOUND:helper'); process.exit(2); }
+
+const requireLine = "const { execSync, execFileSync } = require('child_process');";
+
+const helpers = [
+  "",
+  "// RUVECTOR-EXECSAFE-V1: argv-only subprocess execution for MCP tool handlers.",
+  "// MCP arguments are untrusted; execSync + string interpolation let quotes,",
+  "// `$()`, backticks, and other shell metacharacters become executable syntax",
+  "// even through sanitizeShellArg's blocklist. execFileSync with an explicit",
+  "// argv keeps every value as one argument -- there is no shell to escape into.",
+  "// Mirrors upstream ruvector (commit 9612e8e3, released as ruvector 0.2.39).",
+  "const RUVECTOR_CLI = path.join(__dirname, 'cli.js');",
+  "const NPX_COMMAND = process.platform === 'win32' ? 'npx.cmd' : 'npx';",
+  "",
+  "function runRuvectorCli(args, options = {}) {",
+  "  return execFileSync(process.execPath, [RUVECTOR_CLI, ...args.map(String)], {",
+  "    encoding: 'utf-8',",
+  "    ...options,",
+  "  });",
+  "}",
+  "",
+  "function runNpxPackage(packageSpec, args, options = {}) {",
+  "  return execFileSync(NPX_COMMAND, [packageSpec, ...args.map(String)], {",
+  "    encoding: 'utf-8',",
+  "    ...options,",
+  "  });",
+  "}",
+  ""
+].join('\n');
+// Guard against double-insertion when re-processing a legacy partial file
+// that already carries the sentinel (and therefore the helpers) from an
+// earlier, buggy run of this same patch.
+if (!s.includes('RUVECTOR-EXECSAFE-V1')) {
+  s = s.replace(helperAnchor, helperAnchor + helpers);
+}
+
+const raw = fs.readFileSync(SPEC, 'utf8');
+const chunks = raw.split('###OLD###\n').slice(1);
+const pairs = chunks.map((chunk) => {
+  const [oldPart, rest] = chunk.split('\n###NEW###\n');
+  const [newPart] = rest.split('\n###END###\n');
+  return [oldPart, newPart];
+});
+
+// Three-way accounting per pair, not just "matched / not matched": a pair
+// already in its NEW shape (e.g. a prior run already converted this exact
+// site) counts as accounted-for without re-touching it, so a legacy partial
+// file can still be finished off. Only a pair matching NEITHER its old NOR
+// its new shape counts as genuinely missing.
+let applied = 0;
+let alreadyDone = 0;
+const trulyMissing = [];
+for (const [oldStr, newStr] of pairs) {
+  if (s.includes(oldStr)) {
+    s = s.split(oldStr).join(newStr);
+    applied++;
+  } else if (s.includes(newStr)) {
+    alreadyDone++;
+  } else {
+    trulyMissing.push(oldStr.split('\n')[0].slice(0, 60));
+  }
+}
+
+const total = pairs.length;
+const accountedFor = applied + alreadyDone;
+
+if (accountedFor === 0) { console.error('ANCHOR_NOT_FOUND:no_pairs_matched'); process.exit(2); }
+
+// FAIL CLOSED: anything short of every pair accounted for blocks the write
+// (and the sentinel) entirely. No partial file, no partial sentinel — the
+// defect_gate upstream of this script will see execSync( still present next
+// run and try again, forever, until a human updates the spec for whatever
+// drifted.
+if (accountedFor !== total) {
+  console.error(`PARTIAL:${accountedFor}/${total} (applied_now=${applied} already_done=${alreadyDone}) MISSING:${JSON.stringify(trulyMissing)}`);
+  process.exit(3);
+}
+
+// Only drop execSync from the destructure once every call site is converted.
+if (s.includes(requireLine) && !/execSync\(/.test(s)) {
+  s = s.replace(requireLine, "const { execFileSync } = require('child_process');");
+}
+
+try {
+  fs.writeFileSync(F, s);
+} catch (e) {
+  console.error(`WRITE_FAILED:${e.code || e.message}`);
+  process.exit(4);
+}
+console.error(`APPLIED:${applied}/${total}${alreadyDone ? ' ALREADY_DONE:' + alreadyDone : ''}`);
+PJS
+
+  local out; out="$(node "$patcher" "$f" "$spec" 2>&1)"; local rc=$?
+  rm -f "$patcher" "$spec"
+  case "$rc" in
+    0)
+      if node --check "$f" 2>/dev/null; then
+        fix "Patched ruvector MCP shell-injection (RUVECTOR-EXECSAFE-V1): $f ($out)"
+      else
+        warn "RUVECTOR-EXECSAFE-V1 produced invalid $f — restoring backup"
+        cp "$f.execsafe-bak" "$f"
+        ((ERRORS++)) || true
+      fi
+      ;;
+    2)
+      warn "RUVECTOR-EXECSAFE-V1 anchor not found in $f (dist drift) — re-anchor needed, NOT applied ($out)"
+      ;;
+    3)
+      warn "RUVECTOR-EXECSAFE-V1 PARTIAL match in $f — refusing to write or stamp an incomplete fix; file left untouched, will retry next run ($out)"
+      ((ERRORS++)) || true
+      ;;
+    4)
+      warn "RUVECTOR-EXECSAFE-V1 could not write $f ($out) — check file/directory permissions; NOT applied"
+      ((ERRORS++)) || true
+      ;;
+    5)
+      warn "RUVECTOR-EXECSAFE-V1 could not read $f ($out) — check file permissions; NOT applied"
+      ;;
+    *)
+      warn "RUVECTOR-EXECSAFE-V1 patcher failed unexpectedly on $f (rc=$rc): $out"
+      ((ERRORS++)) || true
+      ;;
+  esac
+}
+
+RUVECTOR_MCP_FOUND=0
+while IFS= read -r rv_file; do
+  [[ -z "$rv_file" ]] && continue
+  RUVECTOR_MCP_FOUND=1
+  patch_ruvector_execsafe "$rv_file"
+done < <(
+  { _groot="$(npm root -g 2>/dev/null)"
+    [[ -n "$_groot" ]] && find "$_groot" -maxdepth 6 -path "*/node_modules/ruvector/bin/mcp-server.js" 2>/dev/null
+    find "$HOME_DIR/.nvm" -maxdepth 14 -path "*/node_modules/ruvector/bin/mcp-server.js" 2>/dev/null
+    find "/usr/local/lib/node_modules" "/opt/homebrew/lib/node_modules" -maxdepth 8 -path "*/node_modules/ruvector/bin/mcp-server.js" 2>/dev/null
+  } | sort -u
+)
+if [[ "$RUVECTOR_MCP_FOUND" -eq 0 ]]; then
+  pass "No installed ruvector MCP server found (not a dependency here) — nothing to patch"
+fi
+
 # ── Step 4: Remove local ruflo dependency ────────────────────────────────────
 
 header "4/11" "Local ruflo dependency check"
@@ -2753,6 +3361,32 @@ else
   else
     warn "learning.json path patch failed / anchor mismatch — restoring"; cp "$LJ_HOOKS.learnpath-bak" "$LJ_HOOKS"
   fi
+fi
+
+# ── Step 11c: upstream CVE-count fabrication self-retirement check (CVE-COUNT-FABRICATION-GATE-V1) ──
+# Upstream defect ruvnet/ruflo#2694 (see funnel/local-signals.js's getSecurityStatus()):
+# the statusline's CVE segment used to be FABRICATED — a hardcoded `const totalCves = 3`
+# (ruflo's OWN v3-roadmap item count, unrelated to the target project's risk) paired with
+# `cvesFixed` derived from `scans.length` (a FILE count, not a findings count). The kit's
+# own canonical statusline (assets/statusline.cjs, mirrored by the step-11e swarm-line
+# render patch above) renders `security.cvesFixed / security.totalCves` verbatim from
+# whatever this upstream function returns — so if upstream still fabricates, the kit
+# surfaces the same lie downstream. This is a READ-ONLY honesty check, not a dist patch:
+# we do not mutate the global ruflo package's own security-status logic (that belongs
+# upstream, not a vendored patch here) — but self-retirement must be REPORTED on every
+# run, not silently assumed, so drift in either direction stays visible. Self-retires the
+# moment either literal leaves the dist (matches agentic-kit's own
+# upstreamCveCounterFabricated() detection: both literals together, not either alone).
+header "11c/11" "CVE-count fabrication check (CVE-COUNT-FABRICATION-GATE-V1)"
+LS_DIST="$(npm root -g 2>/dev/null)/ruflo/node_modules/@claude-flow/cli/dist/src/funnel/local-signals.js"
+if [[ ! -f "$LS_DIST" ]]; then
+  warn "global @claude-flow/cli local-signals.js not found — cannot verify CVE-count fabrication status (#2694)"
+elif [[ "$(dist_defect_present "$LS_DIST" 'const totalCves = 3\b')" == "PRESENT" && \
+        "$(dist_defect_present "$LS_DIST" 'scans\.length')" == "PRESENT" ]]; then
+  warn "upstream CVE-count fabrication (ruvnet/ruflo#2694) is PRESENT in installed dist — hardcoded totalCves=3 + scans.length-derived cvesFixed. The kit's statusline CVE segment inherits this fabricated value. No kit-side dist patch applied here (mutating the global ruflo package's own security logic is out of scope); consider hiding the CVE segment until upstream fixes it."
+  ((ERRORS++)) || true
+else
+  pass "upstream CVE-count fabrication (#2694) confirmed ABSENT from installed dist — getSecurityStatus() now returns honest cvesFixed:0/totalCves:0 stubs (not the old hardcoded-3/scans.length fabrication); no kit patch needed (self-retired)"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

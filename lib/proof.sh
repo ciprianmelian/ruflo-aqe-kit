@@ -17,27 +17,80 @@ set -uo pipefail
 #   P3  aqe             aqe --version + aqe-mcp handshake (.mcp.json command)
 #   P4  agentdb-slots   3-slot layout: standalone/nested = PIN, hoisted = HOISTED
 #   P5  controllers     nested agentdb require()s + exposes >= 23 classes
-#   P6  bsqlite         better-sqlite3 loads from agentdb's context
+#   P6  bsqlite         better-sqlite3 actually OPENS a `:memory:` db (not just
+#                       require()s) from every real resolution root
+#                       (SQLITE-DEEP-V1); FAILs on a broken-on-open root OR
+#                       zero assessable roots (PROVED must not be earned blind)
 #   P7  brain           ruvnet-brain registered + launcher on disk (KB opt-in)
 #   P8  statusline      the target statusline runs on a minimal stdin JSON
-#   P9  sentinels       status.sh --json: kit dist patches present == total
+#   P9  sentinels       status.sh --json: kit dist patches present == total, PLUS a
+#                       BEHAVIORAL drive of HOOK-BLOCK-EXIT2-V1 when a hook-handler
+#                       is installed — the pre-bash dangerous-command block must
+#                       actually exit 2 (real invocation, not a sentinel-string grep)
+#                       — PLUS a PROPERTY check (not a sentinel grep) that every
+#                       installed ruvector bin/mcp-server.js has zero remaining
+#                       shell-interpolated execSync( calls (RUVECTOR-EXECSAFE-V1)
 #   P10 learning        verify-learning.sh --json: verdict live|partial
 #   P11 health-parse    health.sh --json: memory totals sane (comma-bug tripwire)
-#   P12 swarm-smoke     ruflo hooks route returns a routing decision
+#   P12 swarm-smoke     ruflo hooks route returns a routing decision (time-bounded)
 #   P13 stores-writable each present sqlite store takes a momentary write lock
 #   P14 daemon-gates    CF-CONFIG autostart:false + statusline DAEMON-AUTOSTART-3-V1
 #                       pin (running daemons WARN, never FAIL)
-#   P15 statusline-truth canonical --json swarmdb.vectorCount == sqlite sum (±5) +
+#   P15 statusline-truth the TARGET's INSTALLED statusline (`.claude/helpers/
+#                       statusline.cjs`) — the kit's own asset is used ONLY as a
+#                       fresh-target fallback when nothing is installed yet.
+#                       --json swarmdb.vectorCount == sqlite sum (±5) +
 #                       tests.testCases>=testFiles with countMethod 'regex-scan'
 #
 # NOTE (P12): `ruflo hooks route` may append one route-capture row to the swarm
-# store — this probe is read-MOSTLY, not strictly read-only. Everything else is
-# read-only (P13's BEGIN IMMEDIATE; ROLLBACK mutates nothing).
+# store — this probe is read-MOSTLY, not strictly read-only. P9's hook-handler
+# drive (pre-bash) is read-only: hook-handler.cjs only inspects the JSON payload
+# string against a fixed dangerous-command list — it never executes the payload.
+# Everything else is read-only (P13's BEGIN IMMEDIATE; ROLLBACK mutates nothing).
 #
 # x2 driver (default): pass 1 runs in the inherited env; pass 2 runs under a
 # CLEAN env (`env -i HOME PATH TERM`) so it must re-derive every fact from disk.
 # Verdict PROVED iff BOTH passes have zero FAIL AND the per-probe verdict vector
 # is byte-identical between passes; any flip → UNSTABLE; any FAIL → FAILED.
+#
+# F3 ESCALATION (anti-Goodhart — a stable WARN is not automatically safe): P2
+# (ruflo-mcp), P3 (aqe), and P12 (swarm-smoke) tag their WARN detail with the
+# literal substring "[noresp-timeout]" ONLY when the WARN means "this REGISTERED
+# component never proved a working handshake" — covering BOTH a live-but-
+# unresponsive server (spawns, never answers) AND one that cannot even be
+# spawned (e.g. ENOENT: a stale absolute path in .mcp.json after an nvm/
+# node-root switch — a documented per-host hazard here). Both are at least as
+# broken as each other; P2's equivalent branch has always been a hard FAIL for
+# exactly this reason, and round-2 hardening closed the one place this WARN
+# family was left untagged (P3's spawn-failure branch — a critic fixture
+# demonstrated it grading PROVED with a permanently unlaunchable registered
+# server). The marker is NEVER applied to an absent-by-design component (e.g.
+# no agentic-qe entry in .mcp.json → P3 PASSes outright, never reaching the
+# marked branches) or a benign empty result (e.g. hooks route with rc=0 and
+# legitimately nothing to route yet → untagged WARN — an error-swallowing
+# router that exits 0 printing nothing is a known, accepted residual: it is
+# indistinguishable from "nothing to route" by design, the same way a fresh
+# target must not be penalized for having no data yet).
+#
+# ESCALATION PREDICATE (exact, matches the code — NOT "identical detail text"):
+# escalation requires BOTH (a) the overall per-probe verdict VECTOR is stable
+# across both passes (name:verdict pairs match — already required for PROVED)
+# AND (b) the SAME probe carries verdict WARN on both passes AND its detail
+# contains the "[noresp-timeout]" marker on BOTH passes. The free-text
+# remainder of the detail may legitimately differ between passes (e.g. a
+# different elapsed-time note); only the verdict and the marker's presence are
+# compared. A probe that is marked-WARN on one pass but unmarked-WARN (or a
+# different verdict) on the other does NOT escalate — this is intentional, not
+# a gap: mixed marked/unmarked WARN across passes is exactly the ambiguous,
+# non-reproduced signal x2 exists to distrust, and escalating on a single
+# occurrence would risk inventing a FAIL from transient host flakiness rather
+# than a confirmed, twice-observed dead component.
+#
+# When both conditions hold, the x2 verdict escalates that probe to FAIL for
+# gating purposes — surfaced in the JSON's "escalated" array — because a
+# genuine first-run-warmup NORESP is expected to clear by the second pass; one
+# that persists (verdict+marker, not necessarily verbatim text) twice is
+# indistinguishable from a permanently wedged/unlaunchable component.
 # Exit 0 ONLY on PROVED.
 # ============================================================================
 
@@ -66,6 +119,19 @@ GROOT="$(npm root -g 2>/dev/null || echo '')"
 P_NAME=(); P_VERDICT=(); P_DETAIL=()
 record_probe() { P_NAME+=("$1"); P_VERDICT+=("$2"); P_DETAIL+=("$3"); }
 
+# _kit_proof_timeout <secs> <cmd...> — portable hard timeout (perl alarm; no GNU
+# coreutils dependency, same idiom as health.sh's ruflo_timeout). `exec` inside
+# perl replaces the perl process image with the target command, so a firing
+# alarm delivers SIGALRM to the target itself; bash reports a signal-N kill as
+# exit 128+N, so a genuine timeout comes back as 142 (128+14). This is a real,
+# if approximate, timeout: a command that itself traps/ignores SIGALRM would
+# not be caught by this wrapper — acceptable here since it guards proof's own
+# probes against a hang, not a security boundary.
+_kit_proof_timeout() {
+  local secs="$1"; shift
+  perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+}
+
 # ── Probes ───────────────────────────────────────────────────────────────────
 # P1 ruflo-cli: real `ruflo --version` exits 0 AND prints a semver.
 probe_ruflo_cli() {
@@ -84,7 +150,11 @@ probe_ruflo_cli() {
 probe_ruflo_mcp() {
   case "$(mcp_initialize_probe 8 ruflo mcp start)" in
     PROBE_OK)     record_probe "ruflo-mcp" PASS "initialize handshake answered" ;;
-    PROBE_NORESP) record_probe "ruflo-mcp" WARN "no initialize response in 8s (first-run warmup?)" ;;
+    # [noresp-timeout]: marks this WARN as F3-escalatable — see header. ruflo-mcp
+    # is a core, always-expected component (never "absent by design"), so a
+    # no-response that repeats identically across BOTH x2 passes escalates to
+    # FAIL rather than passing forever as "first-run warmup".
+    PROBE_NORESP) record_probe "ruflo-mcp" WARN "no initialize response in 8s (first-run warmup?) [noresp-timeout]" ;;
     *)            record_probe "ruflo-mcp" FAIL "MCP server errored on launch" ;;
   esac
 }
@@ -109,8 +179,20 @@ probe_aqe() {
   IFS=$'\t' read -r -a parts <<< "$acmd"
   case "$(mcp_initialize_probe 8 "${parts[@]}")" in
     PROBE_OK)     record_probe "aqe" PASS "aqe ${v:-?} · aqe-mcp handshake answered" ;;
-    PROBE_NORESP) record_probe "aqe" WARN "aqe ${v:-?} · aqe-mcp no response in 8s" ;;
-    *)            record_probe "aqe" WARN "aqe ${v:-?} · aqe-mcp probe error" ;;
+    # [noresp-timeout] (F3-escalatable): the entry IS registered — these are the
+    # "registered but never proved a working handshake" cases, distinct from the
+    # PASS above (no entry at all, absent by design, never reaches this case
+    # block). PROBE_ERR (round 2 fix) is a spawn-level failure — e.g. a stale
+    # absolute path in .mcp.json after an nvm/node-root switch, a documented
+    # per-host hazard here — which is registered-but-permanently-unlaunchable,
+    # not "ambiguous/transient": a command that cannot even start is at least
+    # as broken as one that starts and never answers (P2's equivalent branch
+    # is already a hard FAIL for exactly this reason). Marking it closes the
+    # exact false-negative a critic fixture demonstrated (ENOENT command ->
+    # untagged WARN -> stable -> PROVED with a permanently dead registered
+    # server) rather than leaving one component of the F3 class open.
+    PROBE_NORESP) record_probe "aqe" WARN "aqe ${v:-?} · aqe-mcp no response in 8s [noresp-timeout]" ;;
+    *)            record_probe "aqe" WARN "aqe ${v:-?} · aqe-mcp probe error (spawn failed — registered but unspawnable) [noresp-timeout]" ;;
   esac
 }
 
@@ -159,13 +241,59 @@ probe_controllers() {
   fi
 }
 
-# P6 bsqlite: better-sqlite3 loads from agentdb's context (else agentdb MCP -32000).
+# P6 bsqlite (SQLITE-DEEP-V1, Wave-2 B16): better-sqlite3 must actually OPEN a
+# database from every real resolution root a ruflo/AQE/agentdb consumer would
+# hit — not merely require() cleanly. A binding that resolves and require()s
+# fine and STILL cannot open `:memory:` is the exact state AgentDB's own core
+# silently degrades into (a console.log, never a throw — see lib/common.sh
+# kit_bsqlite_native_status header) — confirmed LIVE on this host: the nested
+# better-sqlite3 under the hoisted agentdb floor has no build/Release/
+# directory, so `require()` succeeds (the JS wrapper loads) but
+# `new Database(':memory:')` throws "Could not locate the bindings file". The
+# prior require()-only check (global_bsqlite_loads — still used by
+# fix-ruflo/setup for their own narrower "is anything here at all" purposes)
+# reported PASS straight through that live defect. Delegates to
+# kit_bsqlite_verdict / kit_bsqlite_native_status (lib/common.sh,
+# SQLITE-ROOTS-V1 deepened) rather than reimplementing the resolve -> require
+# -> open -> query chain here.
+#
+# Verdict mapping (tri-state -> PASS/FAIL), precedent-justified:
+#   healthy        -> PASS  >=1 candidate root checked, none broken.
+#   gap            -> FAIL  >=1 root resolves+requires but cannot open/answer
+#                     a query — the silent-WASM-fallback state; "loads" must
+#                     mean "opens a database", not just "didn't throw at
+#                     require time".
+#   not-assessable -> FAIL  zero candidate roots ever had anything to
+#                     load-test. Follows P13 stores-writable's precedent
+#                     ("PROVED must not be earned blind"), NOT P7 brain's
+#                     WARN-on-absent precedent: P7's KB is a documented,
+#                     genuinely OPTIONAL opt-in component; sqlite is not
+#                     optional for agentdb/ruflo memory, so a host that can't
+#                     even attempt this check has an unverified, load-bearing
+#                     property — that gates the proof rather than passing
+#                     through unexamined.
 probe_bsqlite() {
-  if global_bsqlite_loads; then
-    record_probe "bsqlite" PASS "better-sqlite3 loads from agentdb context"
-  else
-    record_probe "bsqlite" FAIL "better-sqlite3 not loadable (agentdb MCP would -32000)"
-  fi
+  local verdict state checked total
+  verdict="$(kit_bsqlite_verdict 2>/dev/null)"
+  IFS='|' read -r state checked total <<< "$verdict"
+  case "$state" in
+    healthy)
+      record_probe "bsqlite" PASS "better-sqlite3 opens :memory: + answers SELECT 1 in $checked/$total candidate root(s)"
+      ;;
+    gap)
+      # Name WHICH root(s) failed, AND the exact resolved file each one
+      # requires — require-ok-but-open-failed is a different diagnosis from
+      # missing-entirely, and an operator needs the physical path to act
+      # (e.g. `npm rebuild better-sqlite3` in that nested tree).
+      local broken_roots
+      broken_roots="$(kit_bsqlite_native_status 2>/dev/null | awk -F'|' '$2=="broken"{printf "%s (resolved: %s) ", $1, $3}')"
+      broken_roots="${broken_roots% }"
+      record_probe "bsqlite" FAIL "better-sqlite3 resolves+requires but FAILS TO OPEN a database (require-ok, open-failed — silent sql.js/WASM fallback risk, not a mere 'not found') in: ${broken_roots:-<root unavailable>} ($checked/$total roots checked)"
+      ;;
+    *)
+      record_probe "bsqlite" FAIL "no candidate root had a better-sqlite3 to load-test ($checked/$total checked) — sqlite is not optional for agentdb/ruflo memory; PROVED must not be earned blind"
+      ;;
+  esac
 }
 
 # P7 brain: ruvnet-brain registered in .mcp.json + its launcher on disk. KB is
@@ -221,7 +349,14 @@ probe_statusline() {
 }
 
 # P9 sentinels: status.sh --json is disk-derived truth — every kit dist patch
-# must be PRESENT (present == total).
+# must be PRESENT (present == total). PLUS (F5): a sentinel-string grep alone
+# proves nothing about REACHABILITY (F4's dead-code-survival risk one level up)
+# — so when a hook-handler.cjs is installed on the target, actually DRIVE its
+# pre-bash dangerous-command check and assert the real exit code, rather than
+# trusting HOOK-BLOCK-EXIT2-V1's presence as a string. hook-handler.cjs's
+# pre-bash handler only substring-matches the payload against a fixed
+# dangerous-command list (lib/fix-aqe.sh ~:451) and never executes it — this
+# drive is read-only/side-effect-free regardless of the payload chosen.
 probe_sentinels() {
   local out present total
   out="$(bash "$KIT_LIB/status.sh" "$TARGET_DIR" --json 2>/dev/null)"
@@ -231,10 +366,74 @@ probe_sentinels() {
   ' 2>/dev/null)"
   if [[ "$present" == "ERR" || -z "$present" ]]; then
     record_probe "sentinels" FAIL "status.sh --json unparseable"
-  elif [[ "$present" -lt "$total" ]]; then
-    record_probe "sentinels" FAIL "$present/$total kit dist patches present (re-run fix-ruflo)"
+    return
+  fi
+  local reasons=() info=""
+  [[ "$present" -lt "$total" ]] && reasons+=("$present/$total kit dist patches present (re-run fix-ruflo)")
+
+  local hh="$TARGET_DIR/.claude/helpers/hook-handler.cjs"
+  if [[ -f "$hh" ]]; then
+    if ! grep -q "HOOK-BLOCK-EXIT2-V1" "$hh" 2>/dev/null; then
+      reasons+=("HOOK-BLOCK-EXIT2-V1 sentinel absent from installed hook-handler.cjs (run fix-aqe)")
+    else
+      local rc_dangerous rc_benign
+      printf '%s' '{"tool_input":{"command":"rm -rf /"}}' \
+        | _kit_proof_timeout 6 node "$hh" pre-bash >/dev/null 2>&1
+      rc_dangerous=$?
+      printf '%s' '{"tool_input":{"command":"ls -la"}}' \
+        | _kit_proof_timeout 6 node "$hh" pre-bash >/dev/null 2>&1
+      rc_benign=$?
+      if [[ "$rc_dangerous" -ne 2 ]]; then
+        reasons+=("HOOK-BLOCK-EXIT2-V1 sentinel present but pre-bash exit=$rc_dangerous for a recognized dangerous command (would NOT actually block — sentinel string is textually present but the patched code path is not reachable/effective)")
+      else
+        info=" · HOOK-BLOCK-EXIT2-V1 verified behaviorally (rm -rf / -> exit 2)"
+        [[ "$rc_benign" -ne 0 ]] && info="$info [benign command also non-zero: rc=$rc_benign — informational, not gating]"
+      fi
+    fi
+  fi
+
+  # RUVECTOR-EXECSAFE-V1 (F5 addendum): enumerate every installed ruvector
+  # bin/mcp-server.js copy and assert the PROPERTY the fix guarantees — zero
+  # remaining shell-interpolated `execSync(` calls — via the same
+  # dist_defect_present() property check fix-ruflo's own patcher uses to
+  # decide "already clean" (common.sh, sourced above), not a sentinel-string
+  # grep (a partially-patched or reverted copy can still carry a stray
+  # RUVECTOR-EXECSAFE-V1 comment). Search roots mirror fix-ruflo.sh Step 3c's
+  # discovery exactly (npm root -g + ~/.nvm + /usr/local + /opt/homebrew
+  # global node_modules) — there is no shared discovery helper for this exact
+  # search today (ruvector_search_roots in common.sh covers a DIFFERENT thing,
+  # native .node binary roots), so this mirrors the one real source of truth
+  # rather than inventing a fourth path list.
+  # PROVES: no discovered copy currently contains a shell-interpolating
+  # execSync( call (the exact injection primitive upstream 9612e8e3 removed).
+  # DOES NOT PROVE: runtime behavior under adversarial MCP tool input, that
+  # execFileSync's argv path is itself free of a different flaw, or anything
+  # about copies outside these four search roots.
+  local rv_groot rv_file rv_bad="" rv_checked=0
+  rv_groot="$(npm root -g 2>/dev/null)"
+  while IFS= read -r rv_file; do
+    [[ -z "$rv_file" ]] && continue
+    rv_checked=$((rv_checked + 1))
+    case "$(dist_defect_present "$rv_file" 'execSync\(')" in
+      PRESENT) rv_bad+="$rv_file "; ;;
+    esac
+  done < <(
+    { [[ -n "$rv_groot" ]] && find "$rv_groot" -maxdepth 6 -path "*/node_modules/ruvector/bin/mcp-server.js" 2>/dev/null
+      find "$HOME/.nvm" -maxdepth 14 -path "*/node_modules/ruvector/bin/mcp-server.js" 2>/dev/null
+      find "/usr/local/lib/node_modules" "/opt/homebrew/lib/node_modules" -maxdepth 8 -path "*/node_modules/ruvector/bin/mcp-server.js" 2>/dev/null
+    } | sort -u
+  )
+  if [[ -n "$rv_bad" ]]; then
+    reasons+=("ruvector MCP shell-injection (RUVECTOR-EXECSAFE-V1): shell-interpolated execSync( still present in: ${rv_bad% }")
+  elif [[ "$rv_checked" -gt 0 ]]; then
+    info="$info · ruvector MCP shell-injection verified clean ($rv_checked copy(ies), zero execSync()"
+  fi
+
+  if [[ "${#reasons[@]}" -eq 0 ]]; then
+    record_probe "sentinels" PASS "$present/$total kit dist patches present${info}"
   else
-    record_probe "sentinels" PASS "$present/$total kit dist patches present"
+    local joined; joined="$(printf '%s; ' "${reasons[@]}")"; joined="${joined%; }"
+    record_probe "sentinels" FAIL "$joined"
   fi
 }
 
@@ -274,17 +473,38 @@ probe_health_parse() {
 }
 
 # P12 swarm-smoke: the hooks router returns a decision (read-mostly — may append
-# one route-capture row). NORESP/empty is a WARN, never a FAIL.
+# one route-capture row). Time-bounded (_kit_proof_timeout) so a wedged router
+# cannot hang the whole proof run. A CLEAN empty answer (rc=0, no output — "no
+# routing decision available yet", e.g. a fresh target with no data to route
+# over) is a plain, non-escalatable WARN. A genuine error or timeout (rc!=0) is
+# tagged [noresp-timeout] (F3-escalatable) — "the router was invoked and did
+# not answer", not "nothing to route".
+#
+# Timeout budget (8s per attempt, up to 2 attempts = ~16s worst case) is
+# INTENTIONALLY UNCHANGED as of the round-2 review, which flagged that a
+# genuinely working-but-slow router on a heavily loaded host could exceed 8s
+# and false-positive an escalation. Reviewed against this exact host on a day
+# with many concurrent builders driving heavy CPU load (test suites here ran
+# 4-8x their normal wall-clock time): every real `bin/ruflo-kit proof .` run
+# during that load still showed swarm-smoke PASS, never a timeout WARN — so
+# there is no observed defect to fix here, only a hypothetical one. Widening
+# the budget without that evidence would be tuning for comfort, not
+# correctness (the stated rule: never touch a probe merely to make a host
+# pass more easily). Matches the same 8s budget already used for the P2/P3 MCP
+# handshakes. Revisit if a host ever demonstrates an ACTUAL slow-but-working
+# timeout, with that evidence in hand.
 probe_swarm_smoke() {
   local out rc
-  out="$(ruflo hooks route --query "proof-smoke" 2>/dev/null)"; rc=$?
+  out="$(_kit_proof_timeout 8 ruflo hooks route --query "proof-smoke" 2>/dev/null)"; rc=$?
   if [[ "$rc" -ne 0 || -z "$out" ]]; then
-    out="$(ruflo hooks route --task "proof-smoke" 2>/dev/null)"; rc=$?
+    out="$(_kit_proof_timeout 8 ruflo hooks route --task "proof-smoke" 2>/dev/null)"; rc=$?
   fi
   if [[ "$rc" -eq 0 && -n "$out" ]]; then
     record_probe "swarm-smoke" PASS "hooks route returned a decision"
+  elif [[ "$rc" -ne 0 ]]; then
+    record_probe "swarm-smoke" WARN "hooks route errored/timed out (rc $rc) [noresp-timeout]"
   else
-    record_probe "swarm-smoke" WARN "hooks route gave no output (rc $rc)"
+    record_probe "swarm-smoke" WARN "hooks route gave no output (empty, rc 0 — no routing decision available)"
   fi
 }
 
@@ -378,10 +598,15 @@ probe_daemon_gates() {
   fi
   # (3) running daemons — WARN, never FAIL
   local dcount
-  # bin/cli.js anchors the match to the real daemon argv — a shell whose command
-  # line merely CONTAINS the words (e.g. an agent discussing it) false-matched
-  # the looser pattern (x2 re-audit note).
-  dcount="$(pgrep -f "bin/cli.js daemon start" 2>/dev/null | grep -c . | tr -d ' ')"
+  # Consume the SHARED discovery helper (lib/common.sh kit_daemon_ps_lines) —
+  # the same dual-pattern pgrep status.sh uses ('bin/cli.js daemon start' +
+  # 'ruflo daemon', merged+deduped) — rather than a single-pattern pgrep of
+  # this probe's own. A lone 'bin/cli.js daemon start' anchor here reintroduced
+  # the exact blindspot commit fcaec68 already fixed in status.sh (F7): a
+  # daemon whose surviving argv matches only 'ruflo daemon' (no cli.js in the
+  # visible tail) was invisible to this count even though status.sh already
+  # saw it running.
+  dcount="$(kit_daemon_ps_lines 2>/dev/null | grep -c . | tr -d ' ')"
   if [[ "${dcount:-0}" -gt 0 ]]; then
     [[ "$verdict" != "FAIL" ]] && verdict="WARN"
     detail="$detail · $dcount daemon proc(s) running (operator?)"
@@ -398,23 +623,35 @@ probe_daemon_gates() {
 }
 
 # P15 statusline-truth: the TRUTH-STATUSLINE-V1 contract must hold — every
-# displayed number must re-derive from disk. Render the CANONICAL statusline
-# ($KIT_ASSETS/statusline.cjs) with --json from the target cwd (stdin=/dev/null,
-# 15s SIGKILL guard), then cross-check two fields against independent ground
-# truth: (a) swarmdb.vectorCount == a freshly-computed sqlite sum over
-# $TARGET/.swarm/memory.db (memory_entries embedding NOT NULL + pattern_embeddings
-# + learning_state_embeddings + patterns embedding NOT NULL — the audit formula),
-# within ±5 for live drift; (b) tests.testCases >= tests.testFiles AND
-# tests.countMethod === 'regex-scan'. No .swarm/memory.db → fresh-target WARN.
-# NOTE: (b) requires the TRUTH-SL-V1 statusline to be integrated; if the rendered
-# --json lacks these keys the probe correctly FAILs.
+# displayed number must re-derive from disk. Render the TARGET's INSTALLED
+# statusline (`.claude/helpers/statusline.cjs` — what an operator actually sees
+# rendered inside Claude Code) with --json from the target cwd (stdin=/dev/null,
+# 15s SIGKILL guard); the kit's own $KIT_ASSETS/statusline.cjs is used ONLY as a
+# fresh-target fallback when nothing is installed yet (F6 fix — previously this
+# probe always rendered the kit asset, so installed drift that kept the P14 pin
+# string but hardcoded/faked numbers was invisible to it). Then cross-check two
+# fields against independent ground truth: (a) swarmdb.vectorCount == a
+# freshly-computed sqlite sum over $TARGET/.swarm/memory.db (memory_entries
+# embedding NOT NULL + pattern_embeddings + learning_state_embeddings + patterns
+# embedding NOT NULL — the audit formula), within ±5 for live drift; (b)
+# tests.testCases >= tests.testFiles AND tests.countMethod === 'regex-scan'.
+# No .swarm/memory.db → fresh-target WARN. NOTE: (b) requires the TRUTH-SL-V1
+# statusline to be integrated; if the rendered --json lacks these keys the
+# probe correctly FAILs — including when the INSTALLED file is broken/stale,
+# which is now visible instead of masked by rendering a healthy kit asset.
 probe_statusline_truth() {
   local swarmdb="$TARGET_DIR/.swarm/memory.db"
   if [[ ! -f "$swarmdb" ]]; then
     record_probe "statusline-truth" WARN "no .swarm/memory.db (fresh target)"; return
   fi
-  if [[ ! -f "$KIT_ASSETS/statusline.cjs" ]]; then
-    record_probe "statusline-truth" FAIL "canonical statusline.cjs absent from kit assets"; return
+  local installed="$TARGET_DIR/.claude/helpers/statusline.cjs"
+  local sl_target="" sl_source=""
+  if [[ -f "$installed" ]]; then
+    sl_target="$installed"; sl_source="installed"
+  elif [[ -f "$KIT_ASSETS/statusline.cjs" ]]; then
+    sl_target="$KIT_ASSETS/statusline.cjs"; sl_source="kit-asset-fallback (nothing installed yet — fresh target)"
+  else
+    record_probe "statusline-truth" FAIL "neither installed .claude/helpers/statusline.cjs nor kit assets/statusline.cjs present"; return
   fi
   local driver res
   driver="$(mktemp)"
@@ -495,15 +732,15 @@ child.on('exit', () => {
   finish('PASS|vectorCount ' + sw.vectorCount + ' ~ sqlite ' + indep + '; testCases ' + t.testCases + ' >= testFiles ' + t.testFiles + '; regex-scan' + fb);
 });
 NODE
-  res="$(node "$driver" "$KIT_ASSETS/statusline.cjs" "$TARGET_DIR" "$swarmdb" \
+  res="$(node "$driver" "$sl_target" "$TARGET_DIR" "$swarmdb" \
     "${GROOT:+$GROOT/ruflo/node_modules/better-sqlite3}" 2>/dev/null)"
   rm -f "$driver"
   local verdict detail
   verdict="${res%%|*}"; detail="${res#*|}"
   case "$verdict" in
-    PASS) record_probe "statusline-truth" PASS "$detail" ;;
-    FAIL) record_probe "statusline-truth" FAIL "$detail" ;;
-    *)    record_probe "statusline-truth" FAIL "render probe inconclusive (${res:-no output})" ;;
+    PASS) record_probe "statusline-truth" PASS "[$sl_source] $detail" ;;
+    FAIL) record_probe "statusline-truth" FAIL "[$sl_source] $detail" ;;
+    *)    record_probe "statusline-truth" FAIL "[$sl_source] render probe inconclusive (${res:-no output})" ;;
   esac
 }
 
@@ -613,9 +850,29 @@ run_x2() {
     }
     const vec=o=>o.probes.map(p=>p.name+":"+p.verdict).join("|");
     const stable=vec(p1)===vec(p2);
-    const hasFail=(p1.failed>0)||(p2.failed>0);
+    // F3 escalation predicate (see file header): a probe whose WARN detail
+    // carries the "[noresp-timeout]" marker means "invoked, no valid answer
+    // within timeout" — never an absent-by-design or benign-empty WARN (those
+    // are never marked). If that SAME marked probe:WARN repeats identically
+    // in BOTH passes (only checked when the vector is already stable — an
+    // unstable flip is its own, separate UNSTABLE verdict), a persistent
+    // no-answer is no longer distinguishable from a permanently wedged
+    // component, so it escalates to FAIL for gating purposes.
+    const MARKER="[noresp-timeout]";
+    const escalated=[];
+    if(stable){
+      for(let i=0;i<p1.probes.length;i++){
+        const a=p1.probes[i], b=p2.probes[i];
+        if(a&&b&&a.name===b.name&&a.verdict==="WARN"&&b.verdict==="WARN"
+           &&typeof a.detail==="string"&&a.detail.includes(MARKER)
+           &&typeof b.detail==="string"&&b.detail.includes(MARKER)){
+          escalated.push(a.name);
+        }
+      }
+    }
+    const hasFail=(p1.failed>0)||(p2.failed>0)||(escalated.length>0);
     const verdict=hasFail?"FAILED":(stable?"PROVED":"UNSTABLE");
-    process.stdout.write(JSON.stringify({pass1:p1,pass2:p2,stable,verdict}));
+    process.stdout.write(JSON.stringify({pass1:p1,pass2:p2,stable,verdict,escalated}));
   ')"
 
   local VERDICT
@@ -641,10 +898,19 @@ run_x2() {
       }
     ' 2>/dev/null
     echo ""
+    local ESCALATED
+    ESCALATED="$(node -e 'try{const r=JSON.parse(process.argv[1]);process.stdout.write((r.escalated||[]).join(", "))}catch(e){}' "$RESULT" 2>/dev/null)"
+    if [[ -n "$ESCALATED" ]]; then
+      echo -e "  ${RED}! ESCALATED${NC} (stable WARN, live-but-unresponsive both passes -> treated as FAIL): $ESCALATED"
+    fi
     case "$VERDICT" in
       PROVED)   echo -e "  ${GREEN}✓ PROVED${NC} — both passes clean, verdict vectors identical" ;;
       UNSTABLE) echo -e "  ${YELLOW}! UNSTABLE${NC} — probe verdicts differ between passes (non-deterministic)" ;;
-      *)        echo -e "  ${RED}✗ FAILED${NC} — at least one probe FAILed (see table)" ;;
+      *)        if [[ -n "$ESCALATED" ]]; then
+                  echo -e "  ${RED}✗ FAILED${NC} — escalated stable WARN(s) above (no probe raw-FAILed)"
+                else
+                  echo -e "  ${RED}✗ FAILED${NC} — at least one probe FAILed (see table)"
+                fi ;;
     esac
     echo "============================================"
   fi

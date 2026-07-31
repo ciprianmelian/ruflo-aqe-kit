@@ -13,6 +13,9 @@ set -uo pipefail
 # Overall exit = setup's proof verdict AND the preservation verdict:
 #   0  setup PROVED and no table shrank
 #   2  preservation VIOLATED (a baselined table shrank) — takes precedence
+#   3  preservation NOT ASSESSABLE — the baseline (or a live recount) had an
+#      unusable/unreadable store; this is NOT graded PRESERVED (F8: an empty
+#      or unreadable count set is not evidence that nothing shrank)
 #   *  otherwise setup's own exit code
 #
 # Usage:
@@ -51,21 +54,54 @@ BASELINE="$TARGET_DIR/.claude-flow/data/adoption-baseline.json"
 # ── Preservation diff (the receipt) ──────────────────────────────────────────
 # Reads the baseline pointer, recounts every baselined table via kit_sqlite_ro
 # (a missing db/table recounts as 0 — that IS a shrink if it had rows), prints
-# the preservation table, and sets PRESERVE_VERDICT=PRESERVED|VIOLATED.
-# Returns 0 on PRESERVED, 1 on VIOLATED. Testable standalone via --verify-only.
+# the preservation table, and sets PRESERVE_VERDICT=PRESERVED|VIOLATED|
+# NOT ASSESSABLE. Returns 0 PRESERVED / 1 VIOLATED / 2 no-baseline (usage
+# error) / 3 NOT ASSESSABLE. Testable standalone via --verify-only.
+#
+# F8 fix (both directions of the vacuous-receipt hole):
+#   (a) baseline-side: snapshot.sh (Patch B7) now marks a store UNREADABLE in
+#       the baseline instead of writing an empty "{}" when its enumeration
+#       failed. Any store so marked means the baseline cannot certify that
+#       store never shrank — this must NOT read as "fresh target, nothing can
+#       shrink" and must NOT be graded PRESERVED.
+#   (b) recount-side: a single failed recount query used to default `after` to
+#       0, which reads as a full shrink of a real store — a false VIOLATED on
+#       a momentary/transient failure. Now: retry once, and if still unusable
+#       mark that table UNREADABLE-THIS-INSTANT rather than 0 — it is excluded
+#       from the shrink comparison and instead forces NOT ASSESSABLE (never a
+#       silent pass, never a false violation).
 PRESERVE_VERDICT=""
 preservation_diff() {
-  local baseline="$1" shrank=0 rows=0
+  local baseline="$1" shrank=0 rows=0 unassessable=0
   [[ -f "$baseline" ]] || { fail "no adoption baseline at $baseline — run 'ruflo-kit snapshot' (or full 'adopt') first"; return 2; }
   header "receipt" "preservation diff vs $baseline"
   printf "  %-28s %-28s %10s -> %-10s %s\n" "STORE" "TABLE" "BEFORE" "AFTER" "DELTA"
-  local store tbl before after delta sign tq
-  while IFS=$'\t' read -r store tbl before; do
+  local kind store tbl before after delta sign tq
+  local -a baseline_unreadable=()
+  while IFS=$'\t' read -r kind store tbl before; do
+    [[ -z "$kind" ]] && continue
+    if [[ "$kind" == "UNREADABLE" ]]; then
+      baseline_unreadable+=("$store")
+      continue
+    fi
     [[ -z "$store" ]] && continue
     rows=$((rows + 1))
     tq="$(printf '%s' "$tbl" | sed 's/"/""/g')"
-    after="$(kit_sqlite_ro "$TARGET_DIR/$store" "SELECT COUNT(*) FROM \"$tq\";" 2>/dev/null | head -1)"
-    [[ "$after" =~ ^[0-9]+$ ]] || after=0
+    if [[ ! -f "$TARGET_DIR/$store" ]]; then
+      # Genuinely gone — this IS real shrinkage if it had rows (deliberate:
+      # the comment this replaces already called this out as intentional).
+      after=0
+    else
+      after="$(kit_sqlite_ro "$TARGET_DIR/$store" "SELECT COUNT(*) FROM \"$tq\";" 2>/dev/null | head -1)"
+      if [[ ! "$after" =~ ^[0-9]+$ ]]; then
+        after="$(kit_sqlite_ro "$TARGET_DIR/$store" "SELECT COUNT(*) FROM \"$tq\";" 2>/dev/null | head -1)"   # retry once
+      fi
+      if [[ ! "$after" =~ ^[0-9]+$ ]]; then
+        unassessable=$((unassessable + 1))
+        printf "  %-28s %-28s %10s -> %-10s %s\n" "$store" "$tbl" "$before" "UNREADABLE" "not assessable (recount failed twice; db present)"
+        continue
+      fi
+    fi
     delta=$((after - before))
     sign="+"; [[ "$delta" -lt 0 ]] && sign=""
     if [[ "$after" -lt "$before" ]]; then
@@ -77,17 +113,35 @@ preservation_diff() {
   done < <(node -e '
     const fs = require("fs");
     const b = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-    for (const [store, tables] of Object.entries(b.counts || {}))
-      for (const [t, n] of Object.entries(tables || {}))
-        console.log(store + "\t" + t + "\t" + n);
+    for (const s of (b.unreadableStores || [])) console.log("UNREADABLE\t" + s + "\t\t");
+    for (const [store, tables] of Object.entries(b.counts || {})) {
+      if (typeof tables !== "object" || tables === null) continue;   // e.g. "UNREADABLE" marker string
+      for (const [t, n] of Object.entries(tables))
+        console.log("TABLE\t" + store + "\t" + t + "\t" + n);
+    }
   ' "$baseline" 2>/dev/null)
-  [[ "$rows" -eq 0 ]] && info "baseline holds no table counts (fresh target) — nothing can shrink"
+
+  if [[ "${#baseline_unreadable[@]}" -gt 0 ]]; then
+    for s in "${baseline_unreadable[@]}"; do
+      warn "baseline marks '$s' UNREADABLE at snapshot time (enumeration failed) — preservation for this store is NOT ASSESSABLE, not assumed fine"
+    done
+  fi
   echo ""
   if [[ "$shrank" -eq 1 ]]; then
     PRESERVE_VERDICT="VIOLATED"
     fail "MEMORY-PRESERVE-PROOF-V1: VIOLATED — at least one baselined table shrank"
     return 1
   fi
+  if [[ "${#baseline_unreadable[@]}" -gt 0 || "$unassessable" -gt 0 ]]; then
+    PRESERVE_VERDICT="NOT ASSESSABLE"
+    warn "MEMORY-PRESERVE-PROOF-V1: NOT ASSESSABLE — ${#baseline_unreadable[@]} baseline store(s) unreadable at snapshot time + $unassessable table(s) unreadable on recount. No shrink was OBSERVED, but this is not the same as PRESERVED — re-run 'ruflo-kit snapshot' when the enumeration issue clears, then re-verify."
+    return 3
+  fi
+  # Only claim "fresh target, nothing can shrink" when we positively know
+  # there were zero baselined tables AND nothing was unreadable — not merely
+  # because the loop above never incremented `rows` (F8: those are different
+  # states and used to be conflated).
+  [[ "$rows" -eq 0 ]] && info "baseline holds no table counts (fresh target — no learning stores existed at snapshot time) — nothing can shrink"
   PRESERVE_VERDICT="PRESERVED"
   pass "MEMORY-PRESERVE-PROOF-V1: PRESERVED — no baselined table shrank"
   return 0
@@ -102,6 +156,7 @@ if [[ "$VERIFY_ONLY" -eq 1 ]]; then
   preservation_diff "$BASELINE"; rc=$?
   [[ "$rc" -eq 2 ]] && exit 1     # no baseline — usage error, not a violation
   [[ "$rc" -eq 1 ]] && exit 2     # VIOLATED
+  [[ "$rc" -eq 3 ]] && exit 3     # NOT ASSESSABLE
   exit 0
 fi
 
@@ -175,6 +230,8 @@ echo "  preservation: ${PRESERVE_VERDICT}"
 echo "  capture arm:  ${CAPTURE_PARITY}"
 echo ""
 
-# Overall exit: VIOLATED dominates (exit 2); else setup's proof verdict.
-[[ "$DIFF_RC" -ne 0 ]] && exit 2
+# Overall exit: VIOLATED dominates (exit 2), then NOT ASSESSABLE (exit 3);
+# else setup's proof verdict.
+[[ "$DIFF_RC" -eq 1 ]] && exit 2
+[[ "$DIFF_RC" -eq 3 ]] && exit 3
 exit "$SETUP_RC"

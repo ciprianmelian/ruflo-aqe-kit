@@ -27,8 +27,30 @@
 #
 # The target path is optional and defaults to $RUFLO_KIT_TARGET, else $(pwd).
 # Flags (--dry-run/--force/--reactivate) may appear before or after the path.
+# Every verb accepts -h/--help and NEVER performs its work when given it — see
+# _kit_has_help_flag below. `ruflo-kit help <verb>` is also accepted and shows
+# that verb's own usage. A target that does not already exist requires an
+# absolute path or --new-target (only meaningful for setup/init) — a typo or
+# a bare word like "help" is refused, never silently turned into a new
+# project — see _kit_check_target_exists below.
 # ============================================================================
 set -uo pipefail
+
+# ── Pipe-safety for every kit child process (VERB-SAFETY-V1, B7 DEFECT 1b) ──
+# Field incident: `ruflo-kit upgrade --help | head -50` truncated output, the
+# reader (`head`) closed its end early, and the still-writing `npm install`
+# (mid native build) was killed outright by SIGPIPE — leaving a broken global
+# package that had to be manually repaired. This kit already hit the sibling
+# failure mode once (commit 3cff08e: under `pipefail`, an early-exiting
+# `grep -q` SIGPIPEd a `pgrep` earlier in the same pipeline and inverted a
+# FOUND daemon to "none"). Ignoring SIGPIPE here means a downstream reader
+# closing early turns into an ordinary EPIPE write() error for any child this
+# process execs or forks — which well-behaved CLIs (npm, git, curl, sqlite3)
+# already check and handle gracefully — instead of an asynchronous, uncatchable
+# kill mid-write. SIG_IGN (unlike a trap function) survives exec(), so this
+# protects `exec bash lib/<verb>.sh` and everything IT forks too, without
+# touching any lib/*.sh.
+trap '' PIPE
 
 # Resolve KIT_DIR through symlinks so a global `ruflo-kit` on PATH (a symlink
 # into the real clone) still finds lib/ assets/ tools/. macOS bash 3.2 has no
@@ -73,43 +95,504 @@ Commands:
   harvest        Replay AQE experiences into the ruflo substrate
   version        Show kit git sha + detected ruflo / agentic-qe versions
   self-update    git pull the kit clone (fast-forward only)
-  help           Show this help
+  help [verb]    Show this help, or a specific verb's usage (e.g. help sync)
 
-Run a command with -h for its own flags. Docs: $KIT_DIR/docs/
+Run a command with -h/--help for its own usage, flags, and whether it mutates
+the target / starts processes / costs money — it is answered directly by this
+dispatcher and never runs the command's actual work. Docs: $KIT_DIR/docs/
 EOF
+}
+
+# ── Verb safety (VERB-SAFETY-V1, B7 DEFECT 1a) ──────────────────────────────
+# lib/common.sh's kit_resolve() parses -h/--help into KIT_WANT_HELP, but only
+# THREE of the ~18 lib/*.sh scripts (adopt.sh, init.sh, snapshot.sh) actually
+# check that flag before doing real work — every other verb (upgrade, setup,
+# sync, fix-*, session, health, ...) silently ignores it and runs to
+# completion. Field incident: a teammate ran `ruflo-kit upgrade --help` to
+# learn the flags; upgrade.sh never looks at KIT_WANT_HELP, so it executed
+# Phase A — a full global `npm install -g ruflo` — instead of printing help.
+#
+# Rather than patch KIT_WANT_HELP-checking into N lib scripts (and every
+# future one), the fix lives ONCE at the single chokepoint every verb passes
+# through: this dispatcher. Each case arm below checks for -h/--help BEFORE
+# exec'ing/sourcing its lib/*.sh — so a help request is honored regardless of
+# whether the target script itself would have honored it.
+_kit_has_help_flag() {
+  local a
+  for a in "$@"; do
+    case "$a" in -h|--help) return 0 ;; esac
+  done
+  return 1
+}
+
+# ── Target-resolution safety (VERB-SAFETY-V1 round 2, B7b) ─────────────────
+# Field incident: something of the shape `<verb> help` (e.g. `init help`,
+# `sync help` — a critic asking "what does this verb do" the way many CLIs
+# accept `tool subcommand help`) was NOT a recognized -h/--help token (round
+# 1 only catches exact -h/--help), so lib/common.sh's kit_resolve() did what
+# it always does with an unrecognized bare word: silently accepted it AS THE
+# TARGET PATH. For `init`/`setup` — the only two verbs without a kit_require_
+# target guard, because they are meant to bootstrap a codebase that may not
+# have the tooling yet — that target then got a REAL project tree written
+# into it: `./help/` appeared with .agentic-qe/, .claude/, .claude-flow/,
+# .swarm/, .mcp.json, agentdb.db, ruvector.db. Reproduced live in a sandbox:
+# `ruflo-kit init help` resolves "target: <cwd>/help" and — confirmed
+# separately — lib/init.sh unconditionally `mkdir -p`s that path BEFORE its
+# own --dry-run gate, so even a dry-run physically creates the directory.
+#
+# This is DEFECT 1's shape generalized past -h/--help: ANY bare word that
+# happens not to already exist as a directory is, to kit_resolve, indistin-
+# guishable from a deliberately-typed new-project path. Rather than guess
+# every reserved/ambiguous word (help, version, status, a stray -v, a lone
+# "-", ...) one at a time, the fix is structural: a target that does not
+# already exist requires an explicit, unambiguous opt-in — an ABSOLUTE path,
+# or (for the two verbs actually designed to create a new target) the
+# explicit --new-target flag. Everything else refuses with a clear message
+# instead of silently bootstrapping a phantom project. This mirrors (does not
+# call — the dispatcher does not source common.sh, see the kit self-audit's
+# F9.7 duplication note) kit_resolve's own flag-recognition set exactly, so
+# it never disagrees with what the real script would have picked as target.
+_kit_first_positional() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --dry-run|--force|--reactivate|--json|-h|--help) ;;
+      --*) ;;
+      *) [[ -n "$a" ]] && { printf '%s' "$a"; return 0; } ;;
+    esac
+  done
+  return 1
+}
+
+_kit_is_known_verb() {
+  case "$1" in
+    setup|adopt|snapshot|status|sync|proof|init|fix-ruflo|fix-aqe|fix-brain| \
+    fix-statusbar|dashboard|session|session-init|health|upgrade| \
+    verify-learning|fix-learning|bench|harvest|version|self-update) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _kit_target_exists_or_refuse <verb> <allow-new 0|1> <candidate> "$@" — the
+# VALIDATION rule, split from candidate DERIVATION (which differs by verb —
+# see below) so there is exactly one implementation of "is this target
+# acceptable" regardless of which verb's argument shape produced it.
+# <candidate> is the resolved target string, ALWAYS an absolute default (cwd
+# or $RUFLO_KIT_TARGET) when the caller found no explicit positional arg —
+# never empty. Exit 0 = safe to proceed, 1 = refused (caller must exit 1).
+_kit_target_exists_or_refuse() {
+  local verb="$1" allow_new="$2" tgt="$3"; shift 3
+  case "$tgt" in /*) return 0 ;; esac                          # absolute path (incl. resolved defaults): always allowed
+  local abs; abs="$(pwd)/$tgt"
+  [[ -d "$abs" ]] && return 0                                  # already exists: no opt-in needed
+  if [[ "$allow_new" -eq 1 ]]; then
+    local a; for a in "$@"; do [[ "$a" == "--new-target" ]] && return 0; done
+  fi
+  echo "ruflo-kit $verb: target '$tgt' does not exist as a directory." >&2
+  if [[ "$allow_new" -eq 1 ]]; then
+    echo "  To create a NEW project there, pass an absolute path or add --new-target." >&2
+  else
+    echo "  '$verb' operates on an EXISTING codebase and never creates one — check the path." >&2
+  fi
+  echo "  If you meant to ask for help instead: ruflo-kit help $verb   or   ruflo-kit $verb --help" >&2
+  return 1
+}
+
+# _kit_check_target_exists <verb> <allow-new 0|1> "$@" — for every verb that
+# goes through kit_resolve's multi-arg scan (_kit_first_positional above).
+# allow-new=1 only for setup/init (the two verbs documented to bootstrap a
+# brand-new target); every other verb operates on an EXISTING codebase.
+_kit_check_target_exists() {
+  local verb="$1" allow_new="$2"; shift 2
+  local tgt; tgt="$(_kit_first_positional "$@")" || tgt="${RUFLO_KIT_TARGET:-$(pwd)}"
+  _kit_target_exists_or_refuse "$verb" "$allow_new" "$tgt" "$@"
+}
+
+# ── First-arg-only verbs: bench/dashboard/harvest (VERB-SAFETY-V1 round 3) ──
+# These three bypass kit_resolve entirely (they cd into the target, then exec
+# a node tool — see the case arms below) and have their OWN, much simpler
+# resolution rule, already written inline at each call site before round 2:
+# "$1 is the target IFF it doesn't look like a flag; otherwise default to
+# $RUFLO_KIT_TARGET/cwd". Round-2's guard used the kit_resolve-style multi-arg
+# SCAN for these too, which finds the first non-flag token ANYWHERE in the
+# args — wrong for these verbs, because their real resolver never looks past
+# $1. `dashboard --port 3939 .` has non-flag token "3939" (dashboard.cjs's own
+# `process.argv.indexOf('--port')` consumes it as the port value, scanning
+# the WHOLE argv rather than a positional walk) sitting where the scan expects
+# a target, so it was misread as the target and refused — a false positive
+# that broke a previously-working invocation (round-3 critic finding).
+#
+# Fix: give these three verbs their own candidate-DERIVATION that mirrors
+# their real one-line rule exactly, expressed as ONE predicate function that
+# BOTH the guard and the actual cd-target/shift logic call — not a second,
+# separately-maintained list of "which flags take a value" (that list would
+# need updating every time bench/dashboard/harvest grows a new flag, and
+# forgetting to update it is exactly how this regression happened). Because
+# the real resolution call sites below now call this same predicate instead
+# of re-deriving it inline, the guard and the actual behavior cannot diverge.
+_kit_firstarg_is_target() { [[ $# -gt 0 && "$1" != --* ]]; }
+_kit_firstarg_resolve() {
+  if _kit_firstarg_is_target "$@"; then printf '%s' "$1"
+  else printf '%s' "${RUFLO_KIT_TARGET:-$(pwd)}"
+  fi
+}
+_kit_check_target_exists_firstarg() {
+  local verb="$1" allow_new="$2"; shift 2
+  local tgt; tgt="$(_kit_firstarg_resolve "$@")"
+  _kit_target_exists_or_refuse "$verb" "$allow_new" "$tgt" "$@"
+}
+
+# Per-verb usage: what it does, its flags, and the two facts an operator most
+# needs before running something unfamiliar — does it MUTATE the target, and
+# can it START PROCESSES / cost money (network, native builds, LLM calls).
+_kit_verb_help() {
+  case "$1" in
+    setup) cat <<'EOF'
+Usage: ruflo-kit setup <target> [--with-brain-kb] [--refresh-brain-kb] [--skip-install] [--json] [--dry-run] [--new-target]
+
+  Fresh machine -> proved working stack, one verb: prereqs -> global installs
+  -> init -> heal (sync) -> optional brain KB -> proof (x2). Idempotent — a
+  second run on a healthy machine changes nothing. <target> must already
+  exist as a directory UNLESS it is an absolute path or --new-target is
+  given — a nonexistent relative target is refused rather than silently
+  bootstrapped (a typo or a bare word like "help" must never create a
+  phantom project).
+  Mutates target:   YES (writes config/dotfiles into <target>; installs global
+                    npm packages on the machine)
+  Starts daemon:    NO — setup NEVER starts or stops the ruflo daemon
+  Billed / network: installs + optional brain KB fetch need network; no
+                    billed LLM calls
+EOF
+    ;;
+    adopt) cat <<'EOF'
+Usage: ruflo-kit adopt <target> [--dry-run] [--verify-only]
+
+  snapshot (baseline) -> setup (NEVER --force) -> recount every baselined
+  table -> preservation verdict PRESERVED / VIOLATED / NOT ASSESSABLE.
+  Refuses --force outright — that guarantee is the point of this verb.
+  --verify-only: just recount + diff against the existing baseline (no
+  snapshot/setup run — safe to invoke any time).
+  Mutates target:   YES (via setup), unless --verify-only (then read-only)
+  Starts daemon:    NO
+  Billed / network: same as setup, unless --verify-only (then none)
+EOF
+    ;;
+    snapshot) cat <<'EOF'
+Usage: ruflo-kit snapshot <target> [--dry-run]
+
+  WAL-safe online backup + per-table row-count manifest of the learning
+  stores (.swarm/memory.db, .agentic-qe/memory.db, agentdb.db, RVF
+  artifacts), written OUTSIDE the target under ~/.ruflo-kit/backups/. Also
+  writes a baseline pointer into <target>/.claude-flow/data/ for a later
+  `adopt`. A store whose per-table counts cannot be read is reported LOUDLY
+  (exit nonzero) — it is never written into the manifest as an empty "{}".
+  Mutates target:   only <target>/.claude-flow/data/adoption-baseline.json
+                    (a pointer file) — the live stores are opened read-only
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    status) cat <<'EOF'
+Usage: ruflo-kit status <target> [--json] [--hints] [--forensics]
+
+  One-screen disk-derived truth: versions, sentinels, daemon (via pgrep),
+  MCP servers, learning-store liveness. --json is always valid JSON.
+  --forensics appends a read-only manual-install evidence report (plain-text
+  only — --json ignores it).
+  Mutates target:   NO (fully read-only)
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    sync) cat <<'EOF'
+Usage: ruflo-kit sync <target> [--dry-run]
+
+  One-verb heal: runs the fix cascade in order (fix-ruflo -> fix-aqe ->
+  fix-statusbar -> fix-brain -> verify-learning) and prints one summary
+  table. Exit is nonzero only when a stage HARD-fails.
+  Mutates target:   YES (whatever the fix stages individually do)
+  Starts daemon:    NO
+  Billed / network: installs may need network; no billed LLM calls
+EOF
+    ;;
+    proof) cat <<'EOF'
+Usage: ruflo-kit proof <target> [--single] [--json] [--dry-run]
+
+  15-probe disk-evidence proof of the stack, run TWICE by default (env -i on
+  pass 2) — exit 0 only when both passes agree PROVED. --single runs one
+  pass.
+  Mutates target:   mostly read-only; P8 exercises the statusLine command,
+                    which can restore the statusline + append to its guard
+                    log as a documented side effect
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    init) cat <<'EOF'
+Usage: ruflo-kit init <target> [--force] [--reactivate] [--dry-run] [--new-target]
+
+  First-time bootstrap of ruflo + Agentic QE + AgentDB in <target>.
+  Idempotent by default (skips completed steps). --force re-inits
+  EVERYTHING — DESTRUCTIVE to existing learning stores; prefer `adopt` for an
+  existing codebase. --reactivate re-runs only activation + daemon policy.
+  <target> must already exist as a directory UNLESS it is an absolute path
+  or --new-target is given (init is the one verb genuinely meant to
+  bootstrap a brand-new project) — a nonexistent relative target is
+  otherwise refused, never silently created (field incident: `init help`
+  wrote a full phantom project tree to ./help/).
+  Mutates target:   YES; --force can RESET existing learning stores
+  Starts daemon:    NO (only reports/policies it)
+  Billed / network: installs may need network; no billed LLM calls
+EOF
+    ;;
+    fix-ruflo) cat <<'EOF'
+Usage: ruflo-kit fix-ruflo <target> [--dry-run]
+
+  Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup in <target>
+  (version pins, sentinels, dist patches).
+  Mutates target:   YES (config + dist patches)
+  Starts daemon:    NO
+  Billed / network: no billed LLM calls
+EOF
+    ;;
+    fix-aqe) cat <<'EOF'
+Usage: ruflo-kit fix-aqe <target> [--dry-run]
+
+  Codify Agentic QE hardening + install .claude helpers/commands in <target>.
+  Mutates target:   YES (.claude/ helpers, config)
+  Starts daemon:    NO
+  Billed / network: no billed LLM calls
+EOF
+    ;;
+    fix-brain) cat <<'EOF'
+Usage: ruflo-kit fix-brain <target> [--download] [--refresh] [--allow-unsigned] [--dry-run]
+
+  Register the vendored ruvnet-brain search_ruvnet MCP server (MCP-only — no
+  hooks/launchd/plugin install; zero always-on cost). --download fetches the
+  Ed25519-verified KB; --refresh additionally replaces a stale KB in place.
+  Neither download ever happens implicitly.
+  Mutates target:   YES (.mcp.json entry); --download/--refresh also write
+                    into the shared KB cache (~/.cache/ruvnet-brain/kb)
+  Starts daemon:    NO
+  Billed / network: --download/--refresh fetch a GB-class KB over the
+                    network; no billed LLM calls
+EOF
+    ;;
+    fix-statusbar) cat <<'EOF'
+Usage: ruflo-kit fix-statusbar <target>
+
+  Install/restore the ruflo + Agentic QE v3 statusline from the sha256-
+  verified canonical source.
+  Mutates target:   YES (.claude/helpers/statusline.cjs + settings.json)
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    dashboard) cat <<'EOF'
+Usage: ruflo-kit dashboard <target> [--port N]
+
+  On-demand LOCAL web dashboard: foreground only, dies on Ctrl-C, binds
+  127.0.0.1 only, serves disk-derived truth. Never detaches, never installs
+  launchd/cron.
+  Mutates target:   NO (read-only; serves `status --json` + history files)
+  Starts daemon:    NO — but DOES start a foreground local HTTP server for as
+                    long as it runs (stopped by Ctrl-C, never backgrounded)
+  Billed / network: NO (localhost only)
+EOF
+    ;;
+    session|session-init) cat <<'EOF'
+Usage: ruflo-kit session <target>
+
+  Per-session maintenance: patches, daemon policy check, verification.
+  Mutates target:   YES (whatever the maintenance steps apply)
+  Starts daemon:    NO (policy-only, same contract as setup's S6)
+  Billed / network: no billed LLM calls
+EOF
+    ;;
+    health) cat <<'EOF'
+Usage: ruflo-kit health <target> [--reset] [--dry-run] [--json]
+
+  Growth-delta health check: diffs current state vs the last snapshot, then
+  updates the snapshot. --reset force-rebaselines; --dry-run diffs without
+  updating; --json emits the raw current snapshot only.
+  Mutates target:   YES — writes/updates its own snapshot file, unless
+                    --dry-run or --json (both report-only)
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    upgrade) cat <<'EOF'
+Usage: ruflo-kit upgrade <target> [--dry-run]
+
+  Major ruflo-version migration, Phase A: stops the daemon, snapshots npm
+  caches, runs a REAL GLOBAL `npm install -g ruflo@latest` (native rebuilds
+  included), then re-activates (fix-ruflo + init --reactivate). This is a
+  long-running, network-dependent, MACHINE-WIDE mutation, not just a
+  <target> one — close other Claude Code sessions first (it restarts the
+  live MCP server). This help text is answered WITHOUT running any of that.
+  Mutates target:   YES; ALSO mutates the MACHINE (global npm package)
+  Starts daemon:    stops it if running; does not start it
+  Billed / network: no billed LLM calls, but a real npm registry fetch + a
+                    potentially slow native build
+EOF
+    ;;
+    verify-learning) cat <<'EOF'
+Usage: ruflo-kit verify-learning <target> [--json]
+
+  Read-only learning-loop liveness probes (CI-friendly: nonzero exit if
+  hollow).
+  Mutates target:   NO
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    fix-learning) cat <<'EOF'
+Usage: ruflo-kit fix-learning <target> [--dry-run] [--cleanup [--confirm]]
+
+  Populate/unlock a hollow self-learning loop. --cleanup lists stray stores
+  (dry by default); --cleanup --confirm removes them (backed up first).
+  Mutates target:   YES, unless --dry-run or plain --cleanup (list-only)
+  Starts daemon:    NO
+  Billed / network: no billed LLM calls
+EOF
+    ;;
+    bench) cat <<'EOF'
+Usage: ruflo-kit bench <target> [args passed through to the bench tool]
+
+  Self-improvement bench: a re-runnable, READ-ONLY longitudinal instrument
+  that appends one row to .claude-flow/selfimprove-history.jsonl per run.
+  Mutates target:   appends one history row; the measurement itself is
+                    read-only against the stores/routers
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    harvest) cat <<'EOF'
+Usage: ruflo-kit harvest <target> [args passed through to the harvest tool]
+
+  Batch-replay AQE's recorded experiences into the ruflo substrate (SONA
+  LoRA + AgentDB). Progress tracked in a writable .swarm/harvest-state.json
+  ledger (idempotent).
+  Mutates target:   YES (.swarm/lora-weights.json, agentdb.db, harvest-state
+                    ledger) — the SOURCE experience DB stays read-only
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    version) cat <<'EOF'
+Usage: ruflo-kit version
+
+  Print the kit's git sha/date + detected global ruflo / agentic-qe versions.
+  Mutates target:   NO (takes no target argument)
+  Starts daemon:    NO
+  Billed / network: NO
+EOF
+    ;;
+    self-update) cat <<'EOF'
+Usage: ruflo-kit self-update
+
+  git pull (fast-forward only) the KIT'S OWN clone — never touches a target
+  codebase.
+  Mutates target:   NO target argument at all; mutates the KIT CLONE itself
+  Starts daemon:    NO
+  Billed / network: fetches from the kit's own git remote
+EOF
+    ;;
+    *) echo "ruflo-kit $1: no dedicated help text yet — see 'ruflo-kit help'." ;;
+  esac
 }
 
 cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
-  setup)         exec bash "$KIT_DIR/lib/setup.sh"          "$@" ;;
-  adopt)         exec bash "$KIT_DIR/lib/adopt.sh"          "$@" ;;
-  snapshot)      exec bash "$KIT_DIR/lib/snapshot.sh"       "$@" ;;
-  status)        exec bash "$KIT_DIR/lib/status.sh"         "$@" ;;
-  sync)          exec bash "$KIT_DIR/lib/sync.sh"           "$@" ;;
-  proof)         exec bash "$KIT_DIR/lib/proof.sh"          "$@" ;;
-  init)          exec bash "$KIT_DIR/lib/init.sh"           "$@" ;;
-  fix-ruflo)     exec bash "$KIT_DIR/lib/fix-ruflo.sh"      "$@" ;;
-  fix-aqe)       exec bash "$KIT_DIR/lib/fix-aqe.sh"        "$@" ;;
-  fix-brain)     exec bash "$KIT_DIR/lib/fix-brain.sh"      "$@" ;;
-  fix-statusbar) exec bash "$KIT_DIR/lib/fix-statusbar.sh"  "$@" ;;
-  session|session-init) exec bash "$KIT_DIR/lib/session-init.sh" "$@" ;;
-  health)        exec bash "$KIT_DIR/lib/health.sh"         "$@" ;;
-  upgrade)       exec bash "$KIT_DIR/lib/upgrade.sh"        "$@" ;;
-  verify-learning) exec bash "$KIT_DIR/lib/verify-learning.sh" "$@" ;;
-  fix-learning)  exec bash "$KIT_DIR/lib/fix-learning.sh"   "$@" ;;
+  setup)
+    _kit_has_help_flag "$@" && { _kit_verb_help setup; exit 0; }
+    _kit_check_target_exists setup 1 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/setup.sh"          "$@" ;;
+  adopt)
+    _kit_has_help_flag "$@" && { _kit_verb_help adopt; exit 0; }
+    _kit_check_target_exists adopt 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/adopt.sh"          "$@" ;;
+  snapshot)
+    _kit_has_help_flag "$@" && { _kit_verb_help snapshot; exit 0; }
+    _kit_check_target_exists snapshot 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/snapshot.sh"       "$@" ;;
+  status)
+    _kit_has_help_flag "$@" && { _kit_verb_help status; exit 0; }
+    _kit_check_target_exists status 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/status.sh"         "$@" ;;
+  sync)
+    _kit_has_help_flag "$@" && { _kit_verb_help sync; exit 0; }
+    _kit_check_target_exists sync 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/sync.sh"           "$@" ;;
+  proof)
+    _kit_has_help_flag "$@" && { _kit_verb_help proof; exit 0; }
+    _kit_check_target_exists proof 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/proof.sh"          "$@" ;;
+  init)
+    _kit_has_help_flag "$@" && { _kit_verb_help init; exit 0; }
+    _kit_check_target_exists init 1 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/init.sh"           "$@" ;;
+  fix-ruflo)
+    _kit_has_help_flag "$@" && { _kit_verb_help fix-ruflo; exit 0; }
+    _kit_check_target_exists fix-ruflo 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/fix-ruflo.sh"      "$@" ;;
+  fix-aqe)
+    _kit_has_help_flag "$@" && { _kit_verb_help fix-aqe; exit 0; }
+    _kit_check_target_exists fix-aqe 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/fix-aqe.sh"        "$@" ;;
+  fix-brain)
+    _kit_has_help_flag "$@" && { _kit_verb_help fix-brain; exit 0; }
+    _kit_check_target_exists fix-brain 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/fix-brain.sh"      "$@" ;;
+  fix-statusbar)
+    _kit_has_help_flag "$@" && { _kit_verb_help fix-statusbar; exit 0; }
+    _kit_check_target_exists fix-statusbar 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/fix-statusbar.sh"  "$@" ;;
+  session|session-init)
+    _kit_has_help_flag "$@" && { _kit_verb_help session; exit 0; }
+    _kit_check_target_exists session 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/session-init.sh" "$@" ;;
+  health)
+    _kit_has_help_flag "$@" && { _kit_verb_help health; exit 0; }
+    _kit_check_target_exists health 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/health.sh"         "$@" ;;
+  upgrade)
+    _kit_has_help_flag "$@" && { _kit_verb_help upgrade; exit 0; }
+    _kit_check_target_exists upgrade 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/upgrade.sh"        "$@" ;;
+  verify-learning)
+    _kit_has_help_flag "$@" && { _kit_verb_help verify-learning; exit 0; }
+    _kit_check_target_exists verify-learning 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/verify-learning.sh" "$@" ;;
+  fix-learning)
+    _kit_has_help_flag "$@" && { _kit_verb_help fix-learning; exit 0; }
+    _kit_check_target_exists fix-learning 0 "$@" || exit 1
+    exec bash "$KIT_DIR/lib/fix-learning.sh"   "$@" ;;
   bench)
+    _kit_has_help_flag "$@" && { _kit_verb_help bench; exit 0; }
+    _kit_check_target_exists_firstarg bench 0 "$@" || exit 1
     # tools/ operate on the target's runtime DBs via cwd → cd into the target.
-    t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
+    # Single resolution rule shared with the guard above (_kit_firstarg_*) —
+    # see the round-3 comment there for why this isn't a duplicated flag list.
+    t="$(_kit_firstarg_resolve "$@")"
+    _kit_firstarg_is_target "$@" && shift
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/selfimprove-bench.cjs" "$@" ) ;;
   dashboard)
+    _kit_has_help_flag "$@" && { _kit_verb_help dashboard; exit 0; }
+    _kit_check_target_exists_firstarg dashboard 0 "$@" || exit 1
     # On-demand LOCAL dashboard (DASHBOARD-V1): foreground, read-only,
     # 127.0.0.1-only, Ctrl-C to stop. Never detaches, never billed.
-    t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
+    t="$(_kit_firstarg_resolve "$@")"
+    _kit_firstarg_is_target "$@" && shift
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/dashboard.cjs" "$@" ) ;;
   harvest)
-    t="${1:-${RUFLO_KIT_TARGET:-$(pwd)}}"; [[ "$t" == --* ]] && t="${RUFLO_KIT_TARGET:-$(pwd)}" || shift 2>/dev/null || true
+    _kit_has_help_flag "$@" && { _kit_verb_help harvest; exit 0; }
+    _kit_check_target_exists_firstarg harvest 0 "$@" || exit 1
+    t="$(_kit_firstarg_resolve "$@")"
+    _kit_firstarg_is_target "$@" && shift
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/aqe-harvest.cjs" "$@" ) ;;
   version|--version|-v)
+    _kit_has_help_flag "$@" && { _kit_verb_help version; exit 0; }
     kit_sha="$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
     kit_date="$(git -C "$KIT_DIR" log -1 --format=%cd --date=short 2>/dev/null || echo '?')"
     echo "ruflo-kit   $kit_sha ($kit_date)   $KIT_DIR"
@@ -118,12 +601,24 @@ case "$cmd" in
       echo "ruflo       $rv (global)"
     else echo "ruflo       not installed (npm i -g ruflo)"; fi
     av="$(node -p "require('$(npm root -g 2>/dev/null)/agentic-qe/package.json').version" 2>/dev/null || echo 'not installed')"
-    echo "agentic-qe  $av (global)" ;;
+    echo "agentic-qe  $av (global)"
+    exit 0 ;;
   self-update)
+    _kit_has_help_flag "$@" && { _kit_verb_help self-update; exit 0; }
     [ -d "$KIT_DIR/.git" ] || { echo "ruflo-kit: $KIT_DIR is not a git clone — re-run the installer"; exit 1; }
     echo "Updating kit at $KIT_DIR …"
-    git -C "$KIT_DIR" pull --ff-only && echo "Now at $(git -C "$KIT_DIR" rev-parse --short HEAD)."
-    echo "Reminder: after any global ruflo bump, run 'ruflo-kit fix-ruflo <target>' + restart the daemon (see docs Patch 44)." ;;
+    # Own exit code from the pull itself — not from whatever the last echo's
+    # write happens to return (VERB-SAFETY-V1: a downstream reader closing the
+    # pipe early must not make an unrelated trailing echo decide this verb's
+    # reported success/failure).
+    if git -C "$KIT_DIR" pull --ff-only; then
+      echo "Now at $(git -C "$KIT_DIR" rev-parse --short HEAD)."
+      _su_rc=0
+    else
+      _su_rc=1
+    fi
+    echo "Reminder: after any global ruflo bump, run 'ruflo-kit fix-ruflo <target>' + restart the daemon (see docs Patch 44)."
+    exit "$_su_rc" ;;
   "")
     # Bare invocation: lead with a compact status hint (against $(pwd)), then usage.
     if [ -f "$KIT_DIR/lib/status.sh" ]; then
@@ -131,7 +626,19 @@ case "$cmd" in
       bash "$KIT_DIR/lib/status.sh" "$(pwd)" --hints 2>/dev/null || true
       echo ""
     fi
-    usage ;;
-  help|-h|--help) usage ;;
+    usage
+    exit 0 ;;
+  help|-h|--help)
+    # First-class `help <verb>` form (round 2, B7b): show that verb's own
+    # usage block rather than the full command list — and, critically, do
+    # this WITHOUT ever touching kit_resolve/a target: "$1" here is looked up
+    # purely as a help-topic key, never passed on to any lib/*.sh script.
+    v="${1:-}"
+    if [[ -n "$v" ]] && _kit_is_known_verb "$v"; then
+      _kit_verb_help "$v"
+    else
+      usage
+    fi
+    exit 0 ;;
   *) echo "ruflo-kit: unknown command '$cmd'"; echo; usage; exit 1 ;;
 esac

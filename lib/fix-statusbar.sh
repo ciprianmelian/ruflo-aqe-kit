@@ -82,6 +82,103 @@ STATUSLINE_BAK="${STATUSLINE_FILE}.bak"
 # sentinel, so the patch cascade below no-ops; it remains the fallback when the
 # asset is absent or a non-kit base is in use. cmp-skip, .bak, node --check-gated.
 CANON_SL="$KIT_ASSETS/statusline.cjs"
+CANON_SNAP=".claude/helpers/.statusline.canonical.cjs"
+
+# ── Atomic snapshot writer (STATUSLINE-GUARD-RACE-V1, round 2) ─────────────
+# Every write to CANON_SNAP goes through this instead of a bare `cp`: write to
+# a same-directory temp file, then `mv` — a rename within one filesystem is
+# atomic, so a guard tick reading CANON_SNAP concurrently only ever observes
+# the OLD complete file or the NEW complete file, NEVER a partial one. A plain
+# `cp` gives no such guarantee (kit self-audit F2 round-2 finding: a guard
+# tick landing mid-`cp` — or any external interruption — can read a torn
+# snapshot; the guard has no defense of its own against that on the write
+# side, only on the read side (see assets/statusline-guard.cjs's syntax
+# validation) — this closes the write-side half of that gap).
+kit_snapshot_atomic_write() {
+  local src="$1" dst="$2" tmp
+  mkdir -p "$(dirname "$dst")" || return 1
+  tmp="$(mktemp "$(dirname "$dst")/.$(basename "$dst").XXXXXX")" || return 1
+  if cp "$src" "$tmp" && mv -f "$tmp" "$dst"; then
+    return 0
+  else
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
+}
+
+# Same write-temp+rename discipline as above, for arbitrary string content
+# rather than copying a file — used below for the sidecar.
+kit_atomic_write_content() {
+  local content="$1" dst="$2" tmp
+  mkdir -p "$(dirname "$dst")" || return 1
+  tmp="$(mktemp "$(dirname "$dst")/.$(basename "$dst").XXXXXX")" || return 1
+  if printf '%s' "$content" > "$tmp" && mv -f "$tmp" "$dst"; then
+    return 0
+  else
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
+}
+
+# ── Snapshot provenance sidecar (STATUSLINE-GUARD-RACE-V1, round 3, optional
+# ground-truth upgrade) ──────────────────────────────────────────────────────
+# Whenever CANON_SNAP is confirmed to hold exactly the kit asset's bytes,
+# record which kit-asset file it came from and that file's sha256 at this
+# moment. assets/statusline-guard.cjs uses this to verify a restore candidate
+# byte-for-byte against a REAL, currently-existing kit asset when the sidecar
+# resolves — strictly stronger than its anchor+size-floor heuristic — and
+# falls back to that heuristic when it doesn't (moved/deleted kit asset, no
+# sidecar yet, target not colocated with a kit clone). Best-effort: a failed
+# sidecar write never fails the run, it just means the guard uses heuristics
+# only, same as before this upgrade existed.
+CANON_SNAP_SRC="${CANON_SNAP}.source"
+kit_write_snapshot_sidecar() {
+  local sha
+  sha="$(shasum -a 256 "$CANON_SL" 2>/dev/null | awk '{print $1}')"
+  [[ -z "$sha" ]] && return 0
+  kit_atomic_write_content "{\"kitAssetPath\":\"${CANON_SL}\",\"sha256\":\"${sha}\"}" "$CANON_SNAP_SRC"
+}
+
+# ── Step 0.9: snapshot-first ordering guard (STATUSLINE-GUARD-RACE-V1) ──────
+# Kit self-audit F2: STATUSLINE-GUARD-V1 (Patch 68) restores STATUSLINE_FILE
+# from CANON_SNAP on ANY byte drift, on every ~5s statusLine refresh tick, for
+# any target that has previously run fix-statusbar (guard already wired into
+# settings.json). If THIS run writes the new kit asset into STATUSLINE_FILE
+# before CANON_SNAP is updated to match, a guard tick firing in that window
+# sees installed(NEW) != snapshot(OLD) and reverts STATUSLINE_FILE back to
+# OLD — the upgrade is silently lost while Step 1.0/1z/2.5 all report green,
+# because Step 2.5 used to declare the snapshot "current" by comparing it
+# against that very reverted file (circular).
+#
+# Fix: sync CANON_SNAP to the kit asset FIRST, before STATUSLINE_FILE is ever
+# written with the new content. That changes what a guard tick can do during
+# the upgrade window:
+#   - tick before this block runs:      installed=OLD, snapshot=OLD  → no-op
+#   - tick after this block, before     installed=OLD/partial,
+#     Step 1.0/1z finish writing:       snapshot=NEW   → guard copies NEW
+#                                                          into installed EARLY
+#                                                          (heals forward)
+#   - tick after Step 1.0/1z finish:    installed=NEW, snapshot=NEW  → no-op
+# There is no interleaving left where installed reaches NEW while snapshot
+# still reads OLD, so no tick can revert this upgrade. Step 2.5 below re-
+# verifies CANON_SNAP against CANON_SL (the kit asset — ground truth) rather
+# than against STATUSLINE_FILE, closing the circularity for good.
+if [[ -f "$CANON_SL" ]]; then
+  if ! node --check "$CANON_SL" 2>/dev/null; then
+    warn "kit asset statusline.cjs fails node --check — refusing to pre-sync snapshot from it"
+  elif cmp -s "$CANON_SL" "$CANON_SNAP" 2>/dev/null; then
+    pass "canonical snapshot already matches kit asset (no upgrade-race window this run)"
+    kit_write_snapshot_sidecar
+  elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    info "[dry-run] would pre-sync canonical snapshot → assets/statusline.cjs (snapshot-first ordering)"
+  elif kit_snapshot_atomic_write "$CANON_SL" "$CANON_SNAP"; then
+    pass "pre-synced canonical snapshot → assets/statusline.cjs (atomic write-temp+rename; guard now heals forward during this upgrade)"
+    kit_write_snapshot_sidecar
+  else
+    warn "failed to pre-sync canonical snapshot from kit asset"
+  fi
+fi
+
 if [[ -f "$CANON_SL" ]]; then
   if cmp -s "$CANON_SL" "$STATUSLINE_FILE" 2>/dev/null; then
     pass "canonical statusline already installed (assets/statusline.cjs)"
@@ -805,8 +902,28 @@ AQEFN
     _ra_sed 's|hooksColor + hooks.enabled + c.reset|hooksColor + hooksEnabled + c.reset|g'
     _ra_sed "s|c.brightWhite + hooks.total + c.reset + '    ' +|c.brightWhite + hooksTotal + c.reset + '    ' +|g"
     _ra_sed 's|const hooksColor = hooks.enabled > 0|const hooksColor = hooksEnabled > 0|g'
-    # (c) real version (RUFLO_VERSION_FULL detected at script top)
-    _ra_sed "s|let ver = '[0-9][^']*';|let ver = '${RUFLO_VERSION_FULL}';|"
+    # (c) REMOVED (B8, same "superseded by canonical" class as (f)/(h) below):
+    # this used to hardcode RUFLO_VERSION_FULL over getPkgVersion()'s literal
+    # `let ver = '...'` default, back when a freshly-generated (pre-canonical)
+    # base could ship a genuinely stale version number with no live-detection
+    # of its own. Canonical (assets/statusline.cjs) has since replaced that
+    # with `let ver = '0.0.0';   // TRUTH-SL-V1: neutral fallback — live
+    # detection below always wins` — getPkgVersion() now reads the real
+    # installed ruflo's package.json (global node_modules, plugin marketplace,
+    # local node_modules — see getPkgVersion's pkgPaths) and only falls back
+    # to the neutral literal when NONE of those resolve. Sed-replacing that
+    # literal with RUFLO_VERSION_FULL was therefore always behaviorally inert
+    # on a canonical base (the live lookup finds the identical value whenever
+    # RUFLO_VERSION_FULL itself was successfully detected) — but the
+    # unconditional regex match still fired on EVERY run (no sentinel gated
+    # it at all), textually diverging the installed file from canonical's
+    # checked-in '0.0.0' and making Step 1z "heal statusline drift" every
+    # single time, even on a fully converged target. This was the actual,
+    # persistent cause of B8's false-positive signal — not just the (f)/(h)
+    # RUFLO-INTEL-V2 gate, which only ever produced a one-run echo of this
+    # same underlying problem. If a future non-kit/pre-canonical base is
+    # ever encountered without live pkgVersion detection, patch it directly
+    # in assets/statusline.cjs, not as an unconditional sed here.
     # (d) data overlay + getAQEStats enrichment (idempotent via sentinel)
     if ! grep -q "AQE310-REALIGN-V1" "$STATUSLINE_FILE"; then
       RA_HELP="$(mktemp)"
@@ -925,100 +1042,30 @@ RAUP
         warn "WAL-aware size upgrade produced an invalid statusline — check"
       fi
     fi
-    # (f) RUFLO-INTEL-V1: wire the 🧠 chip to a REAL ruflo intelligence metric
-    # and add a SONA learning-ladder chip. Upstream ruflo never produces
-    # system.intelligencePct from real signal — it reads a never-written
-    # .claude-flow/learning.json then falls back to a .swarm/memory.db file-size
-    # proxy (floor(KB/20)). We overlay it with live MoE routing-accuracy from
-    # `ruflo hooks intelligence stats` (fallback: .claude-flow/neural/stats.json
-    # counts). Ruflo-only — no AQE inputs. Idempotent; needs the realignment base.
-    if grep -q "AQE310-REALIGN-V1" "$STATUSLINE_FILE" && ! grep -q "RUFLO-INTEL-V2" "$STATUSLINE_FILE"; then
-      RA_IN="$(mktemp)"
-      cat > "$RA_IN" <<'RAIN'
-const fs = require('fs'); const f = process.argv[2];
-let s = fs.readFileSync(f, 'utf-8');
-const helper = `
-function _ra_intelligence() {
-  // RUFLO-INTEL-V2: real ruflo-only learning score — trained micro-LoRA delta (sum|B| of
-  // .swarm/lora-weights.json) + real trajectory/pattern counts. NOT ruflo's hardcoded
-  // Routing Accuracy (0.82) / Avg Quality (0.75), which are fixed constants.
-  let traj = 0, patterns = 0, deltaNorm = 0;
-  function _pick(raw, label) {
-    const i = raw.indexOf(label);
-    if (i === -1) return 0;
-    const seg = raw.slice(i + label.length, i + label.length + 40).replace(/[^0-9.]/g, ' ').trim().split(' ')[0];
-    const v = parseFloat(seg);
-    return Number.isFinite(v) ? v : 0;
-  }
-  try {
-    const raw = require('child_process').execSync('ruflo hooks intelligence stats 2>/dev/null', { timeout: 5000, stdio: ['ignore','pipe','ignore'] }).toString();
-    traj = Math.round(_pick(raw, 'Trajectories'));
-    patterns = Math.round(_pick(raw, 'Patterns Learned'));
-  } catch (e) {}
-  if (traj === 0 && patterns === 0) {
-    try {
-      const j = JSON.parse(fs.readFileSync(path.join(CWD, '.claude-flow', 'neural', 'stats.json'), 'utf-8'));
-      traj = j.trajectoriesRecorded || 0; patterns = j.patternsLearned || 0;
-    } catch (e) {}
-  }
-  try {
-    const w = JSON.parse(fs.readFileSync(path.join(CWD, '.swarm', 'lora-weights.json'), 'utf-8'));
-    const B = (w.weights && w.weights.B) || w.B || [];
-    for (let i = 0; i < B.length; i++) deltaNorm += Math.abs(B[i]);
-  } catch (e) {}
-  const pct = Math.min(99, Math.round((deltaNorm > 0 ? 55 * (1 - Math.exp(-deltaNorm)) : 0) + 30 * Math.min(1, traj / 500) + 14 * Math.min(1, patterns / 50)));
-  let tier = 0; for (const t of [50, 150, 350, 700, 1500]) { if (traj >= t) tier++; }
-  return { pct: pct, traj: traj, patterns: patterns, deltaNorm: deltaNorm, tier: tier };
-}
-`;
-if (/function _ra_intelligence\(\)/.test(s)) { s = s.replace(/function _ra_intelligence\(\)[\s\S]*?\n\}/, helper.trim()); } else { s = s.replace('function _ra_agentdb()', helper + 'function _ra_agentdb()'); }
-const ov = "try { const ri = _ra_intelligence(); data.system = Object.assign({}, data.system, { ruflo: ri }); if (ri.pct > 0) data.system.intelligencePct = ri.pct; } catch (e) {}";
-if (s.indexOf('{ ruflo: ri }') === -1) s = s.replace('try { data.agentdb = _ra_agentdb(); } catch (e) {}', 'try { data.agentdb = _ra_agentdb(); } catch (e) {}\n    ' + ov);
-const render = [
-  "// RUFLO-INTEL-V2: SONA/neural learning ladder (Ruflo-only, real signals)",
-  "const _ri = system.ruflo || {};",
-  "if ((_ri.traj || 0) > 0 || (_ri.patterns || 0) > 0) {",
-  "    const _rt = _ri.tier || 0;",
-  "    const _rl = '[' + '\\u25CF'.repeat(_rt) + '\\u25CB'.repeat(5 - _rt) + ']';",
-  "    const _rc = _rt >= 4 ? c.brightGreen : _rt >= 2 ? c.brightYellow : c.dim;",
-  "    let _rln = c.brightPurple + '\\uD83D\\uDCF6 SONA' + c.reset + '    ' + _rc + _rl + c.reset + '  ' + c.brightWhite + (_ri.traj || 0) + c.reset + c.dim + ' traj' + c.reset + '  ' + c.dim + '\\u2502' + c.reset + '  ' + c.brightWhite + (_ri.patterns || 0) + c.reset + c.dim + ' patterns' + c.reset;",
-  "    if ((_ri.deltaNorm || 0) > 0) _rln += '  ' + c.dim + '\\u2502' + c.reset + '  ' + c.cyan + '\\u0394 ' + (_ri.deltaNorm).toFixed(2) + c.reset + c.dim + ' LoRA' + c.reset;",
-  "    lines.push(_rln);",
-  "  }",
-  "  "
-].join('\n  ');
-if (s.indexOf('RUFLO-INTEL-V') === -1) s = s.replace('// Line 3: Architecture', render + '// Line 3: Architecture');
-// upgrade a pre-existing V1 render's hardcoded Q chip -> real trained-LoRA delta
-s = s.replace(/if \(\(_ri\.quality \|\| 0\) > 0\) _rln \+= [^\n]*/, "if ((_ri.deltaNorm || 0) > 0) _rln += '  ' + c.dim + '\\u2502' + c.reset + '  ' + c.cyan + '\\u0394 ' + (_ri.deltaNorm).toFixed(2) + c.reset + c.dim + ' LoRA' + c.reset;");
-// relabel the pattern-count proxy from "DDD Domains"/"DDD" to honest "Learning"/"Learn"
-s = s.split('DDD Domains').join('Learning');
-s = s.split("c.cyan + 'DDD' + c.reset").join("c.cyan + 'Learn' + c.reset");
-// live-detect the GLOBAL ruflo version (add it first in getPkgVersion pkgPaths).
-// NPM-ROOT-RESOLVE-V1: execPath derivation only trusted when it holds a global
-// ruflo; else `npm root -g` (custom npm prefixes diverge from the execPath guess).
-// Injected self-contained (require()d inline — target statusline scope unknown).
-if (s.indexOf('const pkgPaths = [') !== -1 && s.indexOf("path.join(_gnm, 'ruflo'") === -1) {
-  var _gnmSnippet = "const _gnm = (function () {\n" +
-    "      var _f = require('fs'), _p = require('path');\n" +
-    "      var _d = _p.join(_p.dirname(_p.dirname(process.execPath)), 'lib', 'node_modules');\n" +
-    "      if (_f.existsSync(_p.join(_d, 'ruflo'))) return _d;\n" +
-    "      try {\n" +
-    "        var _o = require('child_process').execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }).toString().trim();\n" +
-    "        if (_o && _f.existsSync(_o)) return _o;\n" +
-    "      } catch (e) { /* npm missing — keep the derivation */ }\n" +
-    "      return _d;\n" +
-    "    })();";
-  s = s.replace('const pkgPaths = [', _gnmSnippet + "\n    const pkgPaths = [\n      path.join(_gnm, 'ruflo', 'package.json'),");
-}
-fs.writeFileSync(f, s);
-RAIN
-      node "$RA_IN" "$STATUSLINE_FILE"; rm -f "$RA_IN"
-      if node --check "$STATUSLINE_FILE" 2>/dev/null && node "$STATUSLINE_FILE" >/dev/null 2>&1; then
-        fix "Wired 🧠 to real trained-LoRA learning score + SONA Δ chip; relabeled DDD->Learning; live version (RUFLO-INTEL-V2)"
-      else
-        warn "RUFLO-INTEL-V2 produced an invalid statusline — check"
-      fi
-    fi
+    # (f) RUFLO-INTEL-V2 injection REMOVED (B8, same stale-sentinel class as
+    # the NPM-ROOT-RESOLVE-V1 removal below it used to sit next to, and kit
+    # self-audit F4). This step's gate was `AQE310-REALIGN-V1 present &&
+    # RUFLO-INTEL-V2 ABSENT` — a negative sentinel meant to make the block
+    # no-op once its own output had landed. But canonical
+    # (assets/statusline.cjs) went on to absorb this step's functionality
+    # directly: a real opts-based `_ra_intelligence(opts)` fed stored
+    # episode/pattern counts (see `_ra_agentdb`/`_ra_swarmdb`), the SONA
+    # render row, and the DDD->Learning relabel — all authored straight into
+    # the asset under "TRUTH-SL-V1"/"RUFLO-INTEL-V3" naming, WITHOUT ever
+    # emitting the literal string "RUFLO-INTEL-V2". The negative half of the
+    # gate was therefore permanently true: this block re-fired on EVERY run,
+    # unconditionally overwriting canonical's current _ra_intelligence()
+    # with this step's OLDER implementation (no opts; a
+    # `ruflo hooks intelligence stats` subprocess call instead of
+    # caller-supplied stored counts) — before the pre-existing, unmodified
+    # Step 1z detected the resulting sha mismatch and reverted the whole
+    # file back to canonical. Net effect, identical to NPM-ROOT-RESOLVE-V1's:
+    # a write immediately undone, plus the misleading "healed statusline
+    # drift" message on every run even when fully converged. If this logic
+    # ever needs a fresh revision, author it directly into
+    # assets/statusline.cjs (ground truth) — a cascade step here can never
+    # outlive Step 1z's re-copy once canonical already carries the
+    # equivalent code.
 
     # (g) AGENTDB-SPLIT-V1: the 📊 AgentDB chip read .swarm/memory.db (ruflo's
     # store) and so UNDERCOUNTED — it ignored the file literally named agentdb.db
@@ -1119,81 +1166,19 @@ RASP
     fi
   fi
 
-  # (h) RUFLO-INTEL-V3: self-IMPROVEMENT row (🔬 SI). Surfaces the precomputed efficacy
-  #     snapshot from .claude-flow/selfimprove-history.jsonl (pure-Node tail read — NO sqlite
-  #     on the render path). HONEST/NEUTRAL by construction: latest-only accuracy (a delta
-  #     renders only when >=2 rows share the latest scorerVersion — a cross-scorer normalization
-  #     artifact can never read as "improvement"), verdict capped at loop:closed/eff:flat (never
-  #     green / up-arrow / eff:+N). Needs the V2 SONA chip as the render anchor. Idempotent
-  #     (gated on getSelfImprove absence), .bak + node --check + restore-on-failure.
-  if [[ -f "$STATUSLINE_FILE" ]] && grep -q "RUFLO-INTEL-V2" "$STATUSLINE_FILE" && ! grep -q "function getSelfImprove" "$STATUSLINE_FILE"; then
-    cp "$STATUSLINE_FILE" "$STATUSLINE_FILE.intelv3-bak"
-    RA_SI="$(mktemp)"
-    cat > "$RA_SI" <<'RASI'
-const fs = require('fs'); const f = process.argv[2];
-let s = fs.readFileSync(f, 'utf-8');
-
-// 1) getSelfImprove() inserted before generateStatusline(). Pure-Node jsonl read; newline
-//    split via String.fromCharCode(10) to avoid any escape ambiguity in this codifier.
-const siFn = `// RUFLO-INTEL-V3: self-IMPROVEMENT snapshot from the precomputed bench history.
-// Pure-Node read of .claude-flow/selfimprove-history.jsonl (no sqlite/subprocess). HONEST:
-// latest-only accuracy; a delta renders only when >=2 rows share the latest scorerVersion
-// (same-scorer guard) so a cross-scorer normalization artifact can never read as improvement.
-function getSelfImprove() {
-  try {
-    const p = path.join(CWD, '.claude-flow', 'selfimprove-history.jsonl');
-    if (!fs.existsSync(p)) return { available: false };
-    const rows = fs.readFileSync(p, 'utf-8').split(String.fromCharCode(10)).map(x => x.trim()).filter(Boolean).map(x => { try { return JSON.parse(x); } catch (e) { return null; } }).filter(r => r && typeof r === 'object');
-    if (!rows.length) return { available: false };
-    const last = rows[rows.length - 1];
-    if (typeof last.accuracyPct !== 'number') return { available: false };
-    let accFirst = null;
-    if (last.scorerVersion) {
-      const same = rows.filter(r => r.scorerVersion === last.scorerVersion && typeof r.accuracyPct === 'number');
-      if (same.length >= 2) accFirst = same[0].accuracyPct;
-    }
-    return { available: true, runs: rows.length, accLast: last.accuracyPct, accFirst: accFirst, rewardDistinct: (typeof last.rewardDistinct === 'number') ? last.rewardDistinct : 0, rewardConstant: last.rewardConstant === true, qSpread: (typeof last.qSpread === 'number') ? last.qSpread : 0 };
-  } catch (e) { return { available: false }; }
-}
-
-`;
-if (s.indexOf('function getSelfImprove') === -1) s = s.replace('function generateStatusline() {', siFn + 'function generateStatusline() {');
-
-// 2) the 🔬 SI render row, inserted before the Architecture line (stable anchor).
-const siRow = [
-  "",
-  "  // RUFLO-INTEL-V3: self-IMPROVEMENT row (honest/neutral efficacy snapshot; never 'improving')",
-  "  const _si = getSelfImprove();",
-  "  if (_si.available) {",
-  "    const _siQs = _si.qSpread.toFixed(2).replace(/^0/, '');",
-  "    const _siAcc = (_si.accFirst != null && _si.accFirst !== _si.accLast)",
-  "      ? c.brightWhite + _si.accLast + '%' + c.reset + c.dim + ' (' + _si.accFirst + '\\u2192' + _si.accLast + ')' + c.reset",
-  "      : c.brightWhite + _si.accLast + '%' + c.reset;",
-  "    const _siChip = _si.rewardConstant",
-  "      ? c.dim + '\\u26AA loop:open' + c.reset",
-  "      : c.brightYellow + '\\u25C8 loop:closed eff:flat' + c.reset;",
-  "    lines.push(",
-  "      c.brightCyan + '\\uD83D\\uDD2C SI' + c.reset + '       ' +",
-  "      c.cyan + 'acc' + c.reset + ' ' + _siAcc + '  ' + c.dim + '\\u2502' + c.reset + '  ' +",
-  "      c.cyan + '\\u25C7' + c.reset + c.brightWhite + _si.rewardDistinct + c.reset + c.dim + ' rwd' + c.reset + '  ' + c.dim + '\\u2502' + c.reset + '  ' +",
-  "      c.cyan + 'Q\\u00B1' + c.reset + c.brightWhite + _siQs + c.reset + '  ' + c.dim + '\\u2502' + c.reset + '  ' +",
-  "      _siChip",
-  "    );",
-  "  }"
-].join('\n');
-if (s.indexOf('RUFLO-INTEL-V3: self-IMPROVEMENT row') === -1) s = s.replace('    // Line 3: Architecture', siRow + '\n    // Line 3: Architecture');
-
-fs.writeFileSync(f, s);
-RASI
-    node "$RA_SI" "$STATUSLINE_FILE"; rm -f "$RA_SI"
-    if ! node --check "$STATUSLINE_FILE" 2>/dev/null || ! node "$STATUSLINE_FILE" </dev/null >/dev/null 2>&1; then
-      warn "RUFLO-INTEL-V3 produced an invalid statusline — restoring"; cp "$STATUSLINE_FILE.intelv3-bak" "$STATUSLINE_FILE"
-    elif ! grep -q "RUFLO-INTEL-V3: self-IMPROVEMENT row" "$STATUSLINE_FILE"; then
-      warn "RUFLO-INTEL-V3: getSelfImprove added but render anchor (// Line 3: Architecture) not found — 🔬 SI row NOT added (statusline format changed; re-check)"
-    else
-      fix "Added 🔬 SI self-improvement row (honest/neutral, latest-only acc) (RUFLO-INTEL-V3)"
-    fi
-  fi
+  # (h) RUFLO-INTEL-V3 self-improvement-row injection REMOVED (B8, alongside
+  # (f) above). Its ONLY live-fire path required `grep -q "RUFLO-INTEL-V2"`
+  # to be true first — which meant either (f)'s now-removed re-injection had
+  # just written that literal string, or canonical itself carried it (it
+  # never did — canonical moved straight to "RUFLO-INTEL-V3" naming). With
+  # (f) gone this gate is permanently false, so the block was already
+  # reachable-but-dead in practice even before removal: canonical bakes
+  # `function getSelfImprove()` and the 🔬 SI render row in directly (see
+  # assets/statusline.cjs), so this step's own idempotency check
+  # (`! grep -q "function getSelfImprove"`) was already false on every
+  # converged run — it just never got the chance to prove that, since its
+  # positive gate never fired first. Same "genuinely obsolete" verdict as
+  # (f): the functionality lives in the canonical asset now, not here.
 
   # ── Step 1e: Verify stdin header field wiring (no auto-inject) ──────────
   # Modern statusline.cjs (>= v3.10.3) ships with getStdinData() + the four
@@ -1340,32 +1325,55 @@ fi
 # Upstream session machinery clobbers statusline.cjs with its stock bar via a
 # DELAYED detached child (observed twice on a fresh target, both ~2-15 min
 # after session start) — a session-start assert loses that race by design.
-# Instead: snapshot the FINAL, node--check-verified statusline.cjs (post patch
-# cascade, so the version chip survives restores) as the pristine dotfile
-# .statusline.canonical.cjs, install the guard, and let Step 3 wire it as the
-# FIRST step of the statusLine command — every ~5s refresh heals before it
-# renders, so no clobber survives a single tick. Restores are logged to
+# Install the guard, and let Step 3 wire it as the FIRST step of the
+# statusLine command — every ~5s refresh heals before it renders, so no
+# clobber survives a single tick. Restores are logged to
 # .claude-flow/statusline-guard.log (countable evidence, not anecdote).
+#
+# STATUSLINE-GUARD-RACE-V1 (kit self-audit F2): the snapshot value is now
+# pre-synced from the kit asset in Step 0.9, BEFORE STATUSLINE_FILE is ever
+# overwritten with new content — so a guard tick anywhere in the upgrade
+# window heals forward, never backward (full race analysis at Step 0.9).
+# This step's snapshot check therefore verifies CANON_SNAP against CANON_SL
+# — the kit asset, ground truth — and NEVER against STATUSLINE_FILE: the
+# installed file may have JUST been reverted by a guard tick mid-upgrade, and
+# comparing the snapshot to that reverted copy would make this check
+# circular and blind to exactly the loss it exists to catch (this was the
+# defect: "snapshot == installed" reads as current even when both are stale).
+# When no kit asset is available (non-kit-managed base), fall back to
+# snapshotting from the fully-patched STATUSLINE_FILE — there is no earlier
+# ground truth to pre-sync from in that case, same as pre-fix behavior.
 echo -e "\n${CYAN}[2.5/4]${NC} Installing self-healing guard (STATUSLINE-GUARD-V1)"
 GUARD_ASSET="$KIT_ASSETS/statusline-guard.cjs"
 GUARD_FILE=".claude/helpers/statusline-guard.cjs"
-CANON_SNAP=".claude/helpers/.statusline.canonical.cjs"
 if [[ ! -f "$GUARD_ASSET" ]]; then
   warn "kit asset statusline-guard.cjs missing — guard skipped"
 elif [[ ! -f "$STATUSLINE_FILE" ]] || ! node --check "$STATUSLINE_FILE" 2>/dev/null; then
   warn "statusline.cjs absent or fails node --check — refusing to snapshot a broken canonical"
 elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
-  info "[dry-run] would install $GUARD_FILE + snapshot $CANON_SNAP"
+  info "[dry-run] would install $GUARD_FILE + verify snapshot $CANON_SNAP"
 else
   if cmp -s "$GUARD_ASSET" "$GUARD_FILE" 2>/dev/null; then
     pass "guard already installed"
   else
     cp "$GUARD_ASSET" "$GUARD_FILE" && pass "installed statusline-guard.cjs"
   fi
-  if cmp -s "$STATUSLINE_FILE" "$CANON_SNAP" 2>/dev/null; then
+  if [[ -f "$CANON_SL" ]]; then
+    if cmp -s "$CANON_SL" "$CANON_SNAP" 2>/dev/null; then
+      pass "canonical snapshot verified against kit asset (assets/statusline.cjs)"
+      kit_write_snapshot_sidecar
+    elif kit_snapshot_atomic_write "$CANON_SL" "$CANON_SNAP"; then
+      pass "re-synced canonical snapshot → assets/statusline.cjs (was stale, atomic write-temp+rename)"
+      kit_write_snapshot_sidecar
+    else
+      warn "failed to re-sync canonical snapshot from kit asset"
+    fi
+  elif cmp -s "$STATUSLINE_FILE" "$CANON_SNAP" 2>/dev/null; then
     pass "canonical snapshot current"
+  elif kit_snapshot_atomic_write "$STATUSLINE_FILE" "$CANON_SNAP"; then
+    pass "snapshotted verified statusline → .statusline.canonical.cjs (atomic write-temp+rename)"
   else
-    cp "$STATUSLINE_FILE" "$CANON_SNAP" && pass "snapshotted verified statusline → .statusline.canonical.cjs"
+    warn "failed to snapshot statusline → .statusline.canonical.cjs"
   fi
 fi
 

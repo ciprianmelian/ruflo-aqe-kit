@@ -58,9 +58,22 @@ BRAIN_HOME="${RUVNET_BRAIN_HOME:-$HOME/.cache/ruvnet-brain}"
 KB_DIR="${RUVNET_BRAIN_KB:-$BRAIN_HOME/kb}"
 MCP_MARKER="$KB_DIR/forge-mcp-all.mjs"                 # the "brain is unpacked" marker install.mjs uses
 SERVER_MJS="$KIT_DIR/vendor/ruvnet-brain/plugin/mcp/server.mjs"   # vendored thin stdio launcher
-# vendor/ is a local-only checkout (gitignored) — on a clean clone/CI fall back
-# to the kit-tracked copy of the same MIT-licensed 2KB launcher (verified
-# byte-identical to upstream at vendor sync; re-sync when upstream changes it).
+# vendor/ is a local-only checkout (gitignored) — on a clean clone/CI fall back to the
+# kit-tracked copy at $KIT_ASSETS/brain/server.mjs. That copy is an INTENTIONALLY
+# DEGRADED v1-style stdio proxy: it deliberately diverges from upstream's current file,
+# which was rewritten into a stateful v2 "Stable Spine" shell in the 4.0.x line
+# (hot-swap child management, a lease file, a timeout/outage alarm, and two extra
+# CLI-execution tools via a sibling managed-cli-interface.mjs). We deliberately do not
+# vendor v2 — its extra tools + outbound alarm widen the surface past this script's own
+# "one MCP tool" design (BRAIN-MCP-V1). search_ruvnet still works via v1 because the KB's own
+# forge-mcp-all.mjs still answers the same JSON-RPC tool contract this proxy relies on — NOT
+# because that file is unchanged: the same 4.0-series commits gave it a v2-only `brain/warmup`
+# RPC (only v2's hot-swap shell calls it) plus small answer-path tweaks this v1 proxy never
+# triggers and simply forwards along. The compatibility is protocol-level, not byte-identity.
+# The fallback loses hot-swap-without-restart, the outage alarm, and the two ruvnet_cli_*
+# tools. See docs/gauntlet-2026-07-31/brain-ledger.md entry E1 for the full analysis.
+# BRAIN-FALLBACK-DEGRADED-V1 — documented against upstream v4.0.2 (commit 453ae58).
+# Drift tripwire: tests/brain-fallback-drift.test.js.
 [[ -f "$SERVER_MJS" ]] || SERVER_MJS="$KIT_ASSETS/brain/server.mjs"
 MCP_JSON="$TARGET_DIR/.mcp.json"
 

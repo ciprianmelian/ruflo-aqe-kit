@@ -55,7 +55,16 @@ function parseWorkspace(toks) {
   return '?';
 }
 
-// stdin text -> [{pid, startEpoch, workspace}] (now = current epoch seconds).
+// stdin text -> [{pid, startEpoch, workspace, unparsable}] (now = current
+// epoch seconds). A line that doesn't even have the pid-plus-token shape
+// (blank noise, a stray non-ps line) is still silently skipped — that is a
+// distinct, harmless robustness concern. What must NEVER be dropped (F1's
+// honesty doctrine: surface as NOT-ASSESSABLE, never silent absence) is a
+// row that DID come from `ps` (leading pid + a token) but whose token isn't a
+// valid elapsed shape — the macOS malformed-etimes case, where `ps` drops the
+// unrecognized column yet still prints the line, shifting args into that
+// slot. Those come back with unparsable:true and a raw string so
+// classify()/formatRow() can report them explicitly instead of vanishing.
 function parseLines(text, now) {
   const out = [];
   for (const line of String(text).split('\n')) {
@@ -64,8 +73,19 @@ function parseLines(text, now) {
     const m = t.match(/^(\d+)\s+(\S+)\s+(.*)$/);
     if (!m) continue;
     const elapsed = parseElapsed(m[2]);
-    if (!Number.isFinite(elapsed)) continue;
-    out.push({ pid: Number(m[1]), startEpoch: now - elapsed, workspace: parseWorkspace(m[3].split(/\s+/)) });
+    if (!Number.isFinite(elapsed)) {
+      // pid parsed, but the second token isn't a valid elapsed shape — the
+      // macOS malformed-etimes case (ps drops the unrecognized column but
+      // still prints the line, shifting args into m[2]'s position).
+      out.push({ pid: Number(m[1]), startEpoch: NaN, workspace: '?', raw: t, unparsable: true });
+      continue;
+    }
+    out.push({
+      pid: Number(m[1]),
+      startEpoch: now - elapsed,
+      workspace: parseWorkspace(m[3].split(/\s+/)),
+      unparsable: false,
+    });
   }
   return out;
 }
@@ -79,6 +99,9 @@ const normPath = (p) => (p && p !== '?' ? p.replace(/\/+$/, '') || '/' : p);
 function classify(daemons, newestMtime, home) {
   const nhome = normPath(home || '');
   return daemons.map((d) => {
+    if (d.unparsable) {
+      return { pid: d.pid, workspace: d.workspace, startEpoch: d.startEpoch, state: 'UNPARSABLE', tags: [], raw: d.raw };
+    }
     const state = (Number.isFinite(newestMtime) && d.startEpoch < newestMtime) ? 'STALE' : 'FRESH';
     const tags = [];
     const ws = normPath(d.workspace);
@@ -97,6 +120,9 @@ function classify(daemons, newestMtime, home) {
 }
 
 function formatRow(r) {
+  if (r.state === 'UNPARSABLE') {
+    return `pid ${Number.isFinite(r.pid) ? r.pid : '?'} UNPARSABLE (raw: ${r.raw})`;
+  }
   const started = new Date(r.startEpoch * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
   return `pid ${r.pid} ws=${r.workspace} started=${started} ${r.state}${r.tags.length ? ' ' + r.tags.join(' ') : ''}`;
 }
@@ -109,7 +135,11 @@ const REMEDY = 'running pre-patch code — dist patches inert in it until: ' +
 function formatReport(rows) {
   const lines = rows.map(formatRow);
   const stale = rows.filter((r) => r.state === 'STALE').length;
+  const unparsable = rows.filter((r) => r.state === 'UNPARSABLE').length;
   if (stale > 0) lines.push(`WARNING: ${stale} stale-dist daemon(s) ${REMEDY}`);
+  if (unparsable > 0) {
+    lines.push(`NOTE: ${unparsable} daemon row(s) UNPARSABLE — staleness not assessable for them (see raw above)`);
+  }
   return lines;
 }
 

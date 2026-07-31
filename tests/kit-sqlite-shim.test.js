@@ -320,6 +320,9 @@ function mkProofWorld(base, { groot = REAL_GROOT, vectors = 7 } = {}) {
     swarmdb: { vectorCount: vectors },
     tests: { testFiles: 2, testCases: 10, countMethod: 'regex-scan' },
   });
+  // Kit asset kept as the fresh-target fallback (unused here — the target
+  // below always has an installed statusline, which proof.sh's P15 now
+  // renders preferentially per the F6 fix).
   writeExec(path.join(kit, 'assets', 'statusline.cjs'),
     `#!/usr/bin/env node\nif (process.argv.includes('--json')) console.log(${JSON.stringify(payload)});\n`);
 
@@ -333,8 +336,12 @@ function mkProofWorld(base, { groot = REAL_GROOT, vectors = 7 } = {}) {
   sqlite(path.join(target, 'agentdb.db'), 'CREATE TABLE t(x INTEGER);');
   fs.writeFileSync(path.join(target, 'claude-flow.config.json'),
     JSON.stringify({ daemon: { autostart: false } }) + '\n');
+  // INSTALLED statusline — P15 renders this file (F6 fix), not the kit asset.
   fs.writeFileSync(path.join(target, '.claude', 'helpers', 'statusline.cjs'),
-    '// DAEMON-AUTOSTART-3-V1 pin present\n');
+    '#!/usr/bin/env node\n' +
+    '// DAEMON-AUTOSTART-3-V1 pin present\n' +
+    `if (process.argv.includes('--json')) console.log(${JSON.stringify(payload)});\n`);
+  fs.chmodSync(path.join(target, '.claude', 'helpers', 'statusline.cjs'), 0o755);
 
   const rufloStub = `#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then echo "3.32.8"; exit 0; fi

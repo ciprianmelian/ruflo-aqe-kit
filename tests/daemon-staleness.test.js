@@ -19,6 +19,7 @@ const path = require('path');
 
 const TOOL = path.resolve(__dirname, '..', 'tools', 'daemon-staleness.cjs');
 const COMMON = path.resolve(__dirname, '..', 'lib', 'common.sh');
+const PROOF = path.resolve(__dirname, '..', 'lib', 'proof.sh');
 const { parseElapsed, parseWorkspace, parseLines, classify, formatReport, REMEDY } = require(TOOL);
 
 const worlds = [];
@@ -230,5 +231,161 @@ describe('common.sh: kit_daemon_staleness (discovery overridden)', () => {
     expect(lines[0]).toMatch(/^pid 9 ws=\/a started=.* FRESH$/);
     expect(lines[1]).toBe('rc=0');
     expect(out).not.toContain('WARNING');
+  });
+});
+
+// ── F1 falsification: macOS `ps -o etimes=` does not fail-empty ────────────
+// BSD/macOS ps prints "ps: etimes: keyword not found" to STDERR but still
+// emits the line with the etimes column simply missing (args shift into its
+// slot), and exits rc=1. The OLD `[[ -z "$line" ]]` gate in kit_daemon_ps_lines
+// never caught this (non-empty but malformed), so the etime fallback was dead
+// code on macOS and every row failed parseElapsed downstream. Captured
+// VERBATIM on a real macOS host via:
+//   sleep 300 & ps -o pid= -o etimes= -o args= -p $!
+// -> "32984 sleep 300" style output — reproduced below with a realistic
+// daemon argv tail.
+
+describe('daemon-staleness.cjs: F1 macOS malformed-etimes line (falsification fixture)', () => {
+  // A literal capture shape: `ps -o pid= -o etimes= -o args=` on macOS emits
+  // "<pid> <first-arg-token> <rest-of-args...>" — the etimes column vanished,
+  // NOT a blank/placeholder, so token 2 is the daemon's own argv[0]-ish token.
+  const macMalformedLine =
+    '32984 node /var/folders/pb/x9zzt6713n749nmmpqdxtzbm0000gn/T/tmp.qmqf2nJ3t6/bin/cli.js daemon start --workspace /tmp/fakeproj';
+
+  it('a real macOS malformed-etimes row is NEVER silently dropped — it surfaces as UNPARSABLE', () => {
+    const parsed = parseLines(macMalformedLine, NOW);
+    expect(parsed).toHaveLength(1); // NOT zero — the pre-fix behavior was to `continue` and vanish
+    expect(parsed[0]).toMatchObject({ pid: 32984, unparsable: true });
+
+    const rows = classify(parsed, PATCH, '');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe('UNPARSABLE');
+
+    const report = formatReport(rows);
+    expect(report).toHaveLength(2); // the row itself + a NOTE — never empty output
+    expect(report[0]).toBe(`pid 32984 UNPARSABLE (raw: ${macMalformedLine})`);
+    expect(report[1]).toBe('NOTE: 1 daemon row(s) UNPARSABLE — staleness not assessable for them (see raw above)');
+  });
+
+  it('CLI end-to-end: piping the real malformed line in still exits 0 with non-empty, non-silent output', () => {
+    const { code, lines } = runTool(macMalformedLine + '\n', ['--newest-mtime', String(PATCH)]);
+    expect(code).toBe(0);
+    expect(lines.length).toBeGreaterThan(0); // the pre-fix regression was EXACTLY zero lines here
+    expect(lines[0]).toContain('UNPARSABLE');
+  });
+
+  it('contrast: the SAME daemon via a well-formed etime line classifies normally (STALE), not UNPARSABLE', () => {
+    const wellFormed = '32984 01:40 node /fake/bin/cli.js daemon start --workspace /tmp/fakeproj';
+    const rows = classify(parseLines(wellFormed, NOW), NOW + 1, ''); // patch newer than start => STALE
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe('STALE');
+  });
+});
+
+// ── F1 falsification: kit_daemon_ps_lines gates on ps's exit status ─────────
+// Exercises the ACTUAL bash function (not a stand-in) against fake `pgrep`/`ps`
+// executables placed first on PATH, so the fixture is deterministic and
+// platform-independent (doesn't depend on the test host's own ps dialect).
+
+function mkFakeBin(scripts) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fakebin-'));
+  worlds.push(dir);
+  for (const [name, body] of Object.entries(scripts)) {
+    const p = path.join(dir, name);
+    fs.writeFileSync(p, body);
+    fs.chmodSync(p, 0o755);
+  }
+  return dir;
+}
+
+describe('common.sh: kit_daemon_ps_lines — F1 rc-gated etimes/etime fallback (falsification)', () => {
+  it('macOS shape: etimes exits rc=1 with a malformed-but-non-empty line -> falls back to etime, NOT the malformed line', () => {
+    const fakeBin = mkFakeBin({
+      pgrep: '#!/usr/bin/env bash\ncase "$*" in\n  *"bin/cli.js daemon start"*) echo 777777 ;;\n  *) exit 1 ;;\nesac\n',
+      ps: [
+        '#!/usr/bin/env bash',
+        'if [[ "$*" == *"etimes="* ]]; then',
+        '  echo "ps: etimes: keyword not found" >&2',
+        '  echo "777777 node /fake/bin/cli.js daemon start --workspace /tmp/fakeproj"',
+        '  exit 1',
+        'fi',
+        'if [[ "$*" == *"etime="* ]]; then',
+        '  echo "777777 01:40 node /fake/bin/cli.js daemon start --workspace /tmp/fakeproj"',
+        '  exit 0',
+        'fi',
+        'exit 1',
+      ].join('\n') + '\n',
+    });
+    const { code, out } = runBash(`source '${COMMON}'; kit_daemon_ps_lines`, { PATH: `${fakeBin}:${process.env.PATH}` });
+    expect(code).toBe(0);
+    // Must be the WELL-FORMED etime line (pid, elapsed, args...) — the old
+    // emptiness-only gate would have kept the malformed etimes-shaped line
+    // instead, since it was non-empty.
+    expect(out).toBe('777777 01:40 node /fake/bin/cli.js daemon start --workspace /tmp/fakeproj');
+
+    // and downstream it actually classifies (not UNPARSABLE).
+    const parsed = parseLines(out, NOW);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toMatchObject({ pid: 777777, unparsable: false });
+  });
+
+  it('GNU/Linux shape: etimes succeeds (rc=0) -> used as-is, no fallback invoked', () => {
+    const fakeBin = mkFakeBin({
+      pgrep: '#!/usr/bin/env bash\ncase "$*" in\n  *"bin/cli.js daemon start"*) echo 888888 ;;\n  *) exit 1 ;;\nesac\n',
+      ps: [
+        '#!/usr/bin/env bash',
+        'if [[ "$*" == *"etimes="* ]]; then',
+        '  echo "888888 120 node /fake/bin/cli.js daemon start --workspace /tmp/y"',
+        '  exit 0',
+        'fi',
+        'echo "FALLBACK-SHOULD-NOT-HAPPEN"; exit 1',
+      ].join('\n') + '\n',
+    });
+    const { out } = runBash(`source '${COMMON}'; kit_daemon_ps_lines`, { PATH: `${fakeBin}:${process.env.PATH}` });
+    expect(out).toBe('888888 120 node /fake/bin/cli.js daemon start --workspace /tmp/y');
+    expect(out).not.toContain('FALLBACK-SHOULD-NOT-HAPPEN');
+  });
+});
+
+// ── F7 falsification: proof P14 must not reintroduce the fcaec68 blindspot ──
+// commit fcaec68 documented that a SINGLE-pattern `pgrep -f 'bin/cli.js daemon
+// start'` "missed EVERY real daemon" whose surviving argv is `ruflo daemon
+// start` with no cli.js visible — status.sh was fixed to merge both patterns
+// (kit_daemon_ps_lines); proof.sh P14 had kept the narrow single pattern for
+// itself, silently disagreeing with status.sh's daemon count.
+
+describe('kit_daemon_ps_lines vs a narrow single-pattern pgrep (F7 falsification)', () => {
+  it('a daemon visible ONLY via the "ruflo daemon" pattern is missed by the old narrow pgrep but caught by the shared helper', () => {
+    const fakeBin = mkFakeBin({
+      // Only matches 'ruflo daemon' — simulates argv with no 'bin/cli.js daemon start' substring.
+      pgrep: '#!/usr/bin/env bash\ncase "$*" in\n  *"ruflo daemon"*) echo 555555 ;;\n  *) exit 1 ;;\nesac\n',
+      ps: [
+        '#!/usr/bin/env bash',
+        'if [[ "$*" == *"etimes="* ]]; then',
+        '  echo "555555 42 ruflo daemon start --workspace /tmp/x"',
+        '  exit 0',
+        'fi',
+        'exit 1',
+      ].join('\n') + '\n',
+    });
+    const env = { PATH: `${fakeBin}:${process.env.PATH}` };
+    const oldNarrow = runBash(`pgrep -f "bin/cli.js daemon start" 2>/dev/null | grep -c .`, env);
+    const sharedHelper = runBash(`source '${COMMON}'; kit_daemon_ps_lines | grep -c .`, env);
+    expect(Number(oldNarrow.out)).toBe(0);      // the exact fcaec68 blindspot, reproduced
+    expect(Number(sharedHelper.out)).toBe(1);   // the shared dual-pattern helper does not miss it
+  });
+});
+
+describe('lib/proof.sh: P14 wiring (F7 — must consume the shared helper, not its own pgrep)', () => {
+  it('the daemon-gates probe computes dcount via kit_daemon_ps_lines, not a standalone single-pattern pgrep', () => {
+    const src = fs.readFileSync(PROOF, 'utf8');
+    const fnStart = src.indexOf('probe_daemon_gates()');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = src.indexOf('\n}', fnStart);
+    const fnBody = src.slice(fnStart, fnEnd);
+    expect(fnBody).toMatch(/dcount="\$\(kit_daemon_ps_lines/);
+    // the pre-fix line computed dcount straight from a narrow single-pattern
+    // pgrep; that standalone invocation must be gone from this probe body.
+    expect(fnBody).not.toMatch(/dcount="\$\(pgrep -f "bin\/cli\.js daemon start"/);
   });
 });

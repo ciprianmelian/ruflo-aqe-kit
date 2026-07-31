@@ -293,6 +293,371 @@ global_bsqlite_loads() {
   node -e "const p=require.resolve('better-sqlite3',{paths:['$groot/agentdb','$groot']});if(!p.startsWith('$groot'))process.exit(3);require(p)" >/dev/null 2>&1
 }
 
+# ── better-sqlite3 native-resolution candidate roots (SQLITE-ROOTS-V1) ──────
+# `ruflo memory` does not resolve its native sqlite binding from one place.
+# Empirically traced (Wave-2 B3, 2026-07-31 — `require.resolve('better-sqlite3',
+# {paths:[<dir>]})` from each real call-site's own directory, matching Node's
+# actual nearest-wins resolution for the `require()`/dynamic `import()` calls
+# in the installed dist):
+#   - ControllerRegistry.initAgentDB() (@claude-flow/memory/dist/
+#     controller-registry.js) — the PRIMARY `ruflo memory store/search/get`
+#     path — does `await import('agentdb')` from its OWN directory, which
+#     finds the NESTED alpha.10 shadow at
+#     @claude-flow/memory/node_modules/agentdb first. That nested package has
+#     no local better-sqlite3 of its own, so IT walks up to the sibling
+#     ruflo/node_modules/better-sqlite3 — the same build kit_sqlite_backend
+#     already checks. No gap found on this path.
+#   - AgentDB's own core (agentdb/dist/src/core/AgentDB.js) does
+#     `import('better-sqlite3')` from ITS OWN directory. When the HOISTED
+#     agentdb floor (ruflo/node_modules/agentdb — the upstream floor Patch 52
+#     keeps distinct from the nested shadow) is the one in play (agentdb's own
+#     bundled CLI, or any consumer that reaches the hoisted class directly),
+#     this resolves to agentdb's OWN nested better-sqlite3 copy — CONFIRMED on
+#     this host to be a different version AND a different physical file
+#     (11.10.0 vs the sibling ruflo/node_modules/better-sqlite3's 12.11.1,
+#     distinct inodes). AgentDB's core tries native first and silently drops
+#     to sql.js WASM on failure (a console.log line, no throw) — exactly the
+#     blind spot none of the existing checks (kit_sqlite_backend,
+#     global_bsqlite_loads) look at, since both hardcode a path that is never
+#     the hoisted floor's own nested copy. This root is not hypothetical: the
+#     independent gauntlet critic (round 1) traced a REAL exercised consumer of
+#     exactly this resolution — @claude-flow/neural/dist/reasoning-bank.js
+#     (behind the hooks_intelligence_* MCP tools / SONA training pipeline)
+#     imports 'agentdb' with no local copy of its own, so it lands on this same
+#     hoisted floor (currently usingWasm:false — healthy today, same as the
+#     rest of this root, but a live call site, not just agentdb's bundled CLI).
+#   - memory-bridge.js (@claude-flow/cli/dist/src/memory/memory-bridge.js)
+#     does its own `createRequire(import.meta.url)('better-sqlite3')` (for
+#     AttestationLog) from ITS OWN directory — resolves up to the same
+#     ruflo/node_modules/better-sqlite3 sibling build. No gap found there.
+#   - The standalone agentdb MCP server slot ($groot/agentdb) is already
+#     covered by global_bsqlite_loads (paths=[groot/agentdb, groot]); included
+#     here too so every real resolution root lives in ONE reusable list
+#     instead of scattered bespoke path checks (agentic-kit #101 pattern).
+#
+# Deliberately EXCLUDED: ruflo/node_modules/agentic-flow/node_modules/agentdb
+# (a fourth, undocumented agentdb copy, v1.6.1, ~10 importers under
+# agentic-flow) — the critic verified its db-fallback.js never attempts a
+# native require at all and logs "Using sql.js" unconditionally: WASM-only BY
+# DESIGN, so it cannot exhibit the silent-native-then-WASM defect this helper
+# targets. It is an inventory gap in the general "how many agentdb copies
+# exist" sense, not a detection miss for THIS check — do not add it here, a
+# future reader would start generating false "gap" reports against a build
+# that was never meant to load native.
+kit_bsqlite_candidate_roots() {
+  local groot; groot="$(npm root -g 2>/dev/null || echo '')"
+  [[ -n "$groot" ]] || return 1
+  printf '%s\n' \
+    "$groot/ruflo/node_modules" \
+    "$groot/ruflo/node_modules/agentdb" \
+    "$groot/ruflo/node_modules/@claude-flow/memory/node_modules/agentdb" \
+    "$groot/ruflo/node_modules/@claude-flow/cli" \
+    "$groot/agentdb" \
+    "$groot"
+}
+
+# kit_bsqlite_native_status — per-root resolve+DEEP-load-test of better-sqlite3
+# AS THAT ROOT'S OWN CONSUMER CODE WOULD SEE IT (nearest-wins from that dir,
+# not from npm root). One line per candidate root on stdout:
+#   "<root>|<ok|broken|missing>|<resolved-path-or-->"
+#   ok      — resolves, require()s, opens a real `:memory:` database, and
+#             answers `SELECT 1` correctly.
+#   broken  — resolves to a real file but ANY of: require() throws (ABI-stale
+#             build, corrupted install), the constructor/open throws, or the
+#             query doesn't come back as expected. This is deliberately wider
+#             than "require() throws": a binding that resolves and require()s
+#             cleanly and STILL cannot actually open a database is the exact
+#             silent-degradation state that makes a consumer fall back to
+#             sql.js/WASM while looking "present" on disk (adopted from
+#             agentic-kit's natives.mjs probeBsq3Runtime, vendor/agentic-kit/
+#             src/lib/natives.mjs:132-150 — "running SELECT 1 in a child
+#             process is the real WASM-vs-native answer — not a file-existence
+#             guess"; a require()-only check, which is what this function did
+#             before this deepening, cannot see that class at all).
+#   missing — nothing named better-sqlite3 anywhere up that root's
+#             node_modules chain (nothing to load — not necessarily an error,
+#             e.g. a host with no npm root at all).
+# Never throws; a missing/unreadable root just reads as "missing".
+#
+# Crash isolation: the deep probe (require -> new Database(':memory:') ->
+# `SELECT 1 AS ok` -> close) runs inside its own `node -e` CHILD PROCESS per
+# root — already true of every candidate here, since this function spawns a
+# fresh `node` for each one. A native addon that segfaults on open only kills
+# that one child; bash's `if node -e ...; then` reads a non-zero/signal exit
+# status (e.g. 139 for SIGSEGV) like any other failure and moves on to the
+# next root. It can never crash or hang kit_bsqlite_native_status itself —
+# mirrors agentic-kit's own rationale for keeping its probe in a child process
+# ("Kept in a child process so a broken addon can't crash ak").
+#
+# agentic-kit's bsq3Root (natives.mjs:20-26) also flags a distinct staleness
+# risk: Node's process-wide require.resolve cache (Module._pathCache /
+# _realpathCache) can go stale mid-process after an in-process `npm install`
+# reshapes a tree, so agentic-kit deliberately re-walks the filesystem by hand
+# instead of using createRequire().resolve(). Evaluated for this codebase and
+# judged NOT APPLICABLE: this function (and every caller of it) already
+# resolves via a brand-new `node -e` subprocess per root, once per invocation
+# — there is no long-lived Node process here to accumulate a stale resolution
+# cache in the first place, so there is nothing for that staleness class to
+# attach to. Recorded here so a future reader doesn't reintroduce the same
+# investigation.
+kit_bsqlite_native_status() {
+  local root
+  while IFS= read -r root; do
+    [[ -n "$root" ]] || continue
+    if [[ ! -d "$root" ]]; then
+      printf '%s|missing|-\n' "$root"
+      continue
+    fi
+    local resolved
+    resolved="$(node -e "try{process.stdout.write(require.resolve('better-sqlite3',{paths:[process.argv[1]]}))}catch(e){}" "$root" 2>/dev/null)"
+    if [[ -z "$resolved" ]]; then
+      printf '%s|missing|-\n' "$root"
+      continue
+    fi
+    if node -e "
+      const D = require(process.argv[1]);
+      const db = new D(':memory:');
+      const row = db.prepare('SELECT 1 AS ok').get();
+      db.close();
+      process.exit(row && row.ok === 1 ? 0 : 3);
+    " "$resolved" >/dev/null 2>&1; then
+      printf '%s|ok|%s\n' "$root" "$resolved"
+    else
+      printf '%s|broken|%s\n' "$root" "$resolved"
+    fi
+  done < <(kit_bsqlite_candidate_roots)
+}
+
+# kit_bsqlite_verdict — TRI-STATE rollup of kit_bsqlite_native_status. Echoes
+# exactly one line "<verdict>|<checked>|<total>" and exits 0 for healthy/gap,
+# 1 for not-assessable:
+#   healthy        — >=1 candidate root had a better-sqlite3 to load-test AND
+#                     none of them were broken.
+#   gap            — >=1 candidate root resolved to better-sqlite3 but failed
+#                     to require() (the silent-WASM-fallback-risk state).
+#   not-assessable — ZERO candidate roots had anything to load-test (every
+#                     root read "missing", or there was no npm root at all —
+#                     e.g. `npm` itself is broken/absent). MUST NOT collapse
+#                     into "healthy": round-2 critic repro proved a caller
+#                     that only reads a flat gap boolean cannot tell "all 6
+#                     roots verified" from "0 roots ever checked" —
+#                     `bash -c 'source lib/common.sh; npm(){ return 1; };
+#                     export -f npm; kit_bsqlite_gap; echo rc=$?'` read rc=1
+#                     ("no gap") with nothing assessed. `checked` (ok+broken
+#                     roots — the ones that actually had a build to test) and
+#                     `total` (every candidate kit_bsqlite_candidate_roots
+#                     produced, 0 if no groot) let a caller show that
+#                     honestly instead of rendering it as clean.
+kit_bsqlite_verdict() {
+  local state ok=0 broken=0 total=0
+  while IFS='|' read -r _root state _resolved; do
+    total=$((total + 1))
+    case "$state" in
+      ok)     ok=$((ok + 1)) ;;
+      broken) broken=$((broken + 1)) ;;
+    esac
+  done < <(kit_bsqlite_native_status 2>/dev/null)
+  local checked=$((ok + broken))
+  if [[ "$broken" -gt 0 ]]; then
+    printf 'gap|%d|%d\n' "$checked" "$total"
+    return 0
+  elif [[ "$ok" -gt 0 ]]; then
+    printf 'healthy|%d|%d\n' "$checked" "$total"
+    return 0
+  else
+    printf 'not-assessable|%d|%d\n' "$checked" "$total"
+    return 1
+  fi
+}
+
+# kit_bsqlite_gap — legacy BOOLEAN surface (rc 0 = gap present, rc 1 = no
+# gap). KNOWN LIMITATION (round 2, critic-confirmed): rc 1 does not
+# distinguish "every root verified healthy" from "zero roots were ever
+# assessable" — see kit_bsqlite_verdict above for the fix. Kept only for a
+# caller pinned to this exact rc contract; status.sh (this kit's only
+# in-tree caller) reads kit_bsqlite_verdict directly instead so it can render
+# the honest tri-state.
+kit_bsqlite_gap() {
+  local verdict; verdict="$(kit_bsqlite_verdict 2>/dev/null)"
+  [[ "${verdict%%|*}" == "gap" ]]
+}
+
+# kit_run_timeout <secs> <cmd> [args...] — portable hard timeout (no `timeout`
+# binary on stock macOS). Mirrors the exact idiom health.sh's ruflo_timeout
+# already uses ("Uses `perl` for portable timeout (no `timeout` on stock
+# macOS)"); pulled here as a shared primitive so kit_memory_roundtrip_check
+# below doesn't duplicate it. Exit code is the wrapped command's own exit
+# code; a command killed by the alarm just reads as a normal non-zero/signal
+# exit to the caller, never a hang.
+kit_run_timeout() {
+  local secs="$1"; shift
+  perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+}
+
+# ── Memory round-trip probe (behavioral, MEMORY-ROUNDTRIP-V1, Wave-2 B13) ────
+# agentic-kit's `ak x verify memory` (vendor/agentic-kit/src/commands/x/
+# verify.mjs:63-115, verifyMemory) proved a drift class none of our 15 proof
+# probes see: every existing memory/store check in this kit (kit_sqlite_
+# rw_check, the AQE capture-arm wiring check, `stores-writable`) only ever
+# asserts PRESENCE — a store file exists, accepts a momentary write lock,
+# holds rows — never that a value written through the real CLI actually comes
+# back out, or that a purge actually removes it. A backend that silently
+# no-ops a write (or whose CLI serves a stale/cached answer on retrieve while
+# the disk write itself failed) reads healthy to every existing probe. This
+# is the same silent-degradation shape as kit_bsqlite_native_status's "requires
+# fine but can't open a database" class above — just one layer up the stack.
+#
+# kit_memory_roundtrip_check runs store -> retrieve -> identify-the-writer ->
+# purge entirely inside a throwaway `mktemp -d`, using a random
+# namespace/key/value tuple, an explicit `--path` pin on every `ruflo memory`
+# invocation, AND cwd=<tmp dir>. Both are required: `--path` alone does not
+# contain every side effect — empirically, `ruflo memory init --path X` also
+# writes .claude/, .claude-flow/, ruvector.db, schema.sql and *.graph files
+# relative to CWD, not next to X. Running with cwd=<tmp> (matching agentic-
+# kit's own `{ cwd: tmp }` protection) keeps ALL of that inside the disposable
+# directory. This function NEVER touches the real .agentic-qe/, .swarm/, or
+# agentdb.db — the tmp dir is the only DB `ruflo` is ever pointed at — and the
+# tmp dir is unconditionally removed before this function returns, on every
+# exit path (single cleanup point below, not a per-branch rm).
+#
+# "Identify the writer" step: the CLI's own `retrieve` could in principle be
+# answered from something other than durable disk state (a cache, a stale
+# read path) even when the underlying write silently failed — exactly the
+# class this probe exists to catch. After a CLI-level retrieve looks correct,
+# this independently opens the SAME pinned DB file with a SEPARATE reader
+# (the sqlite3 CLI, or the global better-sqlite3 build via kit_sqlite_backend
+# as a fallback) and queries `memory_entries` directly, so the proof of
+# persistence does not depend on the same code path that claims success.
+#
+# Echoes exactly one line "<verdict>|<detail>" and returns:
+#   0 healthy        — full round trip verified: CLI store, CLI retrieve,
+#                       independent on-disk confirmation (when a reader was
+#                       available), CLI purge, and a post-purge CLI retrieve
+#                       that correctly finds nothing.
+#   1 gap            — `ruflo` IS present but the round trip did not hold at
+#                       some step (a "genuine failure", not a missing
+#                       instrument).
+#   2 not-assessable — no memory layer to test at all (`ruflo` not on PATH, or
+#                       the host cannot even provide a `mktemp -d`). MUST NOT
+#                       collapse into "healthy" — mirrors the exact tri-state
+#                       lesson kit_bsqlite_verdict already learned above (a
+#                       caller reading only a flat boolean cannot tell
+#                       "verified clean" from "nothing was ever assessed").
+#
+# Exit-code discipline note (agentic-kit's `ak x verify` CLI entry point,
+# verify.mjs:218, separates a USAGE error — unknown suite name — from a
+# GENUINE proof failure by returning 2 vs 1): this helper takes no arguments,
+# so it has no user-supplied-argument surface to misuse and therefore no
+# direct "usage error" of its own. The more relevant split for a no-argument
+# shell helper is the one this codebase already uses for kit_sqlite_rw_check
+# (rc 2 = no instrument to test with at all, rc 1 = a real failure, rc 0 =
+# pass) — that is the discipline adopted here. Checked for the conflation
+# agentic-kit's own memory suite still has: verifyMemory's only "absent
+# instrument" path (`ruflo` CLI not installed) calls the SAME `fail()` used
+# for every genuine mid-proof failure and returns `false` either way — their
+# `ak x verify` overall exit code cannot distinguish "no ruflo to test" from
+# "ruflo is broken", the identical conflation kit_bsqlite_gap's round-1
+# boolean had before kit_bsqlite_verdict fixed it. This helper's rc=2 avoids
+# reintroducing that. Also worth a look elsewhere in this file:
+# kit_sqlite_backup returns the same rc=1 for "no such file" (a bad-input/
+# usage condition) as for "backup ran but produced an empty file" (a genuine
+# failure) — a real instance of the conflation this task asked to check for,
+# left as-is here since kit_sqlite_backup is outside this adoption's
+# footprint; noting it for whoever next touches that function.
+kit_memory_roundtrip_check() {
+  if ! command -v ruflo >/dev/null 2>&1; then
+    printf 'not-assessable|ruflo not on PATH\n'
+    return 2
+  fi
+
+  local tmp; tmp="$(mktemp -d 2>/dev/null)"
+  if [[ -z "$tmp" || ! -d "$tmp" ]]; then
+    printf 'not-assessable|mktemp -d failed\n'
+    return 2
+  fi
+
+  local ns="kit-roundtrip-$$-$RANDOM"
+  local key="roundtrip"
+  local val; val="probe-$$-$RANDOM-$(date +%s 2>/dev/null || echo 0)"
+  local db="$tmp/probe.db"
+  local secs=30
+  local verdict detail rc
+
+  # Single-exit-point control flow (a one-pass `while` used only for early
+  # `break`, bash's usual stand-in for try/finally): every path below sets
+  # verdict/detail/rc and breaks, so the tmp dir is always cleaned up exactly
+  # once, right after the loop, regardless of which step failed.
+  while true; do
+    if ! ( cd "$tmp" && RUFLO_DAEMON_AUTOSTART=0 kit_run_timeout "$secs" \
+        ruflo memory init --path "$db" --force --backend sqlite ) >/dev/null 2>&1; then
+      verdict=gap; detail="ruflo memory init failed"; rc=1; break
+    fi
+    if [[ ! -f "$db" ]]; then
+      verdict=gap; detail="ruflo memory init produced no db file at the pinned --path"; rc=1; break
+    fi
+
+    if ! ( cd "$tmp" && RUFLO_DAEMON_AUTOSTART=0 kit_run_timeout "$secs" \
+        ruflo memory store -k "$key" -n "$ns" --value "$val" --path "$db" ) >/dev/null 2>&1; then
+      verdict=gap; detail="ruflo memory store failed"; rc=1; break
+    fi
+
+    local got
+    got="$( ( cd "$tmp" && RUFLO_DAEMON_AUTOSTART=0 kit_run_timeout "$secs" \
+        ruflo memory retrieve -k "$key" -n "$ns" --value-only --path "$db" ) 2>/dev/null )"
+    if [[ "$got" != *"$val"* ]]; then
+      verdict=gap; detail="CLI retrieve did not return the exact stored value (accepted write, silent read failure)"; rc=1; break
+    fi
+
+    # Identify the writer: an independent reader, not the CLI that just
+    # claimed success. Best-effort by design — its absence does not itself
+    # demote an otherwise-real CLI round trip to not-assessable, because
+    # `ruflo` (the memory layer actually under test) IS present; see the
+    # docstring above.
+    local backend; backend="$(kit_sqlite_backend 2>/dev/null)"
+    if [[ "$backend" == "cli" ]]; then
+      local row
+      row="$(sqlite3 "$db" "SELECT content FROM memory_entries WHERE namespace='${ns}' AND key='${key}' LIMIT 1;" 2>/dev/null)"
+      if [[ "$row" != "$val" ]]; then
+        verdict=gap; detail="independent sqlite3 read of memory_entries did not show the stored value on disk"; rc=1; break
+      fi
+    elif [[ "$backend" == "node" ]]; then
+      local bs; bs="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
+      local row
+      row="$(node -e '
+        try {
+          const B = require(process.argv[1]);
+          const db = new B(process.argv[2], { readonly: true, fileMustExist: true });
+          const r = db.prepare("SELECT content FROM memory_entries WHERE namespace = ? AND key = ? LIMIT 1").get(process.argv[3], process.argv[4]);
+          db.close();
+          process.stdout.write(r && r.content != null ? r.content : "");
+        } catch (e) { /* leave stdout empty -> treated as a miss below */ }
+      ' "$bs" "$db" "$ns" "$key" 2>/dev/null)"
+      if [[ "$row" != "$val" ]]; then
+        verdict=gap; detail="independent better-sqlite3 read of memory_entries did not show the stored value on disk"; rc=1; break
+      fi
+    fi
+
+    if ! ( cd "$tmp" && RUFLO_DAEMON_AUTOSTART=0 kit_run_timeout "$secs" \
+        ruflo memory purge --namespace "$ns" --force --path "$db" ) >/dev/null 2>&1; then
+      verdict=gap; detail="ruflo memory purge failed"; rc=1; break
+    fi
+
+    local after
+    after="$( ( cd "$tmp" && RUFLO_DAEMON_AUTOSTART=0 kit_run_timeout "$secs" \
+        ruflo memory retrieve -k "$key" -n "$ns" --value-only --path "$db" ) 2>/dev/null )"
+    if [[ "$after" == *"$val"* ]]; then
+      verdict=gap; detail="purge reported success but the proof namespace is still retrievable"; rc=1; break
+    fi
+
+    verdict=healthy; detail="store -> CLI retrieve -> on-disk confirm ($backend) -> purge all verified"; rc=0
+    break
+  done
+
+  rm -rf "$tmp" 2>/dev/null
+  printf '%s|%s\n' "$verdict" "$detail"
+  return "$rc"
+}
+
 # ── AQE capture-arm wiring check (INFLOW-LIVENESS-V1, Patch 67) ──────────────
 # The AQE experience pool (.agentic-qe/memory.db captured_experiences) only
 # grows while a capture hook is WIRED in the target's .claude/settings.json.
@@ -323,18 +688,35 @@ kit_aqe_capture_wired() {
 # classification live in tools/daemon-staleness.cjs (pure, unit-testable);
 # discovery is this small function, overridable in tests.
 #
-# kit_daemon_ps_lines — one "<pid> <etimes> <args...>" line per running daemon.
-# Discovery mirrors BOTH existing sites: status.sh's 'ruflo daemon' and proof
-# P14's argv-anchored 'bin/cli.js daemon start'; pids merged + deduped.
+# kit_daemon_ps_lines — one "<pid> <etimes|etime> <args...>" line per running
+# daemon. Discovery mirrors BOTH existing sites: status.sh's 'ruflo daemon' and
+# proof P14's argv-anchored 'bin/cli.js daemon start'; pids merged + deduped.
+#
+# macOS/BSD `ps` does NOT fail-empty on an unrecognized -o keyword (F1): `ps -o
+# etimes=` prints "ps: etimes: keyword not found" to stderr (suppressed below)
+# but STILL emits the line with the remaining columns — "<pid> <args...>",
+# missing the time token entirely — and exits rc=1. The old emptiness-only
+# gate (`[[ -z "$line" ]]`) never caught this: `line` was non-empty but
+# malformed, so the etime fallback was dead code on macOS and every row
+# downstream failed to parse an elapsed time and was silently dropped
+# (tools/daemon-staleness.cjs). Gate on `ps`'s own exit status instead —
+# GNU ps (Linux) supports etimes natively and exits 0; BSD ps (macOS) always
+# exits non-zero for it, so this correctly selects etime there every time.
 kit_daemon_ps_lines() {
-  local pids p line
+  local pids p line rc
   pids="$( { pgrep -f 'bin/cli.js daemon start' 2>/dev/null; pgrep -f 'ruflo daemon' 2>/dev/null; } | sort -un)"
   [[ -n "$pids" ]] || return 0
   for p in $pids; do
-    # etimes (elapsed seconds) where supported; BSD ps only has etime
-    # ([[dd-]hh:]mm:ss) — the cjs classifier parses both token shapes.
-    line="$(ps -o pid= -o etimes= -o args= -p "$p" 2>/dev/null | sed 's/^[[:space:]]*//')"
-    [[ -z "$line" ]] && line="$(ps -o pid= -o etime= -o args= -p "$p" 2>/dev/null | sed 's/^[[:space:]]*//')"
+    # $? after a bare command substitution (no trailing pipe inside it)
+    # reflects ps's own exit status, not a downstream sed/pipeline stage.
+    line="$(ps -o pid= -o etimes= -o args= -p "$p" 2>/dev/null)"
+    rc=$?
+    if [[ $rc -ne 0 || -z "$line" ]]; then
+      # BSD ps only has etime ([[dd-]hh:]mm:ss) — the cjs classifier parses
+      # both token shapes.
+      line="$(ps -o pid= -o etime= -o args= -p "$p" 2>/dev/null)"
+    fi
+    line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//')"
     [[ -n "$line" ]] && printf '%s\n' "$line"
   done
   return 0
