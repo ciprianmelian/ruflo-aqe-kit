@@ -17,9 +17,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const TOOL = path.resolve(__dirname, '..', 'tools', 'daemon-staleness.cjs');
-const COMMON = path.resolve(__dirname, '..', 'lib', 'common.sh');
-const PROOF = path.resolve(__dirname, '..', 'lib', 'proof.sh');
+const REPO = path.resolve(__dirname, '..');
+const TOOL = path.resolve(REPO, 'tools', 'daemon-staleness.cjs');
+const COMMON = path.resolve(REPO, 'lib', 'common.sh');
+const PROOF = path.resolve(REPO, 'lib', 'proof.sh');
 const { parseElapsed, parseWorkspace, parseLines, classify, formatReport, REMEDY } = require(TOOL);
 
 const worlds = [];
@@ -231,6 +232,176 @@ describe('common.sh: kit_daemon_staleness (discovery overridden)', () => {
     expect(lines[0]).toMatch(/^pid 9 ws=\/a started=.* FRESH$/);
     expect(lines[1]).toBe('rc=0');
     expect(out).not.toContain('WARNING');
+  });
+});
+
+// ── kit_daemon_scope_split: identity-based MINE/OTHER/UNKNOWN (DAEMON-HINT-
+// SCOPE-V1 round 2) ─────────────────────────────────────────────────────────
+// Round 1 compared realpath'd path STRINGS. A critic reproduced the exact
+// class of bug lib/fix-aqe.sh's INTEL-ROOTWALK-V1 v3->v4 fix already closed
+// once in this codebase: realpathSync PRESERVES input case on a case-
+// insensitive-but-preserving filesystem (macOS APFS), so a daemon's
+// --workspace differing from the target only in case never string-matched
+// and classified OTHER — telling an operator a daemon that ACTUALLY locks
+// their DBs does not. Round 2 compares filesystem IDENTITY, (dev, ino) from
+// fs.statSync, mirroring that established v5 idiom. These tests source the
+// REAL lib/common.sh directly (kit_daemon_ps_lines overridden per-test, the
+// same hermetic convention the rest of this file already uses) — no PATH
+// stub, no scratch bin dir needed.
+describe('common.sh: kit_daemon_scope_split (identity-based MINE/OTHER/UNKNOWN)', () => {
+  let target;
+  beforeAll(() => { target = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'scopesplit-'))); });
+  afterAll(() => fs.rmSync(target, { recursive: true, force: true }));
+
+  it('MINE: --workspace argv is the exact target directory', () => {
+    const script = `
+      source '${COMMON}'
+      kit_daemon_ps_lines() { echo '111 60 node /g/ruflo/bin/cli.js daemon start --workspace ${target}'; }
+      kit_daemon_scope_split '${target}'
+    `;
+    expect(runBash(script).out).toBe(`111\tMINE\t${target}`);
+  });
+
+  it('OTHER: --workspace argv is a real, different, existing directory', () => {
+    const other = fs.realpathSync(os.tmpdir());
+    const script = `
+      source '${COMMON}'
+      kit_daemon_ps_lines() { echo '222 60 node /g/ruflo/bin/cli.js daemon start --workspace ${other}'; }
+      kit_daemon_scope_split '${target}'
+    `;
+    expect(runBash(script).out).toBe(`222\tOTHER\t${other}`);
+  });
+
+  it('UNKNOWN: no --workspace token in argv at all', () => {
+    const script = `
+      source '${COMMON}'
+      kit_daemon_ps_lines() { echo '333 60 node /g/ruflo/bin/cli.js daemon start --foreground --quiet'; }
+      kit_daemon_scope_split '${target}'
+    `;
+    expect(runBash(script).out).toBe('333\tUNKNOWN\t?');
+  });
+
+  it('UNKNOWN (not a guessed MINE/OTHER): --workspace points somewhere that no longer exists, so identity cannot be established', () => {
+    const script = `
+      source '${COMMON}'
+      kit_daemon_ps_lines() { echo '444 60 node /g/ruflo/bin/cli.js daemon start --workspace /this/path/does/not/exist/anywhere'; }
+      kit_daemon_scope_split '${target}'
+    `;
+    expect(runBash(script).out).toBe('444\tUNKNOWN\t/this/path/does/not/exist/anywhere');
+  });
+
+  // THE regression this round fixes: a case-differing alias of the target
+  // must still classify MINE, because on a case-insensitive-but-preserving
+  // filesystem it IS the target — identity, not spelling.
+  it('MINE (case-aliasing): --workspace differs from the target only in case, same directory on a case-insensitive-but-preserving filesystem', () => {
+    const upperAlias = target.toUpperCase();
+    // Only meaningful when the host filesystem actually folds case (macOS
+    // APFS default; most Linux CI runners on ext4 do not) — skip rather than
+    // false-pass elsewhere. fs.statSync identity is exactly how we detect it.
+    let sameFs = false;
+    try { sameFs = fs.statSync(target).ino === fs.statSync(upperAlias).ino; } catch { /* not case-insensitive here */ }
+    if (!sameFs) return; // host filesystem doesn't fold case — nothing to prove here
+    const script = `
+      source '${COMMON}'
+      kit_daemon_ps_lines() { echo '555 60 node /g/ruflo/bin/cli.js daemon start --workspace ${upperAlias}'; }
+      kit_daemon_scope_split '${target}'
+    `;
+    expect(runBash(script).out).toBe(`555\tMINE\t${upperAlias}`);
+  });
+
+  // TEETH: reconstruct the PRE-FIX (round-1) kit_daemon_scope_split body —
+  // the realpath'd-STRING comparison the critic broke — by splicing it into
+  // a scratch copy of the CURRENT common.sh (never the tracked file itself).
+  // Stays in sync with unrelated future edits to common.sh; only the one
+  // function body reverts.
+  const PRE_FIX_SCOPE_SPLIT_BODY = [
+    'kit_daemon_scope_split() {',
+    '  local target="$1" lines cjs',
+    '  lines="$(kit_daemon_ps_lines 2>/dev/null)"',
+    '  [[ -n "$lines" ]] || return 0',
+    '  cjs="$KIT_TOOLS/daemon-staleness.cjs"',
+    '  if [[ ! -f "$cjs" ]] || ! command -v node >/dev/null 2>&1; then',
+    '    awk \'{print $1"\\tUNKNOWN\\t?"}\' <<< "$lines"',
+    '    return 0',
+    '  fi',
+    '  KIT_SCOPE_TARGET="$target" node -e \'',
+    '    const { parseWorkspace, normPath } = require(process.argv[1]);',
+    '    const fs = require("fs");',
+    '    const target = process.env.KIT_SCOPE_TARGET;',
+    '    const resolve = (p) => { try { return fs.realpathSync(p); } catch { return normPath(p); } };',
+    '    const targetR = resolve(target);',
+    '    let input = "";',
+    '    process.stdin.on("data", (d) => { input += d; });',
+    '    process.stdin.on("end", () => {',
+    '      for (const raw of input.split("\\n")) {',
+    '        const t = raw.trim();',
+    '        if (!t) continue;',
+    '        const m = t.match(/^(\\d+)\\s+(\\S+)\\s+(.*)$/);',
+    '        if (!m) continue;',
+    '        const ws = parseWorkspace(m[3].split(/\\s+/));',
+    '        const state = ws === "?" ? "UNKNOWN" : (resolve(ws) === targetR ? "MINE" : "OTHER");',
+    '        process.stdout.write(m[1] + "\\t" + state + "\\t" + ws + "\\n");',
+    '      }',
+    '    });',
+    '  \' -- "$cjs" <<< "$lines"',
+    '}',
+    '',
+  ].join('\n');
+
+  function withPreFixCommon(fn) {
+    // KIT_TOOLS resolves relative to common.sh's OWN BASH_SOURCE (KIT_DIR =
+    // dirname(common.sh)/..), so the scratch copy needs a real lib/../tools
+    // sibling layout — a bare loose common.sh here would silently degrade
+    // every row to UNKNOWN via the "no cjs found" fail-safe branch instead of
+    // exercising the string-comparison bug this test targets.
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'common-prefix-'));
+    const scratchLib = path.join(scratch, 'lib');
+    const scratchTools = path.join(scratch, 'tools');
+    fs.mkdirSync(scratchLib, { recursive: true });
+    fs.mkdirSync(scratchTools, { recursive: true });
+    fs.copyFileSync(path.join(REPO, 'tools', 'daemon-staleness.cjs'), path.join(scratchTools, 'daemon-staleness.cjs'));
+
+    const current = fs.readFileSync(COMMON, 'utf8');
+    const re = /kit_daemon_scope_split\(\) \{[\s\S]*?\n\}\n/;
+    if (!re.test(current)) throw new Error('kit_daemon_scope_split() not found in lib/common.sh to splice');
+    const mutated = current.replace(re, PRE_FIX_SCOPE_SPLIT_BODY);
+    const dst = path.join(scratchLib, 'common.sh');
+    fs.writeFileSync(dst, mutated);
+    try {
+      return fn(dst);
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  it('TEETH: the pre-fix (string-comparison) classifier wrongly says OTHER for a case-differing alias of the target', () => {
+    const upperAlias = target.toUpperCase();
+    let sameFs = false;
+    try { sameFs = fs.statSync(target).ino === fs.statSync(upperAlias).ino; } catch { /* not case-insensitive here */ }
+    if (!sameFs) return; // host filesystem doesn't fold case — nothing to prove here
+    withPreFixCommon((preFixCommon) => {
+      const script = `
+        source '${preFixCommon}'
+        kit_daemon_ps_lines() { echo '666 60 node /g/ruflo/bin/cli.js daemon start --workspace ${upperAlias}'; }
+        kit_daemon_scope_split '${target}'
+      `;
+      // This IS the regression: same directory, wrong bucket, purely because
+      // the case-differing spelling never string-matched after realpath.
+      expect(runBash(script).out).toBe(`666\tOTHER\t${upperAlias}`);
+    });
+  });
+
+  it('TEETH (contrast): the POST-FIX (real) common.sh gets the same case-differing fixture right', () => {
+    const upperAlias = target.toUpperCase();
+    let sameFs = false;
+    try { sameFs = fs.statSync(target).ino === fs.statSync(upperAlias).ino; } catch { /* not case-insensitive here */ }
+    if (!sameFs) return;
+    const script = `
+      source '${COMMON}'
+      kit_daemon_ps_lines() { echo '777 60 node /g/ruflo/bin/cli.js daemon start --workspace ${upperAlias}'; }
+      kit_daemon_scope_split '${target}'
+    `;
+    expect(runBash(script).out).toBe(`777\tMINE\t${upperAlias}`);
   });
 });
 

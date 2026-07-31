@@ -214,7 +214,11 @@ describe('sync.sh: DRYRUN-WOULD-COUNT-V1 — dry-run counts would-actions truthf
   });
 
   it('a dry-run stage that warns (nonzero exit + marker) still shows its would-count', () => {
-    const kit = mkKit({ 'fix-ruflo.sh': { code: 1, wouldLines: 3 } });
+    // 21 is the kit's reserved "warn" exit code (EXIT-1-COLLISION-V1 —
+    // plain 1 was reassigned to the crash bucket because bash itself exits 1
+    // on an unbound-variable abort under `set -u`, which collided with the
+    // old warn convention). See lib/sync.sh / lib/fix-ruflo.sh.
+    const kit = mkKit({ 'fix-ruflo.sh': { code: 21, wouldLines: 3 } });
     try {
       const { code, out } = runSync(kit, target, ['--dry-run']);
       const plain = stripAnsi(out);
@@ -248,7 +252,8 @@ describe('sync.sh: exit-code contract', () => {
   });
 
   it('exits 0 when a stage completes with manual-action warnings (nonzero exit WITH marker)', () => {
-    const kit = mkKit({ 'fix-ruflo.sh': { code: 1, omitComplete: false } });
+    // 21 = reserved warn code (EXIT-1-COLLISION-V1) — see comment above.
+    const kit = mkKit({ 'fix-ruflo.sh': { code: 21, omitComplete: false } });
     try {
       const { code, out } = runSync(kit, target);
       expect(code).toBe(0);

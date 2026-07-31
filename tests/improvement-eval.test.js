@@ -22,7 +22,10 @@ const TOOL = path.resolve(__dirname, '..', 'tools', 'improvement-eval.cjs');
 function analyze(rows) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-'));
   const f = path.join(d, 'eval-history.jsonl');
-  fs.writeFileSync(f, rows.map((r) => JSON.stringify(Object.assign({ scorerVersion: 'eval-v1' }, r))).join('\n') + '\n');
+  // Default ts is post-EPOCH_LINE: rows that cannot be placed against the 2026-07-31
+  // measurement line are EXCLUDED from the gate (see improvement-eval-epoch.test.js),
+  // so these fixtures must be stamped to exercise the counted path.
+  fs.writeFileSync(f, rows.map((r) => JSON.stringify(Object.assign({ scorerVersion: 'eval-v1', ts: '2026-08-01T00:00:00Z' }, r))).join('\n') + '\n');
   const r = spawnSync(process.execPath, [TOOL, '--history-file', f, '--bench-history', '/dev/null', '--json'], { encoding: 'utf8' });
   fs.rmSync(d, { recursive: true, force: true });
   if (!r.stdout) throw new Error('no stdout; stderr=' + r.stderr);
@@ -99,9 +102,9 @@ describe('improvement-eval: history hygiene', () => {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-'));
     const f = path.join(d, 'eval-history.jsonl');
     fs.writeFileSync(f, [
-      JSON.stringify({ scorerVersion: 'old-v0', treatmentAcc: 0.9, controlAcc: 0.1 }),
-      JSON.stringify({ scorerVersion: 'eval-v1', treatmentAcc: 0.7, controlAcc: 0.5 }),
-      JSON.stringify({ scorerVersion: 'eval-v1', treatmentAcc: 0.72, controlAcc: 0.5 }),
+      JSON.stringify({ scorerVersion: 'old-v0', ts: '2026-08-01T00:00:00Z', treatmentAcc: 0.9, controlAcc: 0.1 }),
+      JSON.stringify({ scorerVersion: 'eval-v1', ts: '2026-08-01T00:00:00Z', treatmentAcc: 0.7, controlAcc: 0.5 }),
+      JSON.stringify({ scorerVersion: 'eval-v1', ts: '2026-08-01T00:00:00Z', treatmentAcc: 0.72, controlAcc: 0.5 }),
     ].join('\n') + '\n');
     const r = spawnSync(process.execPath, [TOOL, '--history-file', f, '--bench-history', '/dev/null', '--json'], { encoding: 'utf8' });
     fs.rmSync(d, { recursive: true, force: true });
@@ -112,7 +115,7 @@ describe('improvement-eval: history hygiene', () => {
   it('tolerates blank and malformed lines without throwing', () => {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ime-'));
     const f = path.join(d, 'eval-history.jsonl');
-    fs.writeFileSync(f, '\n{ not json }\n' + JSON.stringify({ scorerVersion: 'eval-v1', treatmentAcc: 0.7, controlAcc: 0.5 }) + '\n\n');
+    fs.writeFileSync(f, '\n{ not json }\n' + JSON.stringify({ scorerVersion: 'eval-v1', ts: '2026-08-01T00:00:00Z', treatmentAcc: 0.7, controlAcc: 0.5 }) + '\n\n');
     const r = spawnSync(process.execPath, [TOOL, '--history-file', f, '--bench-history', '/dev/null', '--json'], { encoding: 'utf8' });
     fs.rmSync(d, { recursive: true, force: true });
     expect(r.status).not.toBeNull();
@@ -227,7 +230,9 @@ describe('improvement-eval: paired-row collection (hermetic, stubbed ruflo)', ()
   function runCollect(liveDir, binDir, baseDir) {
     const r = spawnSync(process.execPath, [TOOL, '--json', '--seeds', '1', '--baseline-dir', baseDir, '--bench-history', '/dev/null'], {
       encoding: 'utf8', cwd: liveDir,
-      env: Object.assign({}, process.env, { PATH: binDir + path.delimiter + process.env.PATH }),
+      // EVAL_TS pins the appended row post-EPOCH_LINE so the paired-row series is
+      // counted by the gate deterministically, independent of wall-clock time.
+      env: Object.assign({}, process.env, { PATH: binDir + path.delimiter + process.env.PATH, EVAL_TS: '2026-08-01T00:00:00Z' }),
     });
     return JSON.parse(r.stdout);
   }

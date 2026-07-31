@@ -22,6 +22,45 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 kit_resolve "$@"
 kit_require_target
 cd "$TARGET_DIR"
+
+# DRY-RUN-SESSION-V1: local override of common.sh's shared run() (which uses
+# `eval "$@"` — word-splitting-fragile if $TARGET_DIR ever has spaces/special
+# chars). Mirrors lib/init.sh's own local run() exactly ("$@" direct exec,
+# no eval) — the established in-repo pattern for making a `bash "$KIT_LIB/
+# xxx.sh" "$TARGET_DIR"` call site --dry-run-aware: no-op + one info line
+# under $DRY_RUN, otherwise pass the command straight through unchanged.
+# Steps 1/2/3b below were calling fix-ruflo.sh/fix-statusbar.sh directly with
+# neither a run() wrapper nor --dry-run forwarding — confirmed live (before
+# this fix): `bin/ruflo-kit session <fresh-target> --dry-run` left 14 real
+# artifacts on an empty directory (the full .claude/helpers tree, .mcp.json +
+# .bak, claude-flow.config.json, .claude/proven-config.json, .claude-flow/
+# harness-active-policy.json, .agentic-qe/) even though this script's Step 3
+# (pin_helpers_module_type) already honored $DRY_RUN — a silently
+# HALF-honored flag, worse than an absent one. Chose to HONOR --dry-run
+# fully rather than reject it, since a partial contract already existed;
+# refusing would have been the more defensible call only if nothing here
+# respected the flag yet.
+run() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] $*"
+    return 0
+  fi
+  "$@"
+}
+
+# _dryflag: forwarded to verify-learning.sh below (VL-DRYRUN-FORWARD-V1 —
+# lib/sync.sh already carries the identical fix, same marker name, for the
+# same reason: verify-learning.sh runs as a SEPARATE bash process, so it
+# cannot inherit $DRY_RUN — the flag must be passed explicitly or Step 9
+# below runs verify-learning.sh live during `session --dry-run`, which was
+# still creating .agentic-qe/ (verify-learning's `aqe ruvector status` probe)
+# even after the three fix-ruflo.sh/fix-statusbar.sh sites above were fixed —
+# confirmed empirically before this addition. Discovered while verifying the
+# "0 artifacts" requirement for THIS fix, not a separate scope expansion: the
+# same class of bug, a 4th site, blocking the same acceptance bar.
+_dryflag=()
+[[ "$DRY_RUN" -eq 1 ]] && _dryflag=(--dry-run)
+
 ERRORS=0
 
 echo "============================================"
@@ -35,10 +74,14 @@ echo "============================================"
 echo -e "\n${CYAN}[1/9]${NC} Applying ruflo patches"
 
 if [[ -f "$KIT_LIB/fix-ruflo.sh" ]]; then
-  # Run fix-ruflo.sh silently, only show fixes
-  FIXES=$(bash "$KIT_LIB/fix-ruflo.sh" "$TARGET_DIR" 2>&1 | grep -c "✓" || true)
-  FIXES=${FIXES:-0}
-  pass "fix-ruflo.sh completed ($FIXES checks passed)"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    run bash "$KIT_LIB/fix-ruflo.sh" "$TARGET_DIR"
+  else
+    # Run fix-ruflo.sh silently, only show fixes
+    FIXES=$(bash "$KIT_LIB/fix-ruflo.sh" "$TARGET_DIR" 2>&1 | grep -c "✓" || true)
+    FIXES=${FIXES:-0}
+    pass "fix-ruflo.sh completed ($FIXES checks passed)"
+  fi
 else
   warn "fix-ruflo.sh not found"
   ((ERRORS++)) || true
@@ -49,9 +92,13 @@ fi
 echo -e "\n${CYAN}[2/9]${NC} Statusbar coexistence check"
 
 if [[ -f "$KIT_LIB/fix-statusbar.sh" ]]; then
-  STATUS_FIXES=$(bash "$KIT_LIB/fix-statusbar.sh" "$TARGET_DIR" 2>&1 | grep -c "✓" || true)
-  STATUS_FIXES=${STATUS_FIXES:-0}
-  pass "fix-statusbar.sh completed ($STATUS_FIXES checks passed)"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    run bash "$KIT_LIB/fix-statusbar.sh" "$TARGET_DIR"
+  else
+    STATUS_FIXES=$(bash "$KIT_LIB/fix-statusbar.sh" "$TARGET_DIR" 2>&1 | grep -c "✓" || true)
+    STATUS_FIXES=${STATUS_FIXES:-0}
+    pass "fix-statusbar.sh completed ($STATUS_FIXES checks passed)"
+  fi
 else
   warn "fix-statusbar.sh not found"
   ((ERRORS++)) || true
@@ -109,13 +156,30 @@ RUFLO_DAEMON_MODE="${RUFLO_DAEMON_MODE:-off}"
 
 echo -e "\n${CYAN}[5/9]${NC} Daemon mode (${RUFLO_DAEMON_MODE})"
 
-# `ruflo daemon status` always exits 0 with an ASCII box. Grep for the
-# canonical "Status: ● RUNNING" line (U+25CF filled circle) and fall back
-# to a literal "RUNNING" match for older versions.
-DAEMON_STATUS_OUT="$(ruflo daemon status 2>/dev/null || true)"
+# DAEMON-HINT-SCOPE-V1 (CORRECTED — this file's exemption reason was WRONG
+# and has been retracted, not just reworded): the original comment here
+# claimed "session has no dry-run or read-only contract to violate." False —
+# Step 3 above (pin_helpers_module_type) already honors $DRY_RUN (the DRYRUN
+# case branch), so this script DOES have a partial dry-run contract, and this
+# call — unconditional, never gated on $DRY_RUN — was inconsistent with it,
+# leaking .claude-flow/logs/daemon.log under `bin/ruflo-kit session <target>
+# --dry-run` the same as lib/health.sh and lib/init.sh did before their
+# conversion. Converted the same way, for the same reason: kit_daemon_scope_split
+# (common.sh) derives RUNNING truth from the process's own argv (pgrep/ps), no
+# CLI call, no disk side effect, and no untrustworthy state-file read (`ruflo
+# daemon status` has been observed live printing "Status: STOPPED" alongside a
+# stale PID in the same table). Reading the MINE bucket answers the same
+# question `ruflo daemon status` (no --all, itself workspace-scoped) answered
+# for THIS target — NOT byte-identically: upstream compares the --workspace
+# argv lexically (path.resolve), kit_daemon_scope_split compares filesystem
+# IDENTITY (dev, ino via fs.statSync), so a symlink- or case-aliased
+# workspace can classify differently between the two (the helper is MORE
+# correct there, not merely different — see kit_daemon_scope_split's own
+# header comment). This script makes no "stop"/"locks"/BILLED remediation
+# claim either way, so OTHER/UNKNOWN are not surfaced separately here, only
+# whether THIS target has one running.
 DAEMON_RUNNING=0
-if echo "$DAEMON_STATUS_OUT" | grep -q $'Status: \xe2\x97\x8f RUNNING'; then DAEMON_RUNNING=1; fi
-if [[ "$DAEMON_RUNNING" -eq 0 ]] && echo "$DAEMON_STATUS_OUT" | grep -qE 'Status:.*RUNNING'; then DAEMON_RUNNING=1; fi
+if kit_daemon_scope_split "$TARGET_DIR" 2>/dev/null | grep -q $'\tMINE\t'; then DAEMON_RUNNING=1; fi
 
 # AQE-DAEMON-ROOT-PIN-V1: pin AQE_PROJECT_ROOT for the daemon + its worker pass.
 # The daemon (and the AQE work / claude --print sessions it spawns) resolves storage
@@ -131,6 +195,17 @@ case "$RUFLO_DAEMON_MODE" in
   auto)
     if [[ "$DAEMON_RUNNING" -eq 1 ]]; then
       pass "daemon already running"
+    elif [[ "$DRY_RUN" -eq 1 ]]; then
+      # DAEMON-HINT-SCOPE-V1 round 6 (coordinator-reopened): this call was
+      # ungated — RUFLO_DAEMON_MODE=auto + --dry-run would spawn a REAL,
+      # billed daemon in direct contradiction of a flag whose entire meaning
+      # is "do nothing." Every other residual accepted this session was a
+      # missed advisory tag or a narrow misclassification; this one is a
+      # billed background process, hence gated rather than left as a
+      # documented gap. Only reachable when an operator has already opted
+      # into RUFLO_DAEMON_MODE=auto for REAL runs — --dry-run must still
+      # mean "do nothing" on top of that opt-in, not override it.
+      run ruflo daemon start
     else
       info "daemon stopped — starting (RUFLO_DAEMON_MODE=auto, AQE_PROJECT_ROOT pinned)"
       if ruflo daemon start >/tmp/ruflo-session-daemon-start.log 2>&1; then
@@ -142,11 +217,15 @@ case "$RUFLO_DAEMON_MODE" in
     fi
     ;;
   once)
-    info "single worker pass (RUFLO_DAEMON_MODE=once) — no persistent loop"
-    if ruflo daemon trigger -w audit >/tmp/ruflo-session-daemon-trigger.log 2>&1; then
-      pass "worker pass complete"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      run ruflo daemon trigger -w audit
     else
-      warn "daemon trigger failed (see /tmp/ruflo-session-daemon-trigger.log)"
+      info "single worker pass (RUFLO_DAEMON_MODE=once) — no persistent loop"
+      if ruflo daemon trigger -w audit >/tmp/ruflo-session-daemon-trigger.log 2>&1; then
+        pass "worker pass complete"
+      else
+        warn "daemon trigger failed (see /tmp/ruflo-session-daemon-trigger.log)"
+      fi
     fi
     ;;
   *)
@@ -249,8 +328,12 @@ if [[ -n "$GLOBAL_MEM" ]]; then
     pass "Global controller-registry resolves agentdb@$NESTED_VER (7 controllers active)"
   else
     warn "Global nested agentdb is $NESTED_VER (expected $EXPECT_AGENTDB) — 7 controllers will be dormant"
-    info "Re-applying via fix-ruflo.sh (Step 3b)..."
-    bash "$KIT_LIB/fix-ruflo.sh" "$TARGET_DIR" 2>&1 | grep -E "3b/11|controller|alpha\.10" | head -5
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      run bash "$KIT_LIB/fix-ruflo.sh" "$TARGET_DIR"
+    else
+      info "Re-applying via fix-ruflo.sh (Step 3b)..."
+      bash "$KIT_LIB/fix-ruflo.sh" "$TARGET_DIR" 2>&1 | grep -E "3b/11|controller|alpha\.10" | head -5
+    fi
     ((ERRORS++)) || true
   fi
 else
@@ -342,7 +425,7 @@ GRAPH_BIN=$(_find_native "ruvector-graph*.node")
 echo -e "\n${CYAN}[9/9]${NC} Self-learning loop liveness (read-only)"
 
 if [[ -f "$KIT_LIB/verify-learning.sh" ]]; then
-  VL_JSON="$(bash "$KIT_LIB/verify-learning.sh" "$TARGET_DIR" --json 2>/dev/null | tail -1)"
+  VL_JSON="$(bash "$KIT_LIB/verify-learning.sh" "$TARGET_DIR" --json ${_dryflag[@]+"${_dryflag[@]}"} 2>/dev/null | tail -1)"
   VL_VERDICT="$(node -e "try{process.stdout.write((JSON.parse(process.argv[1]).verdict)||'unknown')}catch(e){process.stdout.write('unknown')}" "$VL_JSON" 2>/dev/null || echo unknown)"
   case "$VL_VERDICT" in
     live)    pass "learning loop live" ;;

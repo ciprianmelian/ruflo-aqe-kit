@@ -33,8 +33,33 @@ header() { echo -e "\n${CYAN}[$1]${NC} ${BOLD}$2${NC}"; }
 
 kit_resolve "$@"
 [[ "$KIT_WANT_HELP" -eq 1 ]] && { sed -n '4,17p' "$0"; exit 0; }
-mkdir -p "$TARGET_DIR"   # init may bootstrap a brand-new codebase path
-cd "$TARGET_DIR"
+
+# DRY-RUN-SAFE-BOOTSTRAP-V1: init may bootstrap a brand-new codebase path, but
+# a --dry-run must never mutate the filesystem to do so (B11: this mkdir used
+# to run unconditionally, so `sync --dry-run` against a fresh target
+# physically created it). Only create $TARGET_DIR when NOT in dry-run. A
+# dry-run against a target that already exists just cds in (mkdir -p on an
+# existing dir would have been a no-op anyway, but we skip the call entirely
+# so a dry-run touches nothing, ever). A dry-run against a target that does
+# NOT exist yet reports what would happen and continues against a disposable
+# throwaway workspace, so every downstream file-existence check still runs and
+# correctly reports "not found" — exactly what a real fresh target would show
+# — without ever touching the real target path.
+_INIT_DRYRUN_TMP=""
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ -d "$TARGET_DIR" ]]; then
+    cd "$TARGET_DIR"
+  else
+    info "[dry-run] would create target directory: $TARGET_DIR (does not exist yet)"
+    _INIT_DRYRUN_TMP="$(mktemp -d)"
+    trap '[[ -n "$_INIT_DRYRUN_TMP" ]] && rm -rf "$_INIT_DRYRUN_TMP"' EXIT
+    info "[dry-run] simulating against a disposable empty workspace (no real files touched): $_INIT_DRYRUN_TMP"
+    cd "$_INIT_DRYRUN_TMP"
+  fi
+else
+  mkdir -p "$TARGET_DIR"   # init may bootstrap a brand-new codebase path
+  cd "$TARGET_DIR"
+fi
 # --force is the superset — implies --reactivate semantics
 [[ "$FORCE" -eq 1 ]] && REACTIVATE=1
 
@@ -118,7 +143,11 @@ fi
 # kit_preserve/restore_model_caches (wired into upgrade.sh and fix-aqe Step 9),
 # which reseed the package-local caches. Overridable via RUFLO_MODEL_CACHE.
 RUFLO_MODEL_CACHE="${RUFLO_MODEL_CACHE:-$HOME/.cache/ruflo-models}"
-mkdir -p "$RUFLO_MODEL_CACHE"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  [[ -d "$RUFLO_MODEL_CACHE" ]] || info "[dry-run] would create ONNX model vault: $RUFLO_MODEL_CACHE"
+else
+  mkdir -p "$RUFLO_MODEL_CACHE"
+fi
 export TRANSFORMERS_CACHE="$RUFLO_MODEL_CACHE"
 pass "ONNX model vault: $RUFLO_MODEL_CACHE (reseeds package caches via MODEL-CACHE-SEED-V1)"
 
@@ -607,14 +636,31 @@ fi
 # When opted in: MUST run last — depends on memory + embeddings + HNSW being
 # up so workers don't crash-loop. With --force, stop the daemon first to
 # re-seat workers against any new config.
-# NOTE: `ruflo daemon status` ALWAYS exits 0 with an ASCII box — exit code
-# is unreliable. Grep for the canonical "Status: ● RUNNING" line (U+25CF
-# filled circle); fall back to a literal "RUNNING" match for older versions.
+# DAEMON-HINT-SCOPE-V1: replaced `ruflo daemon status`. That CLI call ran
+# unconditionally regardless of $DRY_RUN and has two established problems:
+# (1) its own side effect of instantiating internal config objects just to
+# print a table creates .claude-flow/logs/daemon.log — confirmed empirically
+# to fire even under `bin/ruflo-kit init <target> --dry-run` against a fresh
+# target, in direct contradiction of this script's own documented dry-run-
+# inertness contract (the B11 comment above the mkdir near the top of this
+# file: "a --dry-run must never mutate the filesystem"); this was a THIRD,
+# previously unaddressed instance of that same contract violation. (2) its
+# state-file-style output cannot be trusted — observed live printing "Status:
+# STOPPED" alongside a stale PID in the same table. kit_daemon_scope_split
+# (common.sh) derives truth from the process's own argv (pgrep/ps), with no
+# disk side effect. Reading its MINE bucket answers the same question `ruflo
+# daemon status` (no --all, itself workspace-scoped) answered for THIS
+# target — NOT byte-identically: upstream compares the --workspace argv
+# lexically (path.resolve), while kit_daemon_scope_split compares filesystem
+# IDENTITY (dev, ino via fs.statSync), so a symlink- or case-aliased
+# workspace path can classify differently between the two. That is the
+# helper being MORE correct, not merely different — see
+# kit_daemon_scope_split's own header comment (DAEMON-HINT-SCOPE-V1 round 2)
+# for the case-aliasing bug this closes — but it means "reproduces exactly"
+# would overstate the parity; it does not.
 RUFLO_DAEMON_MODE="${RUFLO_DAEMON_MODE:-off}"
-DAEMON_STATUS_OUT="$( "${RUFLO_CMD[@]}" daemon status 2>/dev/null || true )"
 DAEMON_RUNNING=0
-if echo "$DAEMON_STATUS_OUT" | grep -q $'Status: \xe2\x97\x8f RUNNING'; then DAEMON_RUNNING=1; fi
-if [[ "$DAEMON_RUNNING" -eq 0 ]] && echo "$DAEMON_STATUS_OUT" | grep -qE 'Status:.*RUNNING'; then DAEMON_RUNNING=1; fi
+if kit_daemon_scope_split "$TARGET_DIR" 2>/dev/null | grep -q $'\tMINE\t'; then DAEMON_RUNNING=1; fi
 
 if [[ "$RUFLO_DAEMON_MODE" != "auto" ]]; then
   info "7G: daemon auto-start OFF (cost-safe default) — set RUFLO_DAEMON_MODE=auto to opt in"

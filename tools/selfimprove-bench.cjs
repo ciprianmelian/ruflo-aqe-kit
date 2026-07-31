@@ -185,6 +185,21 @@ function appendHistory(row) {
 }
 
 (function main() {
+  // TARGET-ECHO-V1 (B14 silent-wrong-target): bench/dashboard/harvest resolve
+  // their target by inspecting ONLY $1 (bin/ruflo-kit _kit_firstarg_resolve) —
+  // a flag-first invocation (e.g. `bench --json <target>`) silently falls back
+  // to cwd instead of the intended target, and this tool has no way to tell
+  // that fallback apart from an explicit `.` (the dispatcher has already cd'd
+  // us into whatever it resolved by the time we run). Printing the resolved
+  // directory unconditionally, before the history file is ever written, is
+  // what turns a silent wrong-target into a visible one — dashboard.cjs
+  // already does this in its startup banner; bench previously echoed nothing.
+  // Stderr (not stdout): --json's whole output is a single JSON blob and
+  // --quiet's documented contract is a single verdict line ("suppress
+  // chatter" — README/CHEATSHEET) — stderr keeps both intact while still
+  // reaching an interactive terminal, which is the actual failure mode here.
+  console.error(`[selfimprove-bench] target: ${CWD}`);
+  console.error('[selfimprove-bench] writes: .claude-flow/selfimprove-history.jsonl');
   const routing = measureRouting();
   const state = measureLearningState();
   const aqe = measureAqeRouter(); // WS3c — diagnostic arm (does NOT change the verdict)

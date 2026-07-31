@@ -195,24 +195,204 @@ kit_sqlite_ro() {
 }
 
 # kit_sqlite_backup "<db>" "<dest>" — WAL-safe online backup of <db> to <dest>
-# (parent dirs created). Exit 0 iff the backup landed non-empty.
+# (parent dirs created).
+#
+# Tri-state exit code (B17 fix — matches this file's existing 0/1/2
+# convention, e.g. kit_sqlite_rw_check / kit_memory_roundtrip_check, rather
+# than inventing a fourth style). This is the COMPLETE, real contract as of
+# round 4 — every path through this function returns exactly one of these
+# three values, never anything else, AND it never crashes its (sourcing)
+# caller even when called with too few arguments under `set -u` (round 4;
+# see the explicit clamps and the "${1:-}"/"${2:-}" guard below):
+#   0 success         — the backup command itself reported success AND the
+#                       copy is non-empty AND the copy opens and answers a
+#                       trivial query (READBACK-CHECK-V1, below). `dest` is
+#                       only ever replaced with this verified-good copy —
+#                       see the atomic temp+rename note.
+#   1 genuine failure — a backup was ATTEMPTED (input existed, an instrument
+#                       was available) but the command itself failed, OR the
+#                       copy ended up empty/missing, OR the copy is present
+#                       but not a valid, openable sqlite file — "it looked
+#                       like it worked and didn't." This is the dangerous
+#                       case: a bad backup silently reporting the same code
+#                       as a typo'd path is how a restore discovers there was
+#                       nothing to restore. `dest` is left UNTOUCHED on this
+#                       path (see below) — whatever was there before this
+#                       call, valid or not, survives unchanged.
+#   2 usage/precondition — the backup was NEVER attempted: either the input
+#                       `db` (or `dest`) was never given at all (round 4 —
+#                       see below), the input `db` doesn't exist (a bad-input/
+#                       usage condition — the caller asked for a file that
+#                       isn't there), or this host has no instrument at all to
+#                       back up WITH (no sqlite3 CLI and no loadable global
+#                       better-sqlite3). Previously both of these AND the
+#                       rc=1 genuine-failure case above all returned the
+#                       same bare `1`, so a caller could not distinguish
+#                       "you asked for a file that isn't there" from "the
+#                       backup silently produced nothing" — the second being
+#                       the one that matters.
+#
+# B17 ROUND 2: the round-1 fix above only replaced the two precondition
+# `return 1`s with `return 2` — it never touched the SUCCESS gate, which was
+# `[[ -s "$dest" ]]` alone, never checking whether the backup COMMAND itself
+# actually reported success. A critic reproduced live: point `db` at a file
+# that isn't a valid sqlite database at all (`sqlite3 .backup` then fails
+# with a printed error AND a non-zero exit) while `dest` already has stale
+# non-empty content sitting there (e.g. a leftover from a previous run at a
+# reused path) — the old code returned 0 ("success"), because it never looked
+# at sqlite3's exit status, only at whether *some* non-empty file happened to
+# exist afterward. The dangerous live sibling: sqlite3 dying mid-copy (I/O
+# error, disk full, killed) leaves a partial/corrupt but still non-empty file
+# at a genuinely FRESH destination — same false-positive shape, no stale
+# leftover required. Fixed by checking the command's own exit status FIRST,
+# THEN the non-empty check, THEN a cheap sanity read (`SELECT 1`, not a full
+# `PRAGMA integrity_check` — a page-by-page scan is disproportionate cost for
+# every routine backup call) confirming the copy is actually openable as a
+# database, matching this file's existing "resolve -> open -> query"
+# precedent (kit_bsqlite_native_status) rather than trusting a bare
+# non-empty byte count.
+#
+# B17 ROUND 3 (adversarial critic, three more findings, all fixed here):
+#  (a) The round-2 CLI-arm readback (`sqlite3 "$dest" "SELECT 1;"`) was the
+#      function's LAST command with no `|| return 1` — bash returns a
+#      function's last command's own exit status when nothing overrides it,
+#      so a corrupt-but-openable db (sqlite3 reports SQLITE_CORRUPT = 11 on
+#      that query) made this function return 11, silently violating its own
+#      documented 0/1/2 contract for any caller that matches rc strictly (the
+#      node arm never had this bug — its script explicitly `process.exit
+#      (0)`/`process.exit(1)`, so arm parity was genuinely broken, not just
+#      theoretical). Fixed: both arms' readback now sets an explicit
+#      `check_rc` variable, clamped with `[[ "$check_rc" -eq 0 ]] || return 1`
+#      — no raw command exit code can escape this function on ANY path.
+#  (b) The round-2 readback had ZERO test coverage: the round-2 regression
+#      fixture uses literal garbage text as the "corrupt source", which fails
+#      at the cmd_rc gate and returns before the readback line is ever
+#      reached — so round 2's actual new code path shipped untested (see
+#      tests/kit-sqlite-backup-rc.test.js for the fake-`sqlite3`-shim fixture
+#      that finally reaches it: reports success on `.backup` while writing a
+#      deliberately corrupt destination, then fails the readback query).
+#  (c) A failing backup could destroy a previously-valid, non-empty `dest`
+#      before discovering the source/copy was bad (the round-2 fix wrote
+#      directly to the final `dest` path and only checked afterward).
+#      Unreachable via the sole caller today (lib/snapshot.sh always builds a
+#      fresh timestamped `dest` and never reuses one), but this helper stands
+#      between adopt/snapshot and a user's real learning database, so
+#      "unreachable today" is exactly the kind of latent risk that becomes
+#      live later. Fixed by writing to a `$dest.tmp.$$` sibling in the same
+#      directory and promoting it onto `dest` ONLY after every check above
+#      has passed — non-destruction of a pre-existing `dest` on any failure
+#      path is now true BY CONSTRUCTION, not by accident of which failure
+#      mode happened to be hit first. The temp file is removed on every
+#      failure path, so nothing is left behind either. HOW that promotion
+#      happens was itself wrong on the first attempt — see ROUND 4 (a).
+#
+# B17 ROUND 4 (adversarial critic, two more findings):
+#  (a) Round 3(c)'s promotion step shelled out to `node -e fs.renameSync`
+#      UNCONDITIONALLY on both arms, justified by a claim — "this function
+#      already depends unconditionally on node" — that was simply wrong: the
+#      CLI arm's readback uses `sqlite3`, not `node`, and this codebase's own
+#      convention already treats bare `mv` as safe everywhere else with no
+#      guard. Confirmed live: `PATH=/usr/bin:/bin` (sqlite3 present, node
+#      absent), a genuinely valid source and a successful backup+readback,
+#      still returned rc=1 with NO `dest` created — a worse outcome than the
+#      round-3(c) destruction it was meant to prevent, and reachable on any
+#      host with sqlite3 but no node. The test that motivated the swap
+#      (tests/adopt-snapshot.test.js's minimal-PATH fixture) only ever
+#      exercises the NODE arm (its PATH has no sqlite3 at all), so it was
+#      structurally incapable of catching a new CLI-arm dependency — the
+#      exact same "fixture never reaches the line it's meant to protect"
+#      shape as round 3(b)'s readback-coverage gap, one layer up. Fixed:
+#      prefer `mv` (this file's own established unconditional dependency),
+#      falling back to node's `renameSync` only when `mv` itself is
+#      genuinely unavailable — restores the CLI arm's node-independence
+#      while keeping the minimal-PATH node-arm case working.
+#  (b) Calling this function with fewer than 2 arguments crashed the CALLING
+#      (sourcing) script under `set -u` with bash's own "unbound variable"
+#      error, rather than returning cleanly — pre-existing, not introduced by
+#      rounds 1-3, but the round-3 docstring asserted an absolute "never
+#      anything else" 0/1/2 guarantee that this falsified. A helper this
+#      load-bearing must not be able to take its caller down over a missing
+#      argument. Fixed: `local db="${1:-}" dest="${2:-}"` plus an explicit
+#      `[[ -n "$db" && -n "$dest" ]] || return 2` guard — missing/empty
+#      arguments now join "input db doesn't exist" in the same rc=2
+#      usage/precondition bucket, and the 0/1/2 claim is now actually true.
 kit_sqlite_backup() {
-  local db="$1" dest="$2"
-  [[ -f "$db" ]] || return 1
+  # "${1:-}"/"${2:-}", not "$1"/"$2": a caller under `set -u` invoking this
+  # with zero or one argument must get a clean rc=2 (usage/precondition —
+  # the same bucket "input db missing" already lives in), never crash the
+  # CALLING script with bash's own "unbound variable" error. Confirmed live
+  # pre-fix: `kit_sqlite_backup realsource.db` (dest omitted) under `set -u`
+  # aborted the sourcing script entirely before this function could return
+  # anything at all — a helper this load-bearing must not be able to take
+  # its caller down over a missing argument.
+  local db="${1:-}" dest="${2:-}"
+  [[ -n "$db" && -n "$dest" ]] || return 2
+  [[ -f "$db" ]] || return 2
   mkdir -p "$(dirname "$dest")" 2>/dev/null
+  local tmp="${dest}.tmp.$$"
+  rm -f "$tmp" 2>/dev/null
+  local cmd_rc arm
   if command -v sqlite3 >/dev/null 2>&1; then
-    sqlite3 "$db" ".backup '$dest'" 2>/dev/null
+    arm=cli
+    sqlite3 "$db" ".backup '$tmp'" 2>/dev/null
+    cmd_rc=$?
   else
     local bs; bs="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
-    [[ -d "$bs" ]] || return 1
+    [[ -d "$bs" ]] || return 2
+    arm=node
     node -e '
       const B = require(process.argv[1]);
       const db = new B(process.argv[2], { readonly: true, fileMustExist: true });
       db.backup(process.argv[3]).then(() => { db.close(); process.exit(0); })
         .catch(() => { process.exit(1); });
-    ' "$bs" "$db" "$dest" 2>/dev/null
+    ' "$bs" "$db" "$tmp" 2>/dev/null
+    cmd_rc=$?
   fi
-  [[ -s "$dest" ]]
+  if [[ "$cmd_rc" -ne 0 ]]; then rm -f "$tmp" 2>/dev/null; return 1; fi
+  if [[ ! -s "$tmp" ]]; then rm -f "$tmp" 2>/dev/null; return 1; fi
+  # READBACK-CHECK-V1: confirm the fresh copy is an openable database before
+  # ever promoting it onto `dest`. `check_rc` is explicitly set to exactly 0
+  # or 1 on both arms — no raw sqlite3/node exit code (e.g. SQLITE_CORRUPT=11)
+  # can escape this function on any path.
+  local check_rc
+  if [[ "$arm" == cli ]]; then
+    sqlite3 "$tmp" "SELECT 1;" >/dev/null 2>&1
+    check_rc=$?
+  else
+    local bs2; bs2="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
+    node -e '
+      try {
+        const B = require(process.argv[1]);
+        const db = new B(process.argv[2], { readonly: true, fileMustExist: true });
+        db.prepare("SELECT 1").get();
+        db.close();
+        process.exit(0);
+      } catch (e) { process.exit(1); }
+    ' "$bs2" "$tmp" 2>/dev/null
+    check_rc=$?
+  fi
+  if [[ "$check_rc" -ne 0 ]]; then rm -f "$tmp" 2>/dev/null; return 1; fi
+  # Promote via `mv` FIRST (round 4 fix — round 3 had this backwards). `mv`
+  # is this codebase's own established unconditional dependency: bare,
+  # unguarded `mv` appears throughout this file and its callers with no
+  # `command -v mv` check anywhere, and the CLI arm above (readback via
+  # `sqlite3`, not `node`) never needed `node` at all before round 3 — the
+  # earlier "node already unconditional" justification was wrong, confirmed
+  # live: `PATH=/usr/bin:/bin` (sqlite3 present, node absent) made a
+  # perfectly valid backup return failure and produce nothing, purely
+  # because promotion couldn't run. Only fall back to node's
+  # `fs.renameSync` when `mv` itself is genuinely unavailable — the shape
+  # tests/adopt-snapshot.test.js's minimal-PATH fixture (node/npm/dirname/
+  # mkdir, no sqlite3, no `mv`) actually is, which is why that regression
+  # surfaced there and nowhere else: it never exercises the CLI arm at all.
+  if command -v mv >/dev/null 2>&1; then
+    if ! mv -f "$tmp" "$dest" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 1; fi
+  else
+    if ! node -e 'require("fs").renameSync(process.argv[1], process.argv[2])' "$tmp" "$dest" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null; return 1
+    fi
+  fi
+  return 0
 }
 
 # kit_sqlite_backend — which sqlite instrument this host has (KIT-SQLITE-SHIM-V1).
@@ -531,12 +711,23 @@ kit_run_timeout() {
 #
 # Echoes exactly one line "<verdict>|<detail>" and returns:
 #   0 healthy        — full round trip verified: CLI store, CLI retrieve,
-#                       independent on-disk confirmation (when a reader was
-#                       available), CLI purge, and a post-purge CLI retrieve
-#                       that correctly finds nothing.
+#                       independent on-disk confirmation via a SEPARATE reader
+#                       (mandatory — see the "no instrument" gap case below),
+#                       CLI purge, and a post-purge CLI retrieve that
+#                       correctly finds nothing.
 #   1 gap            — `ruflo` IS present but the round trip did not hold at
 #                       some step (a "genuine failure", not a missing
-#                       instrument).
+#                       instrument) — INCLUDING when `kit_sqlite_backend`
+#                       returns anything other than `cli`/`node` (no sqlite3
+#                       CLI, global better-sqlite3 unloadable): a CLI-only
+#                       round trip (store, then retrieve, matches) is exactly
+#                       what the side-channel-echo defect this probe exists
+#                       to catch would also produce, so the absence of a
+#                       second, independent reader is a genuine gap in what
+#                       could be verified, not a pass by default — the same
+#                       "absent instrument is not a pass" precedent
+#                       kit_sqlite_rw_check (rc 2) and kit_bsqlite_verdict
+#                       (not-assessable) already set in this file.
 #   2 not-assessable — no memory layer to test at all (`ruflo` not on PATH, or
 #                       the host cannot even provide a `mktemp -d`). MUST NOT
 #                       collapse into "healthy" — mirrors the exact tri-state
@@ -558,12 +749,11 @@ kit_run_timeout() {
 # `ak x verify` overall exit code cannot distinguish "no ruflo to test" from
 # "ruflo is broken", the identical conflation kit_bsqlite_gap's round-1
 # boolean had before kit_bsqlite_verdict fixed it. This helper's rc=2 avoids
-# reintroducing that. Also worth a look elsewhere in this file:
-# kit_sqlite_backup returns the same rc=1 for "no such file" (a bad-input/
-# usage condition) as for "backup ran but produced an empty file" (a genuine
-# failure) — a real instance of the conflation this task asked to check for,
-# left as-is here since kit_sqlite_backup is outside this adoption's
-# footprint; noting it for whoever next touches that function.
+# reintroducing that. (Also flagged elsewhere in this file at the time: a
+# real instance of the same conflation in kit_sqlite_backup — rc=1 shared
+# between "no such input file" and "backup ran but produced an empty file" —
+# fixed in B17, same rc convention as here: 0/1/2 = success/genuine
+# failure/usage-precondition.)
 kit_memory_roundtrip_check() {
   if ! command -v ruflo >/dev/null 2>&1; then
     printf 'not-assessable|ruflo not on PATH\n'
@@ -609,10 +799,17 @@ kit_memory_roundtrip_check() {
     fi
 
     # Identify the writer: an independent reader, not the CLI that just
-    # claimed success. Best-effort by design — its absence does not itself
-    # demote an otherwise-real CLI round trip to not-assessable, because
-    # `ruflo` (the memory layer actually under test) IS present; see the
-    # docstring above.
+    # claimed success. This step is MANDATORY, not best-effort (fixed —
+    # B19/round-2): a CLI-only round trip (store, then retrieve, matches) is
+    # exactly what a store that echoes a cached value back on retrieve, while
+    # never actually writing to disk, would also produce — the precise
+    # side-channel-echo defect this whole probe exists to catch. Skipping
+    # this step on an instrument-less host would silently degrade the probe
+    # back to that same CLI-only check it was built to move past, so the
+    # `else` branch below treats "neither instrument available" as a genuine
+    # gap, never a pass — the same "absent instrument is not a pass"
+    # precedent kit_sqlite_rw_check (rc 2) and kit_bsqlite_verdict
+    # (not-assessable) already set in this file.
     local backend; backend="$(kit_sqlite_backend 2>/dev/null)"
     if [[ "$backend" == "cli" ]]; then
       local row
@@ -635,6 +832,13 @@ kit_memory_roundtrip_check() {
       if [[ "$row" != "$val" ]]; then
         verdict=gap; detail="independent better-sqlite3 read of memory_entries did not show the stored value on disk"; rc=1; break
       fi
+    else
+      # Neither a sqlite3 CLI nor a loadable global better-sqlite3: there is
+      # no second reader to identify the writer with. The detail says so
+      # explicitly — "no independent verification performed" — so this can
+      # never be misread as a completed, honest confirmation the way
+      # "on-disk confirm (none)" previously could.
+      verdict=gap; detail="no independent verification performed: neither the sqlite3 CLI nor a loadable global better-sqlite3 is available to confirm the write on disk (CLI-only claims are not sufficient proof)"; rc=1; break
     fi
 
     if ! ( cd "$tmp" && RUFLO_DAEMON_AUTOSTART=0 kit_run_timeout "$secs" \
@@ -720,6 +924,111 @@ kit_daemon_ps_lines() {
     [[ -n "$line" ]] && printf '%s\n' "$line"
   done
   return 0
+}
+
+# kit_daemon_scope_split <target_dir> — TRI-STATE classification of every
+# daemon line from kit_daemon_ps_lines against <target_dir> (B24-DAEMON-
+# SCOPE-V1). Fixes a real regression: probe_daemon_advisory used to consume
+# kit_daemon_ps_lines directly and asserted a target-specific causal claim
+# ("it locks the DBs") for ANY ruflo daemon found ANYWHERE on the host —
+# kit_daemon_ps_lines is deliberately UNSCOPED (it "mirrors BOTH existing
+# sites", status.sh/proof.sh, which want the global view), so on any dev
+# machine running two or more kit-managed projects at once that claim was
+# false for every daemon that belonged to a DIFFERENT project. This helper
+# restores workspace scoping, reusing tools/daemon-staleness.cjs's pure
+# parseWorkspace (handles both '--workspace <p>' and '--workspace=<p>' argv
+# forms) instead of hand-rolling awk/sed.
+#
+# Buckets:
+#   MINE    — the daemon's --workspace argv identifies the SAME directory as
+#             <target_dir>, compared by FILESYSTEM IDENTITY — (dev, ino) from
+#             fs.statSync — never by comparing path strings, even realpath'd
+#             ones (DAEMON-HINT-SCOPE-V1 round 2, mirrors lib/fix-aqe.sh's
+#             INTEL-ROOTWALK-V1 v5, the same identity-not-strings fix already
+#             established for the resolveProjectRoot walk-up boundary). A
+#             realpath'd STRING compare was tried first and was wrong: on a
+#             case-insensitive-but-preserving filesystem (macOS APFS),
+#             realpathSync PRESERVES input case, so a daemon's --workspace
+#             differing from the target only in case string-mismatched and
+#             classified OTHER — telling an operator a daemon that ACTUALLY
+#             locks their DBs does not, which is worse than the original bug
+#             (that one told them to stop a daemon they couldn't reach; this
+#             one tells them to ignore one that's locking their database).
+#             Comparing identity instead closes case-aliasing, symlink-
+#             aliasing, trailing separators, and '..' segments in one move.
+#             If EITHER side cannot be stat'd (the daemon already exited
+#             between discovery and classification, or --workspace points
+#             somewhere no longer on disk), identity is genuinely
+#             undeterminable — classify UNKNOWN, never guess MINE or OTHER
+#             from a string fallback. A daemon whose workspace is a PARENT or
+#             SUBDIRECTORY of the target is still classified OTHER, not MINE,
+#             by design: `ruflo daemon status --workspace <dir>` (the call
+#             this helper's caller replaces) is itself exact-match scoped per
+#             its own --help, and each daemon process locks the DBs of the
+#             ONE workspace directory it was started with — a parent-
+#             workspace daemon does not necessarily even touch a specific
+#             subdirectory's DBs, and a subdirectory-workspace daemon cannot
+#             lock files that live only in the parent. Treating an
+#             ancestor/descendant match as "mine" would just resurrect the
+#             false-positive class this fix closes, with a narrower but
+#             still-wrong blast radius instead of an unscoped one.
+#   OTHER   — --workspace argv present, parsed, stat'd, and identity-confirmed
+#             NOT the target. Informational only — must NEVER fire the "it
+#             locks the DBs" causal claim.
+#   UNKNOWN — no --workspace token in argv at all (parseWorkspace's own '?'
+#             sentinel — e.g. a daemon started without --workspace, or an
+#             ancient/foreign argv shape), OR a --workspace token that IS
+#             present but whose identity could not be established (stat
+#             failure on either side). Scope is genuinely undeterminable;
+#             hedge, never silently fold into MINE or OTHER.
+#
+# stdout: one tab-separated line per daemon: "<pid>\t<MINE|OTHER|UNKNOWN>\t<ws-or-?>"
+# rc: 0 always (detection-only, matches kit_daemon_ps_lines's own contract).
+kit_daemon_scope_split() {
+  local target="$1" lines cjs
+  lines="$(kit_daemon_ps_lines 2>/dev/null)"
+  [[ -n "$lines" ]] || return 0
+  cjs="$KIT_TOOLS/daemon-staleness.cjs"
+  if [[ ! -f "$cjs" ]] || ! command -v node >/dev/null 2>&1; then
+    # Can't parse --workspace argv without the shared parser or a JS runtime —
+    # every row is genuinely UNKNOWN, never guessed via ad-hoc bash parsing.
+    awk '{print $1"\tUNKNOWN\t?"}' <<< "$lines"
+    return 0
+  fi
+  KIT_SCOPE_TARGET="$target" node -e '
+    const { parseWorkspace } = require(process.argv[1]);
+    const fs = require("fs");
+    const target = process.env.KIT_SCOPE_TARGET;
+    // Identity, not strings (see the MINE bucket doc above for why). A stat
+    // failure on either side is NOT a string fallback in disguise — it is
+    // mapped straight to UNKNOWN by sameDir returning null.
+    const statSafe = (p) => { try { return fs.statSync(p); } catch (e) { return null; } };
+    const targetSt = statSafe(target);
+    const sameDir = (p) => {
+      const st = statSafe(p);
+      if (!st || !targetSt) return null; // undeterminable
+      return st.dev === targetSt.dev && st.ino === targetSt.ino;
+    };
+    let input = "";
+    process.stdin.on("data", (d) => { input += d; });
+    process.stdin.on("end", () => {
+      for (const raw of input.split("\n")) {
+        const t = raw.trim();
+        if (!t) continue;
+        const m = t.match(/^(\d+)\s+(\S+)\s+(.*)$/);
+        if (!m) continue;
+        const ws = parseWorkspace(m[3].split(/\s+/));
+        let state;
+        if (ws === "?") {
+          state = "UNKNOWN";
+        } else {
+          const same = sameDir(ws);
+          state = same === null ? "UNKNOWN" : (same ? "MINE" : "OTHER");
+        }
+        process.stdout.write(m[1] + "\t" + state + "\t" + ws + "\n");
+      }
+    });
+  ' -- "$cjs" <<< "$lines"
 }
 
 # kit_daemon_dist_newest_mtime — newest mtime (epoch) among the kit-patched

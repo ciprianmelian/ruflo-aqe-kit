@@ -96,6 +96,33 @@ const normPath = (p) => (p && p !== '?' ? p.replace(/\/+$/, '') || '/' : p);
 // [{pid, workspace, startEpoch, state, tags}]. STALE iff the daemon started
 // strictly BEFORE the newest patched-dist mtime; no mtime => FRESH (fail-safe:
 // detection-only, never claim staleness we cannot prove).
+//
+// KNOWN LIMITATION (deliberate, not an oversight — DAEMON-HINT-SCOPE-V1
+// round 4): the suspect:home-workspace (below) and suspect:subdir-of-pid-N
+// tags compare workspace paths LEXICALLY via normPath (a string transform —
+// trailing-slash strip, no realpath, no stat), the exact same class of
+// comparison that was WRONG in lib/common.sh's kit_daemon_scope_split before
+// it was fixed to compare filesystem IDENTITY, (dev, ino) from fs.statSync.
+// On a case-insensitive-but-preserving filesystem (macOS APFS) or across a
+// symlink alias, two workspace strings that are the SAME directory can fail
+// to string-match here, and a genuine home-workspace or subdir relationship
+// is silently MISSED.
+//
+// This is NOT converted to identity comparison, on purpose: (1) this module
+// is a PURE function over already-parsed argv strings, deliberately
+// filesystem-free so it stays unit-testable with fake ps lines and no
+// fixtures — kit_daemon_scope_split's fs.statSync calls would require real
+// directories on disk, destroying that property; (2) the output here is an
+// ADVISORY TAG ("suspect:..."), not a confident scope decision — a missed
+// tag under case/symlink aliasing is a false NEGATIVE in a hint, not the
+// confident false claim kit_daemon_scope_split's bug produced (that one told
+// an operator a daemon does NOT lock their target's DBs when it actually
+// does; missing a "this looks like a stray home-workspace daemon" tag is a
+// strictly lower-severity miss). If this function's tags are ever consumed
+// to make a confident MINE/OTHER-style claim rather than an advisory
+// suggestion, it should switch to identity comparison the same way
+// kit_daemon_scope_split did — not before, since that would trade away
+// purity/testability for a property this output doesn't currently need.
 function classify(daemons, newestMtime, home) {
   const nhome = normPath(home || '');
   return daemons.map((d) => {
@@ -164,4 +191,10 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { parseElapsed, parseWorkspace, parseLines, classify, formatRow, formatReport, REMEDY };
+// normPath: lib/common.sh's kit_daemon_scope_split no longer imports this
+// (its identity-based (dev,ino) classifier doesn't need it) — its ONLY
+// consumer is tests/daemon-staleness.test.js's TEETH test, which requires it
+// to reconstruct the PRE-FIX kit_daemon_scope_split body verbatim. Do NOT
+// drop this as an "unused export" — doing so silently breaks that test's
+// ability to prove the case-aliasing regression against the old code.
+module.exports = { parseElapsed, parseWorkspace, parseLines, classify, formatRow, formatReport, normPath, REMEDY };

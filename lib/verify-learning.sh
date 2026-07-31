@@ -25,13 +25,24 @@ set -uo pipefail
 # Usage:
 #   bin/ruflo-kit verify-learning <target>            # human report, exit 1 if hollow
 #   bin/ruflo-kit verify-learning <target> --json     # machine-readable summary
+#   bin/ruflo-kit verify-learning <target> --dry-run  # same probes; the one CLI
+#                                                      #   call with no disk
+#                                                      #   substitute (aqe
+#                                                      #   ruvector status) is
+#                                                      #   skipped instead of
+#                                                      #   run, since running it
+#                                                      #   creates .agentic-qe/
+#                                                      #   as an upstream side
+#                                                      #   effect (B24)
 #   bin/ruflo-kit verify-learning <target> -h|--help  # this help
 # ============================================================================
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # Pre-strip our own flags (--json / -h) so common.sh's kit_resolve doesn't warn
-# on them; forward the rest (target path, --dry-run is a no-op for a read tool).
+# on them; forward the rest, including --dry-run, to kit_resolve (which parses
+# it into $DRY_RUN — B24: no longer a pure no-op, see the RUVECTOR_HNSW
+# resolution below).
 JSON=0; FWD=()
 for a in "$@"; do
   case "$a" in
@@ -325,10 +336,57 @@ probe_router_info() {
 # memory — so a just-run fix-learning may not be reflected until the daemon AND
 # Claude Code are restarted. Surfaced as a WARN so the "still hollow after a fix"
 # case is self-explaining.
+#
+# DRY-RUN-ARTIFACT-V1 (B24): this used to shell out to `ruflo daemon status`,
+# whose upstream side effect of instantiating internal config objects just to
+# print a table creates .claude-flow/logs/daemon.log even on this read-only
+# probe — exactly the leak `sync --dry-run` was found leaving behind (no
+# daemon is spawned by it; ensureDaemonRunning is skipped for the `daemon`
+# subcommand — this is a truthfulness defect, not a billing one). Replaced with
+# kit_daemon_ps_lines (common.sh), the same pgrep-based discovery status.sh and
+# proof.sh already treat as this kit's canonical daemon truth ("state files
+# lie — trust pgrep").
+#
+# B24-DAEMON-SCOPE-V1 (critic-found regression, fixed here): kit_daemon_ps_lines
+# is UNSCOPED by design (it "mirrors BOTH existing sites", status.sh/proof.sh,
+# which deliberately want the global "any daemon anywhere" view). The FIRST cut
+# of this fix consumed it directly and kept the old call's target-specific
+# causal wording ("it locks the DBs") — false the moment a DIFFERENT project's
+# ruflo daemon happened to be running on the same host (reproduced live: a
+# stray daemon for an unrelated workspace made this probe warn about DBs it
+# does not lock, on the same host where `ruflo daemon status` correctly
+# reported this target as stopped). kit_daemon_scope_split (common.sh) restores
+# workspace scoping via a genuine TRI-STATE (see its header for the MINE/OTHER/
+# UNKNOWN contract and the parent/subdirectory design decision): only a MINE
+# daemon gets the causal "it locks the DBs" claim; OTHER is an informational
+# note that must not read as if it affects this target; UNKNOWN is hedged,
+# never silently folded into either bucket. Applies in every mode, not just
+# --dry-run — no CLI call either way, so no side effect to gate on.
 probe_daemon_advisory() {
-  command -v ruflo >/dev/null 2>&1 || return 0
-  if ruflo daemon status 2>/dev/null | grep -qiE 'RUNNING'; then
-    soft "ruflo daemon is RUNNING — it locks the DBs (fix-learning 'dream' fails locked) and caches state; restart the daemon + Claude Code after a fix, then re-verify"
+  local rows pid state ws
+  local mine_pids=() other_notes=() unknown_pids=()
+  rows="$(kit_daemon_scope_split "$TARGET_DIR" 2>/dev/null)"
+  [[ -z "$rows" ]] && return 0
+  while IFS=$'\t' read -r pid state ws; do
+    [[ -z "$pid" ]] && continue
+    case "$state" in
+      MINE)    mine_pids+=("$pid") ;;
+      OTHER)   other_notes+=("pid $pid → $ws") ;;
+      UNKNOWN) unknown_pids+=("$pid") ;;
+    esac
+  done <<< "$rows"
+
+  if [[ ${#mine_pids[@]} -gt 0 ]]; then
+    local pids; pids="$(IFS=,; echo "${mine_pids[*]}")"
+    soft "ruflo daemon is RUNNING for THIS target (pid ${pids}) — it locks the DBs (fix-learning 'dream' fails locked) and caches state; restart the daemon + Claude Code after a fix, then re-verify"
+  fi
+  if [[ ${#unknown_pids[@]} -gt 0 ]]; then
+    local pids; pids="$(IFS=,; echo "${unknown_pids[*]}")"
+    soft "ruflo daemon proc(s) found with no --workspace visible in argv (pid ${pids}) — scope could not be determined; this MAY belong to this target (operator? check with: ps -p ${pids} -o args=)"
+  fi
+  if [[ ${#other_notes[@]} -gt 0 ]]; then
+    local joined; joined="$(IFS='; '; echo "${other_notes[*]}")"
+    note "ruflo daemon(s) running for a DIFFERENT workspace — do not lock this target's DBs: $joined"
   fi
 }
 
@@ -357,8 +415,30 @@ probe_root_hijack() {
 RUFLO_ME=0; RUFLO_STRUCT=0; LORA_TA=0
 # Authoritative native-HNSW flag from the ruvector flags store (true|false|""),
 # resolved ONCE. This is the source of truth for #4 — config.yaml is not.
+#
+# DRY-RUN-ARTIFACT-V1 (B24): `aqe ruvector status` has an upstream side effect
+# of instantiating internal config objects just to print a table, which
+# creates .agentic-qe/ on disk even for this read-only probe. Unlike the
+# daemon check above, there is no disk file to substitute: reading the
+# installed aqe dist confirms useNativeHNSW is pure in-memory module state
+# (a hardcoded default merged with env vars at process start — no flags file
+# is ever written, so a stale on-disk read would just be a second CLI-shaped
+# guess, not a truer one). Under --dry-run we skip the call rather than
+# fabricate a disk read that cannot exist, falling back only as far as the one
+# input that IS on disk-adjacent ground truth — the env var the CLI itself
+# would honor (RUVECTOR_USE_NATIVE_HNSW). probe_hnsw_native already degrades
+# to config.yaml / "indeterminate" when RUVECTOR_HNSW is empty, so an
+# unresolved flag under dry-run reports honestly rather than silently.
 RUVECTOR_HNSW=""
-if command -v aqe >/dev/null 2>&1; then
+RUVECTOR_HNSW_NOTE=""
+if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+  if [[ -n "${RUVECTOR_USE_NATIVE_HNSW:-}" ]]; then
+    RUVECTOR_HNSW="$(tr 'A-Z' 'a-z' <<< "$RUVECTOR_USE_NATIVE_HNSW")"
+    RUVECTOR_HNSW_NOTE="[dry-run] useNativeHNSW resolved from env RUVECTOR_USE_NATIVE_HNSW=$RUVECTOR_HNSW — skipped: would run 'aqe ruvector status' (creates .agentic-qe/ as an upstream side effect)"
+  else
+    RUVECTOR_HNSW_NOTE="[dry-run] skipped: would run 'aqe ruvector status' (creates .agentic-qe/ as an upstream side effect) — no on-disk flags store exists to substitute; native-HNSW probe below falls back to config.yaml/indeterminate"
+  fi
+elif command -v aqe >/dev/null 2>&1; then
   RUVECTOR_HNSW="$(aqe ruvector status 2>/dev/null | grep -iE 'useNativeHNSW' | grep -oiE 'true|false' | head -1 | tr 'A-Z' 'a-z')"
 fi
 if [[ "$JSON" -eq 0 ]]; then
@@ -366,6 +446,7 @@ if [[ "$JSON" -eq 0 ]]; then
   kit_banner
   echo ""
 fi
+[[ -n "$RUVECTOR_HNSW_NOTE" ]] && note "$RUVECTOR_HNSW_NOTE"
 # Instrument transparency (KIT-SQLITE-SHIM-V1): with NO sqlite backend at all
 # every count below reads 0 and a hollow store would grade as fresh — surface
 # that masking as a WARN (verdict can then never be better than "partial").

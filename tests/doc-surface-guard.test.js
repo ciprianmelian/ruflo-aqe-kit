@@ -116,6 +116,23 @@
  * tiers — see the "current corpus" tests below for each rule; all pass clean, including the newly
  * included assets/claude-commands/analysis/COMMAND_COMPLIANCE_REPORT.md and
  * docs/CHANGELOG-2026-07-17.md (neither carries a matching claim shape today).
+ *
+ * ROUND 4 — Tier E, dated session-ledger directory: this session's own Wave-2 audit ledgers
+ * (docs/gauntlet-2026-07-31/*.md) were relocated out of docs/vendor/ (gitignored, per the round-3
+ * correction above) directly into docs/, making them real tracked corpus members for the first
+ * time — and they legitimately quote retired sentinels and the exact "byte-identical" claim this
+ * session found and fixed, in order to DOCUMENT that history, not assert it as current. The old
+ * removed "tier A" tried to cover this via docs/vendor/** and never actually worked (that path was
+ * never tracked). Tier E is a real, verified replacement: the file's immediate parent directory
+ * under docs/ must match a dated-session naming convention (`<name>-YYYY-MM-DD`) — confirmed unique
+ * among tracked docs/ subdirectories (only "gauntlet-2026-07-31" matches; "reference" does not) —
+ * AND that date must be plausible by the same real check Tier D's dates use (not future, not
+ * before this repo's first commit), so a fabricated `docs/lies-2099-01-01/` does not qualify. Same
+ * class of signal as Tier B's leading-underscore convention: a real, meaningfully-separated
+ * location, verified against actual repo state via `git ls-files`, not assumed — and, like Tier B,
+ * not airtight against someone naming a brand-new dated directory for the same purpose, but that
+ * shifts the threat model to a conspicuous new directory in a diff rather than an invisible
+ * addition to an ordinary file.
  */
 'use strict';
 
@@ -268,8 +285,45 @@ function hasSnapshotDisclaimer(text) {
   return SNAPSHOT_DISCLAIMER_RE.test(head) && hasRealAnchor(head);
 }
 
+// Tier E (round 4): dated session-ledger directory. This session's Wave-2
+// audit ledgers (docs/gauntlet-2026-07-31/*.md) are dated, historical
+// investigation records — quoting a retired sentinel or the exact
+// "byte-identical" claim IN ORDER TO DOCUMENT that it was found and fixed is
+// legitimate and must not require rewording the record. The OLD "tier A"
+// tried to grant this via docs/vendor/** and turned out to rest on a false
+// premise (that path was never tracked, so it never actually reached real
+// corpus files) — round 3 removed it rather than patch a lie. This ledger
+// directory is different: it IS tracked (`git ls-files -- 'docs/**'` lists it
+// directly under docs/, confirmed below) and genuinely reached the corpus the
+// moment the ledger was relocated out of the gitignored docs/vendor/ path.
+//
+// The exemption is anchored the same way Tier B's underscore convention is —
+// a real naming convention, verified against actual repo state, not assumed:
+// the file's immediate parent directory under docs/ must match
+// `<name>-YYYY-MM-DD` (a real dated-session convention: confirmed unique
+// among tracked docs/ subdirectories — `git ls-files -- 'docs/**' | sed -E
+// 's|^docs/([^/]+)/.*|\1|' | sort -u` returns only "gauntlet-2026-07-31" and
+// "reference", and only the former matches) — AND that date must be
+// PLAUSIBLE by the same real check tier D uses (not in the future, not
+// before this repo's own first commit), so a fabricated
+// `docs/lies-2099-01-01/` directory does not qualify. This does not make a
+// brand-new dated directory impossible to create for the same purpose — an
+// attacker can still name one — but, as with Tier B, it changes the threat
+// model from "an invisible addition to an existing ordinary doc" to "a new,
+// conspicuously-dated directory appearing in a diff," and the date itself is
+// checked against reality rather than merely shaped like one.
+const DATED_LEDGER_DIR_RE = /^[a-z][a-z0-9]*-(\d{4})-(\d{2})-(\d{2})$/;
+function isDatedLedgerPath(file) {
+  const rel = path.relative(ROOT, file);
+  const parts = rel.split(path.sep);
+  if (parts[0] !== 'docs' || parts.length < 3) return false;
+  const m = parts[1].match(DATED_LEDGER_DIR_RE);
+  if (!m) return false;
+  return isPlausibleDate(m[1], m[2], m[3]);
+}
+
 function isWholeFileExempt(file, text) {
-  return isPatchLogShaped(file, text) || hasSnapshotDisclaimer(text);
+  return isPatchLogShaped(file, text) || hasSnapshotDisclaimer(text) || isDatedLedgerPath(file);
 }
 
 const CORRECTIVE_KEYWORD_RE =
@@ -969,6 +1023,79 @@ describe('doc-surface guard — round-3 bypass hardening (critic-reported, real-
       ...checkVersionCitations(files),
     ];
     expect(violations.join('\n\n')).toBe('');
+  });
+});
+
+describe('doc-surface guard — round-4: dated session-ledger directory (Tier E)', () => {
+  it('the real docs/gauntlet-2026-07-31/ ledgers ARE tracked and reach the corpus (the old tier A never did)', () => {
+    const tracked = spawnSync('git', ['ls-files', '--', 'docs/gauntlet-2026-07-31/**'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    }).stdout.trim();
+    expect(tracked).not.toBe('');
+    const inCorpus = corpusFiles().some((f) =>
+      path.relative(ROOT, f).startsWith(`docs${path.sep}gauntlet-2026-07-31${path.sep}`)
+    );
+    expect(inCorpus).toBe(true);
+  });
+
+  it('the dated-directory naming convention is unique among tracked docs/ subdirectories', () => {
+    const subdirs = new Set(
+      spawnSync('git', ['ls-files', '--', 'docs/**'], { cwd: ROOT, encoding: 'utf8' }).stdout
+        .trim()
+        .split('\n')
+        .map((f) => f.split('/')[1])
+        .filter((d) => d && !d.endsWith('.md'))
+    );
+    const matching = [...subdirs].filter((d) => DATED_LEDGER_DIR_RE.test(d));
+    expect(matching).toEqual(['gauntlet-2026-07-31']);
+  });
+
+  it('a quoted retired sentinel and the exact "byte-identical" claim inside the real ledger are exempt (documenting history, not asserting it)', () => {
+    const violations = [
+      ...checkRetiredSurfaces(corpusFiles(), liveVerbs(), liveSentinels(runtimeSourceText())),
+      ...checkIdentityClaims(corpusFiles()),
+    ].filter((v) => v.includes('gauntlet-2026-07-31'));
+    expect(violations.join('\n')).toBe('');
+  });
+
+  it('falsification: a FABRICATED dated directory with an IMPLAUSIBLE (future) date is NOT exempted', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-surface-guard-'));
+    const fakeLedgerDir = path.join(dir, 'docs', 'fake-2099-01-01');
+    fs.mkdirSync(fakeLedgerDir, { recursive: true });
+    const file = path.join(fakeLedgerDir, 'notes.md');
+    fs.writeFileSync(file, 'The brain launcher is byte-identical to upstream.\n');
+    // Simulate the path shape relative to ROOT, the way isDatedLedgerPath() checks it.
+    const relStyled = path.join(ROOT, 'docs', 'fake-2099-01-01', 'notes.md');
+    expect(DATED_LEDGER_DIR_RE.test('fake-2099-01-01')).toBe(true); // shape matches
+    expect(isDatedLedgerPath(relStyled)).toBe(false); // but the date is not plausible
+    const text = fs.readFileSync(file, 'utf8');
+    expect(isWholeFileExempt(relStyled, text)).toBe(false);
+    expect(checkIdentityClaims([file]).length).toBe(1); // the planted claim is still caught
+  });
+
+  it('falsification: an ordinary, non-dated docs/ subdirectory name does not qualify', () => {
+    const relStyled = path.join(ROOT, 'docs', 'reference', 'notes.md');
+    expect(isDatedLedgerPath(relStyled)).toBe(false);
+  });
+
+  it('the three round-3 bypasses are still caught after adding Tier E (Tier E is path-based, not a new shape-only escape)', () => {
+    // Lorem-Ipsum padding (Attack A'): still needs the underscore convention, unaffected by Tier E.
+    const padding = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(200);
+    const fakeEntry = (n) => `**(${n}) This is a filler patch title padded past forty characters for the gate.**`;
+    const bait = [fakeEntry(1), fakeEntry(2), fakeEntry(3), fakeEntry(4), fakeEntry(5), padding, '',
+      'The brain launcher is byte-identical to upstream.'].join('\n');
+    const tmpA = writeTempCopy('OPS.md', bait);
+    expect(isWholeFileExempt(tmpA, bait)).toBe(false);
+    expect(checkIdentityClaims([tmpA]).length).toBe(1);
+
+    // Fabricated hash / impossible date (Attack B): unaffected, still fails real resolution.
+    expect(resolveHashAnywhere('abc1234')).toBe(false);
+    expect(isPlausibleDate('2099', '01', '01')).toBe(false);
+
+    // Fake issue/Patch/date/version anchors (Attack C): unaffected.
+    const attackC = 'The brain launcher is byte-identical to upstream — corrected, see #99999999 (an issue that does not exist).\n';
+    expect(hasAnchoredHistoricalMarker(attackC)).toBe(false);
   });
 });
 

@@ -31,6 +31,13 @@ header() { echo -e "\n${CYAN}[$1]${NC} $2"; }
 # Track what was fixed for summary
 FIXES=0
 ERRORS=0
+# SEVERE-FIX-V1: a separate counter from ERRORS for repairs whose FAILURE is a
+# SECURITY or NATIVE-INTEGRITY regression (RUVECTOR-EXECSAFE-V1 shell-injection
+# patch, AGENTDB-NESTED-NATIVE-V1 broken native binding) rather than cosmetic
+# drift. Kept distinct so the exit-code contract at the bottom of this file
+# can grade these hard-fail while ordinary ERRORS stay a soft warn — see
+# lib/sync.sh's run_fix() for the consumer side of this contract.
+SEVERE_ERRORS=0
 FIX_LOG=()
 fix() { ((FIXES++)) || true; FIX_LOG+=("$1"); }
 
@@ -1719,6 +1726,7 @@ PJS
         warn "RUVECTOR-EXECSAFE-V1 produced invalid $f — restoring backup"
         cp "$f.execsafe-bak" "$f"
         ((ERRORS++)) || true
+        SEVERE_ERRORS=$(( ${SEVERE_ERRORS:-0} + 1 ))  # SEVERE-FIX-V1: security patch failed, backup restored
       fi
       ;;
     2)
@@ -1727,10 +1735,12 @@ PJS
     3)
       warn "RUVECTOR-EXECSAFE-V1 PARTIAL match in $f — refusing to write or stamp an incomplete fix; file left untouched, will retry next run ($out)"
       ((ERRORS++)) || true
+      SEVERE_ERRORS=$(( ${SEVERE_ERRORS:-0} + 1 ))  # SEVERE-FIX-V1: security patch incomplete
       ;;
     4)
       warn "RUVECTOR-EXECSAFE-V1 could not write $f ($out) — check file/directory permissions; NOT applied"
       ((ERRORS++)) || true
+      SEVERE_ERRORS=$(( ${SEVERE_ERRORS:-0} + 1 ))  # SEVERE-FIX-V1: security patch could not be written
       ;;
     5)
       warn "RUVECTOR-EXECSAFE-V1 could not read $f ($out) — check file permissions; NOT applied"
@@ -1738,6 +1748,7 @@ PJS
     *)
       warn "RUVECTOR-EXECSAFE-V1 patcher failed unexpectedly on $f (rc=$rc): $out"
       ((ERRORS++)) || true
+      SEVERE_ERRORS=$(( ${SEVERE_ERRORS:-0} + 1 ))  # SEVERE-FIX-V1: security patch failed unexpectedly
       ;;
   esac
 }
@@ -1963,6 +1974,94 @@ else
     fi
   fi
 fi
+
+# ── Step 5b.0b: AGENTDB-NESTED-NATIVE-V1 — repair BROKEN nested better-sqlite3
+# copies that Step 5b.0 above structurally cannot see ───────────────────────
+#
+# Step 5b.0 already load-tests and rebuilds better-sqlite3 — but only for the
+# STANDALONE agentdb MCP slot ($groot/agentdb), via the single-path
+# global_bsqlite_loads helper, which deliberately asserts the resolved path is
+# UNDER the global root (by design — that guard exists to stop a stray
+# ~/node_modules copy from masking a genuinely missing global install). It
+# therefore never reaches the hoisted floor's OWN nested copy at
+# $groot/ruflo/node_modules/agentdb/node_modules/better-sqlite3 (or the other
+# roots kit_bsqlite_candidate_roots enumerates) — exactly the root a real run
+# found BROKEN on this host: require() succeeded but `new Database(':memory:')`
+# threw (no build/Release/ at all). AgentDB's own core silently falls back to
+# sql.js WASM on that failure (a console.log, not a throw), and
+# @claude-flow/neural's reasoning-bank — the SONA training path — resolves
+# straight to this hoisted floor, so the failure is invisible at runtime
+# unless something re-verifies by actually opening a database, which is what
+# kit_bsqlite_native_status (common.sh) already does.
+#
+# Kept as a SEPARATE step rather than folded into 5b.0: that step targets a
+# top-level package this kit itself `npm install -g`s; this one repairs a
+# native binding nested INSIDE an already-installed dependency tree (no
+# `npm install -g` of ours creates or owns it) — different repair mechanics.
+#
+# Repair order per broken root (idempotent, safe to re-run):
+#   1. `npm rebuild better-sqlite3` from inside that root — the same
+#      ABI-refresh Step 5b.0's own comment documents as "self-heals across
+#      node upgrades" (rebuilds the native addon against the CURRENT node's
+#      NODE_MODULE_VERSION).
+#   2. If that fails (most commonly: no C++ toolchain on this machine), fall
+#      back to deleting the stale build and reinstalling — fetches a
+#      prebuilt binary matching the current Node ABI instead of requiring a
+#      local compiler.
+# Re-verified afterwards by calling kit_bsqlite_native_status AGAIN and
+# reading that specific root's line — "fix" is only ever logged when the root
+# actually flips to ok; a root that stays broken is a "warn" + ERRORS++ with
+# the real cause, never a silent success. Zero broken roots is a healthy
+# no-op ("pass"), not silence — a fresh machine with nothing installed yet is
+# not a failure here.
+#
+# DRY_RUN-aware: prints what it would do per broken root and mutates nothing
+# (no rebuild, no reinstall, no re-verify call) — see B11 for why dry-run
+# must never mutate.
+repair_nested_bsqlite_native() {
+  local broken_roots=()
+  local root state resolved
+  while IFS='|' read -r root state resolved; do
+    [[ -n "$root" ]] || continue
+    [[ "$state" == "broken" ]] && broken_roots+=("$root|$resolved")
+  done < <(kit_bsqlite_native_status 2>/dev/null)
+
+  if [[ ${#broken_roots[@]} -eq 0 ]]; then
+    pass "No nested better-sqlite3 native bindings broken (AGENTDB-NESTED-NATIVE-V1)"
+    return 0
+  fi
+
+  local entry root resolved rebuild_log repaired new_state
+  for entry in "${broken_roots[@]}"; do
+    root="${entry%%|*}"
+    resolved="${entry#*|}"
+    info "better-sqlite3 resolves+requires but fails to open a database in $root (resolved: $resolved) — repairing (AGENTDB-NESTED-NATIVE-V1)"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+      info "[dry-run] Would: (cd \"$root\" && npm rebuild better-sqlite3); on failure, would rm -rf \"$root/node_modules/better-sqlite3\" && npm install --prefix \"$root\" better-sqlite3 --no-save"
+      continue
+    fi
+    rebuild_log="/tmp/ruflo-nested-bsqlite-rebuild-$(echo "$root" | tr -c 'A-Za-z0-9' '_').log"
+    repaired=0
+    if (cd "$root" && npm rebuild better-sqlite3) >"$rebuild_log" 2>&1; then
+      repaired=1
+    else
+      warn "npm rebuild better-sqlite3 failed in $root (log: $rebuild_log) — falling back to reinstalling a prebuilt binary"
+      if rm -rf "$root/node_modules/better-sqlite3" && npm install --prefix "$root" better-sqlite3 --no-save >>"$rebuild_log" 2>&1; then
+        repaired=1
+      fi
+    fi
+    new_state="$(kit_bsqlite_native_status 2>/dev/null | awk -F'|' -v r="$root" '$1==r{print $2; exit}')"
+    if [[ "$repaired" -eq 1 && "$new_state" == "ok" ]]; then
+      fix "Repaired nested better-sqlite3 native binding in $root (AGENTDB-NESTED-NATIVE-V1)"
+      pass "Repaired nested better-sqlite3 native binding in $root"
+    else
+      warn "better-sqlite3 in $root is still broken after repair attempt (state=${new_state:-unknown}; log: $rebuild_log) — needs a C++ toolchain (xcode-select --install / build-essential) or a manual 'npm rebuild better-sqlite3' in that directory"
+      ((ERRORS++)) || true
+      SEVERE_ERRORS=$(( ${SEVERE_ERRORS:-0} + 1 ))  # SEVERE-FIX-V1: native-integrity repair failed — SONA training path silently falls back to WASM
+    fi
+  done
+}
+repair_nested_bsqlite_native
 
 # ── Step 5b.2: register/migrate the agentdb entry to the GLOBAL launch form ──
 # Migration: a PRE-EXISTING entry whose command=="npx" is the broken form — we
@@ -3397,6 +3496,9 @@ echo " Summary"
 echo "============================================"
 echo -e "  Fixes applied:    ${GREEN}$FIXES${NC}"
 echo -e "  Manual actions:   ${YELLOW}$ERRORS${NC}"
+# SEVERE-FIX-V1: surfaced distinctly from ERRORS above — these are the subset
+# where a SECURITY or NATIVE-INTEGRITY repair itself failed, not cosmetic drift.
+echo -e "  Severe (security/native): ${RED}$SEVERE_ERRORS${NC}"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo -e "  Mode:             ${YELLOW}DRY RUN (nothing changed)${NC}"
 fi
@@ -3423,6 +3525,10 @@ if [[ "$ERRORS" -gt 0 ]]; then
   echo -e "  ${YELLOW}Review warnings above for manual actions${NC}"
 fi
 
+if [[ "$SEVERE_ERRORS" -gt 0 ]]; then
+  echo -e "  ${RED}A security or native-integrity repair failed — this is a hard failure, not a manual-action warning${NC}"
+fi
+
 if [[ "$FIXES" -eq 0 && "$ERRORS" -eq 0 ]]; then
   echo -e "  ${GREEN}Everything looks good!${NC}"
 fi
@@ -3430,5 +3536,39 @@ fi
 echo -e "\n  Log: $LOG_FILE"
 echo ""
 
-# Exit with error if there are unresolved issues
-exit "$( [[ "$ERRORS" -gt 0 ]] && echo 1 || echo 0 )"
+# SEVERE-FIX-V1 (round 2 — EXIT-1-COLLISION-V1): exit-code contract consumed
+# by lib/sync.sh's run_fix(). This is the ONLY signal sync uses to grade this
+# run — never the output text (that text-parsing hole is exactly how a prior
+# version let a hard failure masquerade as a soft warning: this script always
+# printed an unconditional "Log:" line, and sync's old completion-regex
+# matched on that alone).
+#   0  = clean — no manual actions, nothing severe.
+#   21 = warn  — ERRORS>0 but SEVERE_ERRORS==0: cosmetic/manual-action drift
+#                only (round-1 used exit 1 for this — see below for why that
+#                collided).
+#   20 = severe — SEVERE_ERRORS>0: a SECURITY (RUVECTOR-EXECSAFE-V1) or
+#                NATIVE-INTEGRITY (AGENTDB-NESTED-NATIVE-V1) repair failed.
+# Anything else (including 1, 2, 126, 127, 128+n, 130, and any other abort
+# code) = the script did NOT run to completion — hard-fail.
+#
+# Round-1 of this contract reserved exit 1 for "warn", reasoning that 1 sat
+# outside bash's OWN syntax-error code (2). That missed that `set -u` (this
+# script enables it; `-e` is deliberately omitted, see the top-of-file note)
+# makes bash itself exit with status 1 whenever ANY unset variable is
+# referenced anywhere in this 3500+-line file — verified directly: a script
+# file (not `bash -c`) that hits an unbound-variable reference under `set -u`
+# aborts with exit 1 on this kit's target bash. That is exactly the shape of
+# the original defect, recurring through a different mechanism: a genuine
+# non-completion (a crash before reaching this exit tail, possibly AFTER a
+# real SEVERE_ERRORS-incrementing failure already happened) was indistinguish-
+# able from "completed cleanly, only cosmetic drift" — because both produced
+# exit 1. 21 was chosen instead: like 20, it sits outside bash's entire
+# crash-code family (1, 2, 126, 127, 128+n, 130), so neither reserved code in
+# this contract can ever be produced by an accidental abort — only by this
+# script deliberately reaching this exact line.
+if [[ "$SEVERE_ERRORS" -gt 0 ]]; then
+  exit 20
+elif [[ "$ERRORS" -gt 0 ]]; then
+  exit 21
+fi
+exit 0

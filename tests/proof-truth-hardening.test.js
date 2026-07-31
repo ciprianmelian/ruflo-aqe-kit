@@ -52,6 +52,36 @@ function writeExec(p, body) {
   fs.chmodSync(p, 0o755);
 }
 
+// P16 memory-roundtrip: shared `ruflo memory {init,store,retrieve,purge}`
+// handling for every ruflo shim body in this file (mirrors tests/proof.test.js's
+// MEMORY_SHIM_BLOCK). Backed by the REAL sqlite3 CLI — this file no longer
+// shims sqlite3 as a no-op logger (nothing here ever asserted on its call
+// log), so the real system CLI resolves for both this block's own backing
+// AND kit_memory_roundtrip_check's independent on-disk read.
+const MEMORY_SHIM_BLOCK = `if [ "$1" = "memory" ]; then
+  shift
+  msub="$1"; shift
+  mpath=""; mkey=""; mns=""; mval=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --path) mpath="$2"; shift 2 ;;
+      -k) mkey="$2"; shift 2 ;;
+      -n|--namespace) mns="$2"; shift 2 ;;
+      --value) mval="$2"; shift 2 ;;
+      --force|--value-only) shift ;;
+      --backend) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$msub" in
+    init)     sqlite3 "$mpath" "CREATE TABLE IF NOT EXISTS memory_entries (namespace TEXT, key TEXT, content TEXT);"; exit $? ;;
+    store)    sqlite3 "$mpath" "DELETE FROM memory_entries WHERE namespace='$mns' AND key='$mkey'; INSERT INTO memory_entries (namespace,key,content) VALUES ('$mns','$mkey','$mval');"; exit $? ;;
+    retrieve) sqlite3 "$mpath" "SELECT content FROM memory_entries WHERE namespace='$mns' AND key='$mkey' LIMIT 1;"; exit 0 ;;
+    purge)    sqlite3 "$mpath" "DELETE FROM memory_entries WHERE namespace='$mns';"; exit $? ;;
+    *)        exit 0 ;;
+  esac
+fi`;
+
 function mkGroot(base) {
   const groot = path.join(base, 'groot');
   const pkg = (rel, ver, extra) => {
@@ -102,11 +132,14 @@ ${logLine('ruflo')}
 if [ "$1" = "--version" ]; then echo "3.32.2"; exit 0; fi
 ${mcpLine}
 ${routeLine}
+${MEMORY_SHIM_BLOCK}
 exit 0
 `);
   writeExec(path.join(bin, 'aqe'), `#!/usr/bin/env bash\n${logLine('aqe')}\nif [ "$1" = "--version" ]; then echo "3.12.2"; exit 0; fi\nexit 0\n`);
   writeExec(path.join(bin, 'agentdb'), `#!/usr/bin/env bash\n${logLine('agentdb')}\nexit 0\n`);
-  writeExec(path.join(bin, 'sqlite3'), `#!/usr/bin/env bash\n${logLine('sqlite3')}\nexit 0\n`);
+  // sqlite3 is left unshimmed so the real system CLI resolves (P16
+  // memory-roundtrip needs a genuinely working sqlite3 — see MEMORY_SHIM_BLOCK
+  // above); nothing in this file ever asserted on a sqlite3 call-log line.
   writeExec(path.join(bin, 'npm'), `#!/usr/bin/env bash
 ${logLine('npm')}
 if [ "$1" = "root" ] && [ "$2" = "-g" ]; then echo "${groot}"; exit 0; fi
@@ -528,11 +561,12 @@ function buildP3(variant) {
 if [ "$1" = "--version" ]; then echo "3.32.2"; exit 0; fi
 if [ "$1" = "mcp" ] && [ "$2" = "start" ]; then echo '{"jsonrpc":"2.0","id":1,"result":{}}'; sleep 0.1; exit 0; fi
 if [ "$1" = "hooks" ] && [ "$2" = "route" ]; then echo "route: coder"; exit 0; fi
+${MEMORY_SHIM_BLOCK}
 exit 0
 `);
   writeExec(path.join(bin, 'aqe'), `#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "3.12.2"; exit 0; fi\nexit 0\n`);
   writeExec(path.join(bin, 'agentdb'), `#!/usr/bin/env bash\nexit 0\n`);
-  writeExec(path.join(bin, 'sqlite3'), `#!/usr/bin/env bash\nexit 0\n`);
+  // sqlite3 left unshimmed — see the identical note in mkBin above.
   writeExec(path.join(bin, 'npm'), `#!/usr/bin/env bash
 if [ "$1" = "root" ] && [ "$2" = "-g" ]; then echo "${groot}"; exit 0; fi
 if [ "$1" = "--version" ]; then echo "10.8.0"; exit 0; fi

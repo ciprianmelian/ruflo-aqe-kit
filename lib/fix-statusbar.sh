@@ -35,9 +35,18 @@ echo "============================================"
 echo " fix-statusbar.sh"
 echo " kit:    $KIT_DIR"
 echo " target: $TARGET_DIR"
+[[ "${DRY_RUN:-0}" -eq 1 ]] && echo " MODE: dry-run (no changes)"
 echo "============================================"
 
-mkdir -p .claude/helpers
+# B11: this mkdir used to run unconditionally at the top of the script, before
+# any dry-run check existed, so `fix-statusbar --dry-run` physically created
+# .claude/helpers/ on a target that lacked it. Gate it like every other write
+# below — a dry-run only reports what it would do.
+if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+  [[ -d .claude/helpers ]] || info "[dry-run] would create directory: .claude/helpers"
+else
+  mkdir -p .claude/helpers
+fi
 
 # ── Detect installed ruflo version → "V<major>.<minor>" (e.g. "V3.10") ─────
 # Tries (in order): `ruflo --version`, then `npx ruflo@latest --version`.
@@ -1246,7 +1255,9 @@ if [[ -f .claude/helpers/statusline-v3.cjs ]] && grep -q "ruflo + Agentic QE v3"
   needs_write=0
 fi
 
-if [[ $needs_write -eq 1 ]]; then
+if [[ $needs_write -eq 1 && "${DRY_RUN:-0}" -eq 1 ]]; then
+  info "[dry-run] would write dual fallback: .claude/helpers/statusline-v3.cjs"
+elif [[ $needs_write -eq 1 ]]; then
   cat > .claude/helpers/statusline-v3.cjs <<'CJS'
 #!/usr/bin/env node
 /**
@@ -1382,6 +1393,8 @@ echo -e "\n${CYAN}[3/4]${NC} Patching .claude/settings.json statusLine command"
 
 if [[ ! -f .claude/settings.json ]]; then
   warn ".claude/settings.json not found — nothing to patch"
+elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+  info "[dry-run] would patch .claude/settings.json statusLine.command (if not already correct)"
 else
   node - <<'NODE' || fail "settings.json patch failed"
 const fs = require('fs');
@@ -1410,13 +1423,21 @@ fi
 echo -e "\n${CYAN}[4/4]${NC} Removing legacy @claude-flow/plugin-agentic-qe"
 
 if [[ -f package.json ]] && grep -q '"@claude-flow/plugin-agentic-qe"' package.json; then
-  info "found legacy plugin in package.json — uninstalling"
-  npm uninstall @claude-flow/plugin-agentic-qe >/dev/null 2>&1 && pass "uninstalled" || fail "npm uninstall failed"
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    info "[dry-run] would uninstall @claude-flow/plugin-agentic-qe from package.json"
+  else
+    info "found legacy plugin in package.json — uninstalling"
+    npm uninstall @claude-flow/plugin-agentic-qe >/dev/null 2>&1 && pass "uninstalled" || fail "npm uninstall failed"
+  fi
 elif [[ -d node_modules/@claude-flow/plugin-agentic-qe ]]; then
-  info "found stray node_modules dir — removing"
-  rm -rf node_modules/@claude-flow/plugin-agentic-qe
-  rmdir node_modules/@claude-flow 2>/dev/null || true
-  pass "removed"
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    info "[dry-run] would remove stray node_modules/@claude-flow/plugin-agentic-qe"
+  else
+    info "found stray node_modules dir — removing"
+    rm -rf node_modules/@claude-flow/plugin-agentic-qe
+    rmdir node_modules/@claude-flow 2>/dev/null || true
+    pass "removed"
+  fi
 else
   pass "not present"
 fi

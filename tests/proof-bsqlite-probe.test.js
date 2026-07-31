@@ -154,7 +154,7 @@ exit 0
 
 // Throwaway kit: real common.sh + proof.sh, JSON-emitting sibling stubs
 // (this test only inspects the "bsqlite" entry of the JSON array — the
-// other 14 probes are free to PASS/FAIL/WARN independently and don't affect
+// other 15 probes are free to PASS/FAIL/WARN independently and don't affect
 // these assertions).
 function mkKit(base) {
   const kit = path.join(base, 'kit');

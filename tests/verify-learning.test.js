@@ -19,21 +19,107 @@ const REPO = path.resolve(__dirname, '..');
 const VERIFY = path.join(REPO, 'lib', 'verify-learning.sh');
 const COMMON = path.join(REPO, 'lib', 'common.sh');
 
+// Real, on-disk stand-in for "a different project's workspace" in FOREIGN
+// fixtures below. DAEMON-HINT-SCOPE-V1 round 2: kit_daemon_scope_split now
+// compares filesystem IDENTITY (dev, ino via fs.statSync), not path strings —
+// so a fictional --workspace path that doesn't exist on disk can no longer
+// be told apart from "present but un-stat-able", and correctly classifies
+// UNKNOWN rather than OTHER. That is the honest behavior the fix intends,
+// but it means these fixtures need a REAL directory to represent a foreign
+// project, exactly as production always has one (the actual reproduction
+// against PID 29640 pointed at a real, existing directory on the dev host).
+const FOREIGN_WORKSPACE = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'foreign-project-')));
+afterAll(() => fs.rmSync(FOREIGN_WORKSPACE, { recursive: true, force: true }));
+
 function sqlite(db, sql) {
   const r = spawnSync('sqlite3', [db, sql], { encoding: 'utf8' });
   if (r.status !== 0) throw new Error(`sqlite3 failed: ${r.stderr || r.stdout}`);
 }
-// Deterministic stubs for the two CLIs the probes consult: `aqe ruvector status`
-// (the authoritative #4 oracle) and `ruflo daemon status` (the advisory). This
-// decouples tests from the ambient global flag store / a live daemon.
-function stubBin({ hnsw = 'true', daemon = 'stopped' } = {}) {
+// Deterministic stub for the #4 oracle: `aqe ruvector status`. This decouples
+// tests from the ambient global flag store.
+//
+// The daemon advisory used to be controlled via a fake `ruflo daemon status`
+// binary, but B24 replaced that CLI call unconditionally with
+// kit_daemon_ps_lines (common.sh) — a pgrep-based check, same as lib/status.sh
+// and lib/proof.sh already use — because `ruflo daemon status`'s own upstream
+// side effect of instantiating internal config objects just to print a table
+// created .claude-flow/logs/daemon.log even on this read-only probe. A fake
+// `ruflo` binary is therefore no longer consulted for this probe at all; the
+// daemon case is now driven by fake `pgrep`/`ps` binaries on PATH, mirroring
+// the falsification convention in tests/daemon-staleness.test.js (real
+// discovery function, deterministic fixture, no dependency on the test host's
+// actual process table).
+//
+// B24-DAEMON-SCOPE-V1 (critic-found regression, fixed): kit_daemon_ps_lines is
+// UNSCOPED by design, so the daemon advisory now runs it through
+// kit_daemon_scope_split (common.sh) to classify each discovered daemon as
+// MINE (--workspace argv == this fixture's target dir) / FOREIGN (a DIFFERENT
+// workspace — reproduced live against a real stray daemon on the dev host
+// whose argv is exactly this FOREIGN shape) / UNKNOWN (no --workspace token
+// at all). `daemon` selects which of these `pgrep`/`ps` simulates; `target`
+// (required for 'RUNNING'/'BOTH') is the fixture's own target dir, so the
+// scope-split genuinely matches instead of coincidentally landing on the old
+// hardcoded '/tmp/vl-test' (which was never the real mkdtemp path, so pre-fix
+// this fixture was silently exercising the wrong bucket regardless).
+//
+// pgrep/ps are ALWAYS faked here — including 'stopped', the default every
+// hollow/healthy/primed fixture in this file uses — so nothing in this suite
+// depends on the test host's real process table. (This host runs a real,
+// independent ruflo daemon for an unrelated project; without a hermetic
+// default every other describe() block below would silently pick it up.)
+function mkPsScript(entries) {
+  const cases = entries.map(({ pid, line }) => `  ${pid}) echo "${line}" ;;`).join('\n');
+  return [
+    '#!/usr/bin/env bash',
+    'pid=""; prev=""',
+    'for a in "$@"; do',
+    '  if [[ "$prev" == "-p" ]]; then pid="$a"; fi',
+    '  prev="$a"',
+    'done',
+    'if [[ "$*" != *"etimes="* ]]; then exit 1; fi',
+    'case "$pid" in',
+    cases,
+    '  *) exit 1 ;;',
+    'esac',
+  ].join('\n') + '\n';
+}
+function stubBin({ hnsw = 'true', daemon = 'stopped', target = '' } = {}) {
   const b = fs.mkdtempSync(path.join(os.tmpdir(), 'vlbin-'));
   fs.writeFileSync(path.join(b, 'aqe'),
     `#!/usr/bin/env bash\nif [ "$1" = ruvector ] && [ "$2" = status ]; then echo "  useNativeHNSW: ${hnsw} (set)"; fi\nexit 0\n`);
-  fs.writeFileSync(path.join(b, 'ruflo'),
-    `#!/usr/bin/env bash\nif [ "$1" = daemon ] && [ "$2" = status ]; then echo "Status: ${daemon}"; fi\nexit 0\n`);
+
+  const entries = [];
+  if (daemon === 'RUNNING' || daemon === 'BOTH') {
+    if (!target) throw new Error(`stubBin: daemon '${daemon}' requires a target dir`);
+    entries.push({ pid: 424242, line: `424242 60 node /fake/bin/cli.js daemon start --workspace ${target}` });
+  }
+  if (daemon === 'FOREIGN' || daemon === 'BOTH') {
+    // Realistic argv shape mirroring the actual stray daemon this bug was
+    // reproduced against on the dev host (a different project's workspace).
+    // Points at FOREIGN_WORKSPACE — a REAL directory, required so the
+    // identity-based classifier (dev, ino) resolves it to OTHER rather than
+    // UNKNOWN (see FOREIGN_WORKSPACE's own comment above).
+    entries.push({
+      pid: 313131,
+      line: '313131 3600 node /g/ruflo/node_modules/@claude-flow/cli/bin/cli.js daemon start '
+        + `--foreground --quiet --workspace ${FOREIGN_WORKSPACE}`,
+    });
+  }
+  if (daemon === 'UNKNOWN') {
+    entries.push({ pid: 515151, line: '515151 90 node /fake/bin/cli.js daemon start --foreground --quiet' });
+  }
+
+  if (entries.length > 0) {
+    const pids = entries.map((e) => e.pid).join(' ');
+    fs.writeFileSync(path.join(b, 'pgrep'),
+      `#!/usr/bin/env bash\ncase "$*" in\n  *"bin/cli.js daemon start"*) printf '%s\\n' ${pids} ;;\n  *) exit 1 ;;\nesac\n`);
+    fs.writeFileSync(path.join(b, 'ps'), mkPsScript(entries));
+  } else {
+    fs.writeFileSync(path.join(b, 'pgrep'), '#!/usr/bin/env bash\nexit 1\n');
+  }
   fs.chmodSync(path.join(b, 'aqe'), 0o755);
-  fs.chmodSync(path.join(b, 'ruflo'), 0o755);
+  fs.chmodSync(path.join(b, 'pgrep'), 0o755);
+  if (entries.length > 0) fs.chmodSync(path.join(b, 'ps'), 0o755);
   return b;
 }
 // A known-good dist stub carrying BOTH sona-seam sentinels, so probe #11
@@ -51,7 +137,7 @@ function goodDistSrc() {
   return d;
 }
 function runVerify(target, extra = [], stub = {}) {
-  const b = stubBin(stub);
+  const b = stubBin({ ...stub, target });
   const dist = goodDistSrc();
   const r = spawnSync('bash', [VERIFY, target, ...extra], {
     encoding: 'utf8', timeout: 20000,
@@ -144,9 +230,9 @@ describe('verify-learning: hollow detection (issue #4 #2/#3/#4)', () => {
     expect(runVerify(d, [], { hnsw: 'false' }).stdout).toMatch(/HNSW native backend DISABLED/);
   });
 
-  it('warns (non-fatal) when the ruflo daemon is RUNNING', () => {
+  it('warns (non-fatal) when the ruflo daemon is RUNNING for THIS target', () => {
     const r = runVerify(d, [], { daemon: 'RUNNING' });
-    expect(r.stdout).toMatch(/daemon is RUNNING/);
+    expect(r.stdout).toMatch(/daemon is RUNNING for THIS target/);
     expect(r.status).toBe(1); // still hollow; the daemon note never changes the verdict
   });
 
@@ -158,6 +244,127 @@ describe('verify-learning: hollow detection (issue #4 #2/#3/#4)', () => {
     expect(r.stdout).not.toMatch(/\[/); // no color escapes
   });
 });
+
+// B24-DAEMON-SCOPE-V1: probe_daemon_advisory used to consume kit_daemon_ps_lines
+// (an UNSCOPED pgrep over the whole process table) directly and asserted a
+// target-specific causal claim ("it locks the DBs") for ANY ruflo daemon found
+// ANYWHERE on the host. Reproduced live on the dev host: a real, independent
+// stray daemon for a DIFFERENT project made this probe warn about DBs it does
+// not lock, while `ruflo daemon status` (the call it replaced) correctly
+// reported this exact target as stopped at the same moment. Fixed via
+// kit_daemon_scope_split (common.sh), a genuine TRI-STATE: MINE (this target)
+// gets the causal warn; FOREIGN (a different workspace) is informational only
+// and must never degrade into the causal claim; UNKNOWN (no --workspace token
+// visible) is hedged, never silently folded into either bucket.
+describe('verify-learning: daemon advisory is workspace-scoped (tri-state)', () => {
+  let d;
+  beforeAll(() => { d = mkTarget(); buildHealthy(d); });
+  afterAll(() => fs.rmSync(d, { recursive: true, force: true }));
+
+  it('MINE: a daemon whose --workspace IS this target fires the causal "locks the DBs" warn', () => {
+    const r = runVerify(d, [], { daemon: 'RUNNING' });
+    expect(r.stdout).toMatch(/daemon is RUNNING for THIS target \(pid 424242\)/);
+    expect(r.stdout).toMatch(/it locks the DBs/);
+  });
+
+  it('FOREIGN: a daemon whose --workspace is a DIFFERENT project is informational only \u2014 never the causal claim', () => {
+    const r = runVerify(d, [], { daemon: 'FOREIGN' });
+    expect(r.stdout).toMatch(/DIFFERENT workspace/);
+    expect(r.stdout).toMatch(/do not lock this target's DBs/);
+    expect(r.stdout).not.toMatch(/is RUNNING for THIS target/);
+    expect(r.stdout).not.toMatch(/it locks the DBs/);
+  });
+
+  it('UNKNOWN: a daemon with no --workspace token in argv is hedged, never silently folded into MINE or FOREIGN', () => {
+    const r = runVerify(d, [], { daemon: 'UNKNOWN' });
+    expect(r.stdout).toMatch(/no --workspace visible in argv/);
+    expect(r.stdout).toMatch(/scope could not be determined/);
+    expect(r.stdout).toMatch(/MAY belong to this target/);
+    expect(r.stdout).not.toMatch(/is RUNNING for THIS target/);
+    expect(r.stdout).not.toMatch(/DIFFERENT workspace/);
+  });
+
+  it('BOTH: a MINE daemon alongside a FOREIGN one still fires the MINE warning', () => {
+    const r = runVerify(d, [], { daemon: 'BOTH' });
+    expect(r.stdout).toMatch(/daemon is RUNNING for THIS target \(pid 424242\)/);
+    expect(r.stdout).toMatch(/DIFFERENT workspace/);
+  });
+
+  it('a FOREIGN daemon does not degrade the verdict away from "live"', () => {
+    const r = runVerify(d, ['--json'], { daemon: 'FOREIGN' });
+    expect(parseJson(r.stdout).verdict).toBe('live');
+  });
+
+  // TEETH: reconstruct the PRE-FIX probe_daemon_advisory (the B24-buggy
+  // intermediate that consumed kit_daemon_ps_lines directly, no scope split —
+  // see lib/verify-learning.sh's B24-DAEMON-SCOPE-V1 comment for the exact
+  // body and the critic report this fixes) by splicing it into a fresh copy
+  // of the CURRENT script. This stays in sync with unrelated future edits to
+  // verify-learning.sh (mirrors tests/verify-learning-dryrun.test.js's
+  // withPreFixScript convention, but the regression here postdates HEAD, so
+  // `git show HEAD:...` would give the WRONG pre-fix baseline — it still has
+  // the entirely different pre-B24 `ruflo daemon status` call).
+  const PRE_FIX_PROBE_BODY = [
+    'probe_daemon_advisory() {',
+    '  local lines pids',
+    '  lines="$(kit_daemon_ps_lines 2>/dev/null)"',
+    '  [[ -z "$lines" ]] && return 0',
+    '  pids="$(awk \'{print $1}\' <<< "$lines" | tr \'\\n\' \',\' | sed \'s/,$//\')"',
+    '  soft "ruflo daemon is RUNNING (pid ${pids}) \u2014 it locks the DBs (fix-learning \'dream\' fails locked) and caches state; restart the daemon + Claude Code after a fix, then re-verify"',
+    '}',
+    '',
+  ].join('\n');
+
+  function withPreFixDaemonProbe(fn) {
+    const relName = '.pretest-b24-scope-verify-learning.sh';
+    const dst = path.join(REPO, 'lib', relName);
+    const current = fs.readFileSync(VERIFY, 'utf8');
+    const re = /probe_daemon_advisory\(\) \{[\s\S]*?\n\}\n/;
+    if (!re.test(current)) throw new Error('probe_daemon_advisory() not found in lib/verify-learning.sh to splice');
+    fs.writeFileSync(dst, current.replace(re, PRE_FIX_PROBE_BODY));
+    fs.chmodSync(dst, 0o755);
+    try { return fn(dst); } finally { fs.rmSync(dst, { force: true }); }
+  }
+
+  function runScript(scriptPath, target, extra, stub) {
+    const b = stubBin({ ...stub, target });
+    const dist = goodDistSrc();
+    const r = spawnSync('bash', [scriptPath, target, ...extra], {
+      encoding: 'utf8', timeout: 20000,
+      env: { ...process.env, PATH: `${b}:${process.env.PATH}`, KIT_RUFLO_DIST_SRC: dist },
+    });
+    fs.rmSync(b, { recursive: true, force: true });
+    fs.rmSync(dist, { recursive: true, force: true });
+    return r;
+  }
+
+  it('TEETH: the pre-fix probe falsely claims a FOREIGN daemon locks THIS target\'s DBs', () => {
+    withPreFixDaemonProbe((preFix) => {
+      const r = runScript(preFix, d, [], { daemon: 'FOREIGN' });
+      // This is the exact regression: the OLD code has no scope split at all,
+      // so ANY discovered daemon — including one for a different project —
+      // gets the target-specific causal claim.
+      expect(r.stdout).toMatch(/daemon is RUNNING \(pid 313131\)/);
+      expect(r.stdout).toMatch(/it locks the DBs/);
+    });
+  });
+
+  it('TEETH: the pre-fix probe also mis-claims an UNKNOWN-scope daemon locks THIS target\'s DBs', () => {
+    withPreFixDaemonProbe((preFix) => {
+      const r = runScript(preFix, d, [], { daemon: 'UNKNOWN' });
+      expect(r.stdout).toMatch(/daemon is RUNNING \(pid 515151\)/);
+      expect(r.stdout).toMatch(/it locks the DBs/);
+    });
+  });
+
+  it('TEETH (contrast): the POST-FIX probe does NOT make either false claim for the same fixtures', () => {
+    const foreign = runVerify(d, [], { daemon: 'FOREIGN' });
+    expect(foreign.stdout).not.toMatch(/is RUNNING for THIS target/);
+    const unknown = runVerify(d, [], { daemon: 'UNKNOWN' });
+    expect(unknown.stdout).not.toMatch(/is RUNNING for THIS target/);
+  });
+});
+
 
 describe('verify-learning: healthy loop', () => {
   let d;

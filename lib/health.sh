@@ -24,6 +24,28 @@ set -uo pipefail
 #   bin/ruflo-kit health <target> --dry-run    # diff but don't update snapshot
 #   bin/ruflo-kit health <target> --json       # emit raw current snapshot JSON only
 #   bin/ruflo-kit health <target> -h | --help  # this help text
+#
+# DRY-RUN CONTRACT (narrowed on purpose, DAEMON-HINT-SCOPE-V1 investigation):
+# --dry-run means exactly "diff but don't update snapshot/history files" — it
+# does NOT mean this run touches nothing on disk. The daemon check WAS fixed
+# to be fully side-effect-free (kit_daemon_scope_split, argv-derived, no CLI
+# call — see that call site below). The three metric probes below it were
+# NOT, and cannot be with the current instrument: `ruflo memory stats` /
+# `hooks intelligence stats` / `neural status` report internal counters
+# (HNSW index size, SONA trajectory/pattern counts, MoE routing accuracy,
+# ReasoningBank pattern count) that only `ruflo` itself computes — there is no
+# disk-only substitute the way pgrep/argv was for the daemon check. Each of
+# these commands bootstraps ruflo's storage layer on first touch as an
+# upstream side effect of merely being invoked (confirmed empirically,
+# attributed per-command): `memory stats` creates .claude-flow/policy/,
+# .swarm/{memory.db,memory.graph,schema.sql}, ruvector.db; `hooks
+# intelligence stats` adds .claude-flow/graph/; `neural status` adds
+# .swarm/agentdb-memory.{db,graph}. This fires on EVERY run, dry-run or not,
+# against a target that doesn't have these yet — it is the probes existing at
+# all, not a bug this script's --dry-run flag could gate. If a future ruflo
+# release adds an equivalent to `kit_daemon_scope_split` for these metrics
+# (compute them from a stable on-disk artifact instead of a live CLI call),
+# convert these three the same way the daemon check was converted.
 # ============================================================================
 
 RED='\033[0;31m'
@@ -114,14 +136,19 @@ NOW_S=$(date +%s)
 NOW_MS=$((NOW_S * 1000))
 NOW_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Memory: `ruflo memory stats`
+# Memory: `ruflo memory stats`. DRY-RUN CONTRACT (see header): no disk-only
+# substitute exists for these counters — invoking this command is itself what
+# bootstraps .claude-flow/policy/, .swarm/{memory.db,memory.graph,schema.sql},
+# ruvector.db on a target that has none yet, --dry-run or not.
 MEMORY_OUT=$(ruflo_timeout 5 memory stats || true)
 MEMORY_TOTAL=$(extract_number_after 'Total Entries' "$MEMORY_OUT")
 MEMORY_TOTAL=$(num_or_zero "$MEMORY_TOTAL")
 MEMORY_HNSW=$(extract_paren_count 'HNSW Index' "$MEMORY_OUT")
 MEMORY_HNSW=$(num_or_zero "$MEMORY_HNSW")
 
-# Intelligence: `ruflo hooks intelligence stats` (SONA + MoE block)
+# Intelligence: `ruflo hooks intelligence stats` (SONA + MoE block). DRY-RUN
+# CONTRACT (see header): adds .claude-flow/graph/ as an unavoidable side
+# effect of invocation, same reasoning as the memory-stats call above.
 INTEL_OUT=$(ruflo_timeout 5 hooks intelligence stats || true)
 SONA_TRAJ=$(extract_number_after 'Trajectories' "$INTEL_OUT")
 SONA_TRAJ=$(num_or_zero "$SONA_TRAJ")
@@ -132,7 +159,9 @@ MOE_ACC=$(extract_percent 'Routing Accuracy' "$INTEL_OUT")
 SEARCH_SPEEDUP=$(echo "$INTEL_OUT" | grep -m1 -E 'HNSW.*Faster Search' | grep -oE '[0-9]+x' | head -1 || echo "")
 [[ -z "$SEARCH_SPEEDUP" ]] && SEARCH_SPEEDUP="unknown"
 
-# Neural: `ruflo neural status` (ReasoningBank line)
+# Neural: `ruflo neural status` (ReasoningBank line). DRY-RUN CONTRACT (see
+# header): adds .swarm/agentdb-memory.{db,graph} as an unavoidable side
+# effect of invocation, same reasoning as the two calls above.
 NEURAL_OUT=$(ruflo_timeout 5 neural status || true)
 RB_PAT=$(echo "$NEURAL_OUT" | grep -m1 -E 'ReasoningBank' | tr -d ',' | grep -oE '[0-9]+ patterns' | grep -oE '[0-9]+' || echo 0)
 RB_PAT=$(num_or_zero "$RB_PAT")
@@ -163,11 +192,29 @@ fi
 SWARM_DB_SIZE=$(file_size "$SWARM_DB")
 AQE_DB_SIZE=$(file_size "$AQE_DB")
 
-# Daemon: `ruflo daemon status` always exits 0, grep for the canonical line
-DAEMON_OUT=$(ruflo_timeout 5 daemon status || true)
+# Daemon: replaced `ruflo daemon status` (DAEMON-HINT-SCOPE-V1). That CLI call
+# has two problems established this session: (1) its own side effect of
+# instantiating internal config objects just to print a table creates
+# .claude-flow/logs/daemon.log even on this metric-gathering step, which runs
+# UNCONDITIONALLY regardless of --dry-run — confirmed empirically: `bin/
+# ruflo-kit health <target> --dry-run` against a fresh target left daemon.log
+# behind, contradicting this script's own --dry-run contract ("diff but don't
+# update snapshot"); (2) its state-file-style output cannot be trusted —
+# observed live printing "Status: STOPPED" alongside a stale PID in the same
+# table. kit_daemon_scope_split (common.sh) derives truth from the process's
+# own argv (pgrep/ps), with no disk side effect. Reading its MINE bucket
+# answers the same question `ruflo daemon status` (no --all, itself
+# workspace-scoped) answered for THIS target — NOT byte-identically: upstream
+# compares the --workspace argv lexically (path.resolve), while
+# kit_daemon_scope_split compares filesystem IDENTITY (dev, ino via
+# fs.statSync), so a symlink- or case-aliased workspace path can classify
+# differently between the two. That is the helper being MORE correct, not
+# merely different — see kit_daemon_scope_split's own header comment
+# (DAEMON-HINT-SCOPE-V1 round 2) for the case-aliasing bug this closes — but
+# it means "reproduces exactly" would overstate the parity; it does not.
 DAEMON_RUNNING=false
-if echo "$DAEMON_OUT" | grep -q $'Status: \xe2\x97\x8f RUNNING'; then DAEMON_RUNNING=true
-elif echo "$DAEMON_OUT" | grep -qE 'Status:.*RUNNING'; then DAEMON_RUNNING=true
+if kit_daemon_scope_split "$TARGET_DIR" 2>/dev/null | grep -q $'\tMINE\t'; then
+  DAEMON_RUNNING=true
 fi
 
 # Hive workers: parse JSON workers array length cheaply (no jq dep)

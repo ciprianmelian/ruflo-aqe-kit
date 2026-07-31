@@ -108,6 +108,59 @@ function firstUserTask(transcript) {
   return '';
 }
 
+// ── TRAJ-ATTR-V1 (Wave 4 measurement integrity) — inline attribution mini-writer ─────
+// Since ruflo #2786, the `ruflo hooks post-task` spawn below triggers TWO in-process
+// intelligence.recordTrajectory() training events (bridgeRecordFeedback's 'action' step
+// + the handler's own 'result' step), both of which can move .swarm/lora-weights.json —
+// the exact policy sink the improvement-eval measures. This block records WHO caused
+// each weights transition so a future learning delta is attributable instead of being
+// confounded across writers. INLINE ON PURPOSE: helpers must stay self-contained on
+// managed targets (no kit-clone require); the schema is byte-compatible with the
+// canonical reader in tools/trajectory-attribution.cjs and a lock-step test parses
+// wrapper-written rows through that reader, so the two cannot drift silently.
+// Best-effort everywhere — attribution must NEVER block Stop or perturb learning writes.
+const TRAJ_ATTR_SCHEMA = 'traj-attr-v1';
+function trajAttrSnapshotWeights() {
+  try {
+    const p = path.join(process.cwd(), '.swarm', 'lora-weights.json');
+    const buf = fs.readFileSync(p);
+    const st = fs.statSync(p);
+    return { sha256: require('crypto').createHash('sha256').update(buf).digest('hex'), bytes: buf.length, mtimeMs: Math.round(st.mtimeMs) };
+  } catch (e) { return null; }
+}
+// defect_gate (mirror of tools/trajectory-attribution.cjs detectBridgeTrajectoryLive):
+// is the #2786 bridge→trajectory write live in the INSTALLED dist? Gates on the literal
+// behavior (a recordTrajectory( call inside bridgeRecordFeedback's declared body).
+// THREE-VALUED: true = call present; false = declaration found and the call is GONE
+// (genuinely removed — self-retired); null = cannot assess (dist unreadable, or no
+// scopable bridgeRecordFeedback declaration — renamed/moved means the double-write
+// may CONTINUE under another name, so false would be a lie).
+function trajAttrBridge2786() {
+  try {
+    let npmRootG;
+    try { npmRootG = require(path.join(__dirname, '_npm-root.cjs')); } catch (e) { return null; }
+    const p = path.join(npmRootG(), 'ruflo', 'node_modules', '@claude-flow', 'cli', 'dist', 'src', 'memory', 'memory-bridge.js');
+    const src = fs.readFileSync(p, 'utf8');
+    const m = src.match(/(?:function|const|let|var)\s+bridgeRecordFeedback\b/);
+    if (!m) return null;
+    const end = src.indexOf('\nexport ', m.index + 1);
+    return /recordTrajectory\s*\(/.test(src.slice(m.index, end > m.index ? end : undefined));
+  } catch (e) { return null; }
+}
+function trajAttrAppend(ev) {
+  try {
+    const dir = path.join(process.cwd(), '.claude-flow');
+    const row = Object.assign({ v: 1, schema: TRAJ_ATTR_SCHEMA, ts: new Date().toISOString() }, ev);
+    if (row.weightsBefore !== undefined && row.weightsAfter !== undefined) {
+      const b = row.weightsBefore, a = row.weightsAfter;
+      row.weightsChanged = (b && b.sha256) !== (a && a.sha256);
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, 'trajectory-attribution.jsonl'), JSON.stringify(row) + '\n');
+    return true;
+  } catch (e) { return false; }
+}
+
 // Read the UserPromptSubmit route-capture sentinel (.claude-flow/.ruflo-route.json), written
 // by ruflo-route-capture.cjs with ruflo's OWN routing pick for this turn (vocabulary-consistent
 // with the re-rank candidates). Returns {task, agent} only if FRESH (< 2h) so a stale sentinel
@@ -135,7 +188,10 @@ function recordRoutingOutcome(task, agent, success, quality) {
     const store = path.join(dir, 'routing-outcomes.json');
     let data = { outcomes: [] };
     try { if (fs.existsSync(store)) { const j = JSON.parse(fs.readFileSync(store, 'utf8')); if (j && Array.isArray(j.outcomes)) data = j; } } catch (e) {}
-    data.outcomes.push({ task: String(task).slice(0, 500), agent: String(agent), success: !!success, quality, keywords: extractKeywords(task), timestamp: new Date().toISOString() });
+    // `source` is TRAJ-ATTR-V1 provenance (additive; the dist re-rank reads only its
+    // documented keys and ignores extras) — marks this row as Stop-hook-written so a
+    // future audit can separate it from dist-side post-task writers.
+    data.outcomes.push({ task: String(task).slice(0, 500), agent: String(agent), success: !!success, quality, keywords: extractKeywords(task), timestamp: new Date().toISOString(), source: 'stop-hook-post-task' });
     if (data.outcomes.length > 500) data.outcomes = data.outcomes.slice(-500);
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
     fs.writeFileSync(store, JSON.stringify({ outcomes: data.outcomes }, null, 2));
@@ -177,6 +233,11 @@ function recordRoutingOutcome(task, agent, success, quality) {
       return;
     }
 
+    // TRAJ-ATTR-V1: fingerprint the LoRA policy sink BEFORE this turn's learning
+    // writes, so the appended attribution row brackets exactly the transition the
+    // post-task spawn (and its #2786 double-write) can cause.
+    const trajAttrBefore = trajAttrSnapshotWeights();
+
     // Prefer the GLOBAL aqe binary (the npx form reconciles its cache per call — see
     // CLAUDE.md Runtime note); fall back to npx only if aqe isn't on PATH.
     let aqeCmd = 'aqe', aqeArgs = ['hooks', 'post-route', '--success', String(success)];
@@ -201,6 +262,18 @@ function recordRoutingOutcome(task, agent, success, quality) {
     }
     const wrote = recordRoutingOutcome(task, agent, success, reward);
     _err('[aqe-post-route] routing-outcomes ' + (wrote ? 'recorded agent=' + agent + ' (' + agentSrc + ')' : 'SKIPPED (no reliable routed agent — store stays empty, re-rank no-ops)'));
+
+    // TRAJ-ATTR-V1: record this turn's training write with its weights transition.
+    // One row per Stop = one `ruflo hooks post-task` spawn; bridge2786:true means that
+    // spawn implied up-to-TWO dist-side recordTrajectory training events (see header).
+    trajAttrAppend({
+      source: 'stop-hook-post-task',
+      sessionId: payload.session_id || payload.sessionId || null,
+      success, reward: +reward.toFixed(3), agent: agent || null,
+      bridge2786: trajAttrBridge2786(),
+      weightsBefore: trajAttrBefore,
+      weightsAfter: trajAttrSnapshotWeights(),
+    });
 
     process.stdout.write('{}');
   } catch (e) {

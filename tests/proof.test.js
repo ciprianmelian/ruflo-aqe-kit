@@ -1,7 +1,7 @@
 /**
  * Tests for lib/proof.sh (marker PROOF-V1).
  *
- * proof.sh runs 15 disk-evidence probes and, by default, runs them TWICE (x2)
+ * proof.sh runs 16 disk-evidence probes and, by default, runs them TWICE (x2)
  * under different environments — verdict PROVED only when both passes are clean
  * AND their per-probe verdict vectors are byte-identical. These tests build a
  * throwaway kit (real common.sh + proof.sh, JSON-emitting stubs for the sibling
@@ -69,6 +69,40 @@ function mkGroot(base) {
   return groot;
 }
 
+// P16 memory-roundtrip: the shared `ruflo memory {init,store,retrieve,purge}`
+// handling every ruflo shim body in this file needs, backed by REAL sqlite3
+// (this file now always resolves the real CLI — see the `sqlite` default
+// change below). Matches kit_memory_roundtrip_check's exact invocations:
+//   memory init    --path <db> --force --backend sqlite
+//   memory store   -k <key> -n <ns> --value <val> --path <db>
+//   memory retrieve -k <key> -n <ns> --value-only --path <db>
+//   memory purge   --namespace <ns> --force --path <db>
+// Inserted before a shim's final fallback `exit 0` so it never disturbs the
+// --version/mcp/hooks-route handling already there.
+const MEMORY_SHIM_BLOCK = `if [ "$1" = "memory" ]; then
+  shift
+  msub="$1"; shift
+  mpath=""; mkey=""; mns=""; mval=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --path) mpath="$2"; shift 2 ;;
+      -k) mkey="$2"; shift 2 ;;
+      -n|--namespace) mns="$2"; shift 2 ;;
+      --value) mval="$2"; shift 2 ;;
+      --force|--value-only) shift ;;
+      --backend) shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$msub" in
+    init)     sqlite3 "$mpath" "CREATE TABLE IF NOT EXISTS memory_entries (namespace TEXT, key TEXT, content TEXT);"; exit $? ;;
+    store)    sqlite3 "$mpath" "DELETE FROM memory_entries WHERE namespace='$mns' AND key='$mkey'; INSERT INTO memory_entries (namespace,key,content) VALUES ('$mns','$mkey','$mval');"; exit $? ;;
+    retrieve) sqlite3 "$mpath" "SELECT content FROM memory_entries WHERE namespace='$mns' AND key='$mkey' LIMIT 1;"; exit 0 ;;
+    purge)    sqlite3 "$mpath" "DELETE FROM memory_entries WHERE namespace='$mns';"; exit $? ;;
+    *)        exit 0 ;;
+  esac
+fi`;
+
 // PATH shim dir. Every shim appends "<argv> :: RUVNET_BRAIN_KB=<value>" to the
 // call-log so tests can (a) assert call order and (b) prove pass 2 ran under a
 // clean env (the var reads <unset>). node is NOT shimmed — real node is needed.
@@ -92,6 +126,7 @@ if [ "$1" = "hooks" ] && [ "$2" = "route" ]; then
   if [ "$n" -eq 1 ]; then echo "route: coder"; fi
   exit 0
 fi
+${MEMORY_SHIM_BLOCK}
 exit 0
 `;
   } else {
@@ -100,6 +135,7 @@ ${logLine('ruflo')}
 if [ "$1" = "--version" ]; then echo "3.32.2"; exit 0; fi
 if [ "$1" = "mcp" ] && [ "$2" = "start" ]; then echo '{"jsonrpc":"2.0","id":1,"result":{}}'; sleep 0.2; exit 0; fi
 if [ "$1" = "hooks" ] && [ "$2" = "route" ]; then echo "route: coder → hierarchical"; exit 0; fi
+${MEMORY_SHIM_BLOCK}
 exit 0
 `;
   }
@@ -111,10 +147,14 @@ if [ "$1" = "--version" ]; then echo "3.12.2"; exit 0; fi
 exit 0
 `);
   writeExec(path.join(bin, 'agentdb'), `#!/usr/bin/env bash\n${logLine('agentdb')}\nexit 0\n`);
-  // sqlite3 is shimmed to a no-op by default (deterministic, binary-free). P15
-  // statusline-truth tests need REAL counts, so they build with { sqlite: 'real' }
-  // and let the real sqlite3 resolve from the inherited PATH.
-  if (sqlite !== 'real') {
+  // sqlite3 defaults to the REAL system CLI now (P16 memory-roundtrip needs a
+  // genuinely working sqlite3 for both the ruflo shim's own memory backing
+  // AND kit_memory_roundtrip_check's independent on-disk read — a no-op
+  // logging shim would make that independent read always come back empty,
+  // permanently reading as a round-trip "gap"). `sqlite: 'shim'` is kept as
+  // an explicit opt-out for any future test that needs the old deterministic
+  // no-op (none currently do).
+  if (sqlite === 'shim') {
     writeExec(path.join(bin, 'sqlite3'), `#!/usr/bin/env bash\n${logLine('sqlite3')}\nexit 0\n`);
   }
   writeExec(path.join(bin, 'npm'), `#!/usr/bin/env bash
@@ -139,8 +179,9 @@ function mkKit(base) {
   writeExec(path.join(lib, 'verify-learning.sh'), `#!/usr/bin/env bash\necho '{"pass":1,"warn":0,"fail":0,"info":0,"verdict":"live"}'\n`);
   writeExec(path.join(lib, 'health.sh'), `#!/usr/bin/env bash\necho '{"metrics":{"memory":{"totalEntries":100,"hnswEntries":50}}}'\n`);
   // P15 statusline-truth renders $KIT_ASSETS/statusline.cjs (the canonical asset).
-  // The default stub emits vectorCount 0 — which matches the shimmed sqlite3's
-  // indep sum of 0 (the shim prints nothing → every COUNT parses to 0) within the
+  // The default stub emits vectorCount 0 — which matches the real sqlite3's
+  // indep sum of 0 (mkTarget's .swarm/memory.db is a 0-byte file with no
+  // memory_entries table yet, so every COUNT errors and parses to 0) within the
   // ±5 tolerance — plus a valid tests block (countMethod 'regex-scan',
   // testCases>=testFiles), so P15 is PASS in the default build. P15-specific tests
   // overwrite this asset (writeKitAsset) and use a real sqlite3 db.
@@ -227,16 +268,17 @@ function mkTarget(base) {
   // and the installed statusline carrying the DAEMON-AUTOSTART-3-V1 child-env pin.
   fs.writeFileSync(path.join(target, 'claude-flow.config.json'),
     JSON.stringify({ daemon: { autostart: false } }, null, 2) + '\n');
-  // Default installed statusline: vectorCount 0 matches the shimmed sqlite3's
-  // indep sum of 0 (the shim prints nothing → every COUNT parses to 0) within
-  // the ±5 tolerance, so P15 PASSes by default (mirrors mkKit's kit-asset
-  // default before the F6 fix). P15-specific tests overwrite this via
+  // Default installed statusline: vectorCount 0 matches the real sqlite3's
+  // indep sum of 0 (the 0-byte .swarm/memory.db has no memory_entries table
+  // yet, so every COUNT errors and parses to 0) within the ±5 tolerance, so
+  // P15 PASSes by default (mirrors mkKit's kit-asset default before the F6
+  // fix). P15-specific tests overwrite this via
   // writeInstalledStatusline with a real sqlite3 db (build({ sqlite: 'real' })).
   writeInstalledStatusline(target, { vectorCount: 0, testFiles: 2, testCases: 10, countMethod: 'regex-scan' });
   return target;
 }
 
-function build({ ruflo = 'normal', sqlite = 'shim' } = {}) {
+function build({ ruflo = 'normal', sqlite = 'real' } = {}) {
   // realpathSync canonicalizes /var → /private/var on macOS so the fake global
   // root matches the realpath require.resolve() returns (global_bsqlite_loads
   // asserts the module resolves UNDER the global root).
@@ -258,11 +300,11 @@ function build({ ruflo = 'normal', sqlite = 'shim' } = {}) {
 }
 
 describe('proof.sh --single: one pass, all probes green', () => {
-  it('reports 15 probes with 0 failed and exits 0', () => {
+  it('reports 16 probes with 0 failed and exits 0', () => {
     const { run } = build();
     const { code, stdout } = run(['--single', '--json']);
     const j = JSON.parse(stdout.trim());
-    expect(j.probes.length).toBe(15);
+    expect(j.probes.length).toBe(16);
     expect(j.failed).toBe(0);
     expect(code).toBe(0);
   });
@@ -273,8 +315,8 @@ describe('proof.sh x2: two passes, stable → PROVED', () => {
     const { run } = build();
     const { code, stdout } = run(['--json']);
     const j = JSON.parse(stdout.trim());
-    expect(j.pass1.probes.length).toBe(15);
-    expect(j.pass2.probes.length).toBe(15);
+    expect(j.pass1.probes.length).toBe(16);
+    expect(j.pass2.probes.length).toBe(16);
     expect(j.stable).toBe(true);
     expect(j.verdict).toBe('PROVED');
     expect(code).toBe(0);

@@ -206,7 +206,42 @@ info "setup NEVER starts or stops the daemon"
 # FOUND daemon reads as none (observed live 2026-07-23: S6 said "no daemon" while
 # the same run's staleness audit and proof P14 both saw 2).
 if [[ -n "$(kit_daemon_ps_lines)" ]]; then
-  warn "a ruflo daemon is RUNNING (pre-existing — not started by setup); stop with: ruflo daemon stop"
+  # DAEMON-HINT-SCOPE-V1: detection above is UNTOUCHED (the SIGPIPE history in
+  # the comment above is exactly why) — still the shared, machine-wide
+  # kit_daemon_ps_lines helper. Only the remediation wording changes: `ruflo
+  # daemon stop` run from here only reaches a daemon whose OWN --workspace is
+  # this target (kit_daemon_scope_split's MINE bucket, common.sh) — telling
+  # the operator to stop a daemon that command can't reach is the same
+  # actionable-wrong-advice class B24-DAEMON-SCOPE-V1 fixed in
+  # verify-learning's daemon advisory and status.sh's daemon section.
+  _DSCOPE="$(kit_daemon_scope_split "$TARGET_DIR" 2>/dev/null)"
+  _DMINE=() _DOTHER=() _DUNKNOWN=()
+  while IFS=$'\t' read -r _dpid _dstate _dws; do
+    [[ -z "$_dpid" ]] && continue
+    case "$_dstate" in
+      MINE)    _DMINE+=("$_dpid") ;;
+      OTHER)   _DOTHER+=("$_dpid ($_dws)") ;;
+      UNKNOWN) _DUNKNOWN+=("$_dpid") ;;
+    esac
+  done <<< "$_DSCOPE"
+  if [[ ${#_DMINE[@]} -gt 0 ]]; then
+    _p="$(IFS=,; echo "${_DMINE[*]}")"
+    warn "a ruflo daemon is RUNNING for THIS target (pid ${_p}) (pre-existing — not started by setup); stop with: ruflo daemon stop"
+  fi
+  if [[ ${#_DUNKNOWN[@]} -gt 0 ]]; then
+    _p="$(IFS=,; echo "${_DUNKNOWN[*]}")"
+    warn "a ruflo daemon proc(s) found with no --workspace visible in argv (pid ${_p}) — scope could not be determined; 'ruflo daemon stop' may or may not reach it"
+  fi
+  if [[ ${#_DOTHER[@]} -gt 0 ]]; then
+    _p="$(IFS='; '; echo "${_DOTHER[*]}")"
+    info "a ruflo daemon is running for a DIFFERENT workspace (${_p}) — not started by setup, and 'ruflo daemon stop' from here will not reach it"
+  fi
+  # Fail-safe: kit_daemon_ps_lines already proved something is running — never
+  # silently drop the pre-existing-daemon warning if scope-split classifies
+  # none of the three buckets (e.g. node unavailable).
+  if [[ ${#_DMINE[@]} -eq 0 && ${#_DOTHER[@]} -eq 0 && ${#_DUNKNOWN[@]} -eq 0 ]]; then
+    warn "a ruflo daemon is RUNNING (pre-existing — not started by setup); scope not assessable — 'ruflo daemon stop' may not reach it if it's for a different workspace"
+  fi
   record_stage "S6" warn "daemon pre-existing"
 else
   pass "no daemon running (cost-safe)"

@@ -62,13 +62,28 @@ function firstUserTask(transcript) {
 
 function run(opts = {}) {
   const { argv = [], stdin = '', env = {} } = opts;
-  return spawnSync(process.execPath, [SCRIPT, ...argv], {
-    input: stdin,
-    encoding: 'utf8',
-    timeout: 8000,
-    env: { ...process.env, ...env },
-    cwd: opts.cwd || os.tmpdir(),
-  });
+  // B23: os.tmpdir() is a directory SHARED by every process on the machine.
+  // aqe-post-route.cjs writes real state under path.join(process.cwd(), '.claude-flow')
+  // (routing-outcomes.json, .ruflo-route.json), so defaulting cwd to the shared
+  // root let this suite accumulate real data there on every run without an
+  // explicit `cwd` override — poisoning the shared root for every other
+  // process/fixture that walks up from beneath it. Give each call that doesn't
+  // supply its own cwd a private, disposable directory instead.
+  const cwd = opts.cwd || fs.mkdtempSync(path.join(os.tmpdir(), 'aqe-post-route-cwd-'));
+  const ownsCwd = !opts.cwd;
+  try {
+    return spawnSync(process.execPath, [SCRIPT, ...argv], {
+      input: stdin,
+      encoding: 'utf8',
+      timeout: 8000,
+      env: { ...process.env, ...env },
+      cwd,
+    });
+  } finally {
+    if (ownsCwd) {
+      try { fs.rmSync(cwd, { recursive: true, force: true }); } catch (e) { /* best effort */ }
+    }
+  }
 }
 
 // ── extractKeywords (inline mirror) ──────────────────────────────────────────

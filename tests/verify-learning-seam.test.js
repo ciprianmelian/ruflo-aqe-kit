@@ -27,16 +27,26 @@ function sqlite(db, sql) {
   if (r.status !== 0) throw new Error(`sqlite3 failed: ${r.stderr || r.stdout}`);
 }
 
-// Deterministic stubs for the CLIs the other probes consult (useNativeHNSW on,
-// daemon stopped) so only the seam probe can drive the verdict here.
+// Deterministic stub for the CLI the other probes consult (useNativeHNSW on)
+// so only the seam probe can drive the verdict here.
+//
+// HERMETICITY-V1 (closes a gap the B24-DAEMON-SCOPE-V1 critic flagged): this
+// used to also fake a `ruflo daemon status` binary, but that's dead code —
+// probe_daemon_advisory hasn't shelled out to `ruflo` since B24 (it's pgrep/ps
+// via kit_daemon_ps_lines / kit_daemon_scope_split now, see lib/common.sh and
+// lib/verify-learning.sh). Without a `pgrep`/`ps` stub this suite fell through
+// to the REAL system process table on every run — on a dev host running a
+// second kit-managed project's daemon, that's a live, non-deterministic extra
+// probe result this suite never intended to exercise. Faked deterministically
+// to NO DAEMON here, mirroring the convention in tests/verify-learning.test.js
+// (whose stubBin's default 'stopped' case fakes pgrep to always exit 1).
 function stubBin() {
   const b = fs.mkdtempSync(path.join(os.tmpdir(), 'vlseambin-'));
   fs.writeFileSync(path.join(b, 'aqe'),
     '#!/usr/bin/env bash\nif [ "$1" = ruvector ] && [ "$2" = status ]; then echo "  useNativeHNSW: true (set)"; fi\nexit 0\n');
-  fs.writeFileSync(path.join(b, 'ruflo'),
-    '#!/usr/bin/env bash\nif [ "$1" = daemon ] && [ "$2" = status ]; then echo "Status: stopped"; fi\nexit 0\n');
+  fs.writeFileSync(path.join(b, 'pgrep'), '#!/usr/bin/env bash\nexit 1\n');
   fs.chmodSync(path.join(b, 'aqe'), 0o755);
-  fs.chmodSync(path.join(b, 'ruflo'), 0o755);
+  fs.chmodSync(path.join(b, 'pgrep'), 0o755);
   return b;
 }
 
@@ -103,6 +113,28 @@ describe('verify-learning #11: sona-seam sentinels (SEAM-SENTINEL-V1)', () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/sona-seam sentinels present in installed dist/);
     expect(parseJson(runVerify(target, dist, ['--json']).stdout).fail).toBe(0);
+    fs.rmSync(dist, { recursive: true, force: true });
+  });
+
+  // HERMETICITY-V1 teeth: the deterministic `pgrep` stub in stubBin() (above)
+  // is itself untested unless something asserts on its effect — delete it and
+  // every OTHER test in this describe block stays green, because none of them
+  // look at `info` or daemon wording. This test exists ONLY to catch that: it
+  // pins the exact `info` count AND the absence of every probe_daemon_advisory
+  // wording template (MINE/OTHER/UNKNOWN — lib/verify-learning.sh
+  // probe_daemon_advisory) for this fixture. Verified by hand: removing the
+  // `pgrep` stub on a host running a real stray ruflo daemon (this dev
+  // machine, PID 29640 for an unrelated project) flips this exact assertion
+  // red — see the B24-DAEMON-SCOPE-V1 hermeticity fix. If `info` ever changes,
+  // that is real signal (either this suite is reading host state again, or an
+  // unrelated probe's info/note count shifted) — investigate and re-pin the
+  // new deterministic value; do NOT loosen this to a range or drop it.
+  it('HERMETICITY: pins the exact info count and the absence of any daemon note (teeth for the pgrep stub)', () => {
+    const dist = mkDistSrc({ sona: true, lora: true });
+    const j = parseJson(runVerify(target, dist, ['--json']).stdout);
+    expect(j.info).toBe(2);
+    const human = runVerify(target, dist).stdout;
+    expect(human).not.toMatch(/running for THIS target|running for a DIFFERENT workspace|no --workspace visible in argv/);
     fs.rmSync(dist, { recursive: true, force: true });
   });
 

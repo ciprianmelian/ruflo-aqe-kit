@@ -19,6 +19,22 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
 
 (async () => {
   const PROJ = process.cwd();
+  // TARGET-ECHO-V1 (B14 silent-wrong-target): bench/dashboard/harvest resolve
+  // their target by inspecting ONLY $1 (bin/ruflo-kit _kit_firstarg_resolve) —
+  // a flag-first invocation (e.g. `harvest --status <target>`) silently falls
+  // back to cwd instead of the intended target, and this tool has no way to
+  // tell that fallback apart from an explicit `.` (the dispatcher has already
+  // cd'd us into whatever it resolved by the time we run). Printing the
+  // resolved directory unconditionally, before any read or write, is what
+  // turns a silent wrong-target into a visible one — dashboard.cjs already
+  // does this in its startup banner; harvest previously echoed nothing.
+  // Stderr (not stdout): the tool's stdout contract is exactly one JSON
+  // summary line consumed by callers (see the `console.log = _err` override
+  // above and tests/harvest-embed.test.js's `.split('\n').pop()` parse) —
+  // stderr keeps that contract untouched while still reaching an interactive
+  // terminal, which is the actual failure mode this fixes.
+  _err(`[aqe-harvest] target: ${PROJ}`);
+  _err('[aqe-harvest] writes: .swarm/lora-weights.json (Sink A: ruflo LoRA), agentdb.db (Sink B: reflexion+skills), .swarm/harvest-state.json (ledger)  |  reads read-only: .agentic-qe/memory.db');
   // Global node_modules: `npm root -g` is the truth (a custom npm prefix like
   // ~/.npm-global diverges from the execPath-derived guess, e.g. system node at
   // /usr/bin/node with globals elsewhere); execPath stays as the offline fallback.
@@ -79,6 +95,14 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
   if (!fresh.length) { process.stdout.write(JSON.stringify({ trained: 0, skills: 0, episodes: 0, note: 'nothing fresh' }) + '\n'); return; }
 
   // ---- Sink A: ruflo SONA LoRA (proven direct primitive) ----
+  // TRAJ-ATTR-V1: the harvester is one of the writer paths into .swarm/lora-weights.json
+  // (direct adapter.train(), bypassing recordTrajectory). Bracket the Sink A pass with a
+  // weights fingerprint and append one attribution row, so an eval-side learning delta
+  // can be attributed to harvest-replay vs the per-turn Stop hook instead of confounded.
+  // Best-effort: a missing module or read-only fs must never break the harvest.
+  let trajAttr = null;
+  try { trajAttr = require(path.join(__dirname, 'trajectory-attribution.cjs')); } catch (e) {}
+  const trajAttrBefore = trajAttr ? trajAttr.snapshotWeights(PROJ) : null;
   let trained = 0, trainedEmbeddedAtHarvest = 0;
   try {
     const lora = await import('file://' + path.join(cliBase, 'dist', 'src', 'ruvector', 'lora-adapter.js'));
@@ -126,6 +150,16 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
     }
     adapter.saveWeights();
   } catch (e) { _err('SinkA(LoRA) failed:', e.message); }
+  // TRAJ-ATTR-V1: record the Sink A pass (even trained=0 — "harvest ran, trained
+  // nothing" is itself attribution: a weights change in that window is NOT ours).
+  if (trajAttr) {
+    trajAttr.appendEvent(PROJ, {
+      source: 'harvest-sinkA',
+      trained, trainedEmbeddedAtHarvest, freshRows: fresh.length,
+      weightsBefore: trajAttrBefore,
+      weightsAfter: trajAttr.snapshotWeights(PROJ),
+    });
+  }
 
   // ---- Sink B: AgentDB reflexion + skills (node import; no MCP) ----
   let skills = 0, episodes = 0;

@@ -48,7 +48,20 @@
  *   node tools/improvement-eval.cjs --history-file <f>      # analyze <f> only (no collection)
  *   node tools/improvement-eval.cjs --bench-history <f>     # override selfimprove-history path
  *   node tools/improvement-eval.cjs --baseline-dir <d>      # override the frozen-baseline dir
- * Exit: 0 IMPROVING (or --selftest all-pass) · 1 otherwise.
+ *   node tools/improvement-eval.cjs --preflight             # re-baseline readiness check (no routing)
+ * Exit: 0 IMPROVING (or --selftest / --preflight all-pass) · 1 otherwise.
+ *
+ * MEASUREMENT EPOCH (Wave 4, 2026-07-31 — do not remove): every figure this instrument
+ * produced before 2026-07-31 was measured on a stack now known to have been misreporting
+ * in two independent ways — (a) better-sqlite3 had no compiled binding under the ruflo
+ * agentdb root, so AgentDB (incl. the @claude-flow/neural reasoning-bank path behind SONA
+ * training) silently ran on sql.js WASM emulation; (b) ruflo #2786 turned
+ * bridgeRecordFeedback from a swallowed no-op into a live recordTrajectory writer, adding
+ * an unattributed training path (and a same-turn DOUBLE-write inside hooks_post-task).
+ * Pre-line rows are therefore HISTORY, not evidence: they are never deleted, but the gate
+ * refuses to blend them with post-line rows (see EPOCH_LINE below), and collection refuses
+ * to run against a baseline frozen before the line. "trained ≤ control" readings from
+ * before the line are readings of a broken instrument, not of the learning loop.
  */
 'use strict';
 const fs = require('fs');
@@ -82,6 +95,38 @@ const BENCH_SCORER = 'norm-v1';
 const MIN_RUNS = 3;     // ≥3 paired sessions
 const SIGMA_MIN = 2.0;  // ≥2σ between-arm separation ("reproducible to ≥2σ", G3:62)
 const FLAT_BAND = 0.05; // control arm counts as flat if its accuracy spread ≤ 5pp
+
+// ── Measurement epoch line (HARD-CODED — see header; do not move backward) ────
+// Rows timestamped before this line were measured on the pre-repair instrument
+// (WASM-emulated sqlite backend + unattributed #2786 writer) and are excluded from
+// the gate arrays — reported as history, never blended. Rows whose ts CANNOT BE
+// PLACED against the line (missing or unparseable) are ALSO excluded and reported:
+// an unplaceable row admitted to the gate would let the excluded history walk back
+// in by stripping timestamps, which defeats the whole property.
+//
+// WHY 13:00Z and not midnight: the three onsets all happened DURING 2026-07-31 —
+// ruflo 3.33.0 (#2786) installed 10:12Z, the better-sqlite3 native rebuild and the
+// TRAJ-ATTR-V1 wiring completed before 12:57Z — so a midnight line admitted same-day
+// pre-repair measurements (e.g. bench rows from 10:42:10Z) as post-line. 13:00Z is the
+// last onset rounded UP to the hour: on this host any row stamped after it ran on
+// the repaired, attributed stack. Other hosts must not trust the time at all — they
+// prove instrument state directly via --preflight.
+const EPOCH_LINE = '2026-07-31T13:00:00Z';
+const EPOCH_ID = 'post-repair-2026-07-31';
+const EPOCH_REASON = 'pre-line rows were measured on an emulated sqlite backend (missing better-sqlite3 binding under the ruflo agentdb root) and before trajectory-source attribution (#2786 writer live but unmarked)';
+const epochOf = (row) => {
+  const t = row && row.ts ? Date.parse(row.ts) : NaN;
+  if (!Number.isFinite(t)) return 'no-ts';
+  return t < Date.parse(EPOCH_LINE) ? 'pre' : 'post';
+};
+// HONEST LIMIT: manifest.created is self-reported at freeze time and is NOT covered
+// by the content-addressed baselineId, so a forward-dated created evades this check.
+// Local disk evidence cannot distinguish that from an honest freeze; the guard is
+// against the accidental confound (extending a stale series), not a forging operator.
+const baselinePreEpoch = (manifest) => {
+  const t = manifest && manifest.created ? Date.parse(manifest.created) : NaN;
+  return Number.isFinite(t) && t < Date.parse(EPOCH_LINE);
+};
 
 // ── Held-out task set (FIXED; reused + extended from selfimprove-bench.cjs) ───
 const TASKS = [
@@ -216,8 +261,55 @@ function measureArm(cwd) {
   }
   return { acc: mean(perSeed), seeds: perSeed };
 }
+// Instrument fingerprint recorded on every collected row — the confounds the
+// 2026-07-31 line exists for, probed at measurement time so a FUTURE drift of any
+// of them is visible per-row instead of silently blending into the series. The
+// sentinel probes matter most: a mid-series ruflo bump that wipes SONA-TRAIN-V1
+// silently reverts the JS arm to write-only, pinning treatment ≡ control — which
+// would read as "training has no effect" unless the rows show WHEN the seam died.
+// Versions come from package.json reads (no subprocess). Best-effort:
+// null = could not assess (recorded as null, never guessed).
+function probeInstrument() {
+  let bsqliteNativeOk = null, bridge2786 = null;
+  let sonaTrainSentinel = null, loraAdaptSentinel = null, rufloVersion = null, aqeVersion = null;
+  try {
+    const attr = require(path.join(__dirname, 'trajectory-attribution.cjs'));
+    const root = attr.resolveNpmRoot();
+    bridge2786 = attr.detectBridgeTrajectoryLive(root).live;
+    try {
+      const dist = path.join(root, 'ruflo', 'node_modules', '@claude-flow', 'cli', 'dist', 'src');
+      sonaTrainSentinel = fs.readFileSync(path.join(dist, 'memory', 'intelligence.js'), 'utf8').includes('SONA-TRAIN-V1');
+      loraAdaptSentinel = fs.readFileSync(path.join(dist, 'mcp-tools', 'hooks-tools.js'), 'utf8').includes('RUFLO-LORA-ADAPT-V1');
+    } catch (e) { /* dist unreadable — sentinels stay null */ }
+    try { rufloVersion = JSON.parse(fs.readFileSync(path.join(root, 'ruflo', 'package.json'), 'utf8')).version || null; } catch (e) {}
+    try { aqeVersion = JSON.parse(fs.readFileSync(path.join(root, 'agentic-qe', 'package.json'), 'utf8')).version || null; } catch (e) {}
+    try {
+      // Resolve better-sqlite3 exactly as the ruflo agentdb root would (nearest-first),
+      // then prove it can OPEN and ANSWER — a require()-only check cannot tell native
+      // from the silent sql.js/WASM fallback this line exists because of.
+      const { createRequire } = require('module');
+      const req = createRequire(path.join(root, 'ruflo', 'node_modules', 'agentdb', 'noop.js'));
+      const Database = req('better-sqlite3');
+      const d = new Database(':memory:');
+      const ok = d.prepare('SELECT 1 AS ok').get();
+      d.close();
+      bsqliteNativeOk = !!(ok && ok.ok === 1);
+    } catch (e) { bsqliteNativeOk = false; }
+  } catch (e) { /* attribution module unavailable — probes stay null */ }
+  return { bsqliteNativeOk, bridge2786, sonaTrainSentinel, loraAdaptSentinel, rufloVersion, aqeVersion, nodeVersion: process.version };
+}
+
 function collectSession() {
   const manifest = ensureBaseline();                 // freeze once (or --rebaseline)
+  // EPOCH GUARD (collection): a baseline frozen before the 2026-07-31 measurement
+  // line anchors the whole series to the pre-repair instrument — refuse rather than
+  // quietly extend an uncomparable series. --rebaseline is the sanctioned reset.
+  if (baselinePreEpoch(manifest)) {
+    process.stderr.write('\n\x1b[0;31m✗ REFUSING to collect: the frozen control baseline predates the ' + EPOCH_LINE.slice(0, 10) + ' measurement line.\x1b[0m\n' +
+      '    ' + EPOCH_REASON + '.\n' +
+      '    Run `node tools/improvement-eval.cjs --rebaseline` to freeze a post-line baseline and restart the series.\n\n');
+    process.exit(1);
+  }
   const treatSandbox = mkSandbox(CWD, 'treat');       // CURRENT live policy
   const ctrlSandbox = mkSandbox(BASELINE_DIR, 'ctrl'); // FROZEN baseline policy
   let treatment, control, tHash, cHash;
@@ -241,6 +333,10 @@ function collectSession() {
     treatmentStateHash: tHash.hash, controlStateHash: cHash.hash,
     treatmentStateFiles: tHash.files, controlStateFiles: cHash.files,
     stateDiffers: tHash.hash !== cHash.hash,
+    // Wave 4 provenance: which measurement epoch this row belongs to, and the
+    // instrument state it was taken under (see probeInstrument).
+    epoch: EPOCH_ID,
+    instrument: probeInstrument(),
   };
   try { fs.mkdirSync(path.dirname(EVAL_HIST), { recursive: true }); fs.appendFileSync(EVAL_HIST, JSON.stringify(row) + '\n'); }
   catch (e) { /* read-only fs — analysis still proceeds on prior rows */ }
@@ -257,22 +353,60 @@ function readJsonl(file) {
 // against THAT baseline count — the longitudinal series is per-baseline, so a --rebaseline
 // (or a row from the pre-frozen-baseline instrument, which carries no baselineId) can never
 // contaminate the gate. When null (analysis-only / fixtures), every same-scorer row counts.
+// Clock-sanity slack: a counted row stamped further than this beyond the reading
+// host's clock is FLAGGED as suspect (forged-or-skewed timestamp), but still counts —
+// the gate's conditions are pre-registered and a hard exclusion would misfire on
+// legitimate clock skew (and on the test harness's own deterministic EVAL_TS stamps).
+// This is visibility for the same forged-timestamp class documented at
+// baselinePreEpoch: local evidence cannot prove a timestamp, only bound its absurdity.
+const FUTURE_SLACK_MS = 24 * 3600 * 1000;
+const tsSuspectFuture = (row, nowMs) => {
+  const t = row && row.ts ? Date.parse(row.ts) : NaN;
+  return Number.isFinite(t) && t > (nowMs ?? Date.now()) + FUTURE_SLACK_MS;
+};
+
 function readPairedArms(file, baselineId) {
   const t = [], c = [];
+  let excludedPreLine = 0, excludedNoTs = 0, suspectFutureTs = 0;
   for (const r of readJsonl(file)) {
     if (r.scorerVersion !== SCORER) continue;
     if (baselineId && r.baselineId !== baselineId) continue;
-    if (typeof r.treatmentAcc === 'number' && typeof r.controlAcc === 'number') { t.push(r.treatmentAcc); c.push(r.controlAcc); }
+    if (typeof r.treatmentAcc !== 'number' || typeof r.controlAcc !== 'number') continue;
+    // EPOCH GUARD: a row timestamped before the measurement line is history, not
+    // evidence — count it out loud, never into the gate arrays (see header). A row
+    // whose ts cannot be PLACED is excluded the same way: admitting it would let
+    // pre-line history re-enter the gate by losing its timestamp.
+    const ep = epochOf(r);
+    if (ep === 'pre') { excludedPreLine++; continue; }
+    if (ep === 'no-ts') { excludedNoTs++; continue; }
+    if (tsSuspectFuture(r)) suspectFutureTs++;   // counted, but loudly flagged (see above)
+    t.push(r.treatmentAcc); c.push(r.controlAcc);
   }
-  return { t, c };
+  return { t, c, excludedPreLine, excludedNoTs, suspectFutureTs };
 }
 // Bench treatment-arm longitudinal trend (accuracyPct under norm-v1) — corroborating context.
+// Bench ts values may carry non-ISO suffixes ("…Z-run1"), so extract the ISO prefix before
+// placing a row against the epoch line; no parseable prefix ⇒ cannot place ⇒ kept (legacy).
+function benchEpochOf(r) {
+  const m = String(r && r.ts || '').match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?/);
+  if (!m) return 'no-ts';
+  const t = Date.parse(m[0].endsWith('Z') ? m[0] : m[0] + 'Z');
+  if (!Number.isFinite(t)) return 'no-ts';
+  return t < Date.parse(EPOCH_LINE) ? 'pre' : 'post';
+}
 function readBenchTrend(file) {
   // Rows without an explicit scorerVersion are pre-normalization history — mixing
   // them back in resurrects the phantom +8.3pp the norm-v1 split existed to kill.
-  const accs = readJsonl(file).filter((r) => r.scorerVersion === BENCH_SCORER && typeof r.accuracyPct === 'number').map((r) => r.accuracyPct);
-  if (accs.length < 2) return { runs: accs.length, deltaPP: null, flat: null };
-  return { runs: accs.length, deltaPP: +(accs[accs.length - 1] - accs[0]).toFixed(1), flat: Math.abs(accs[accs.length - 1] - accs[0]) < 5 };
+  // EPOCH GUARD: pre-line bench rows are likewise excluded (same broken instrument),
+  // and so are rows whose ts cannot be placed (the real history holds norm-v1 rows
+  // with ts like 'trained-run1-…' and '' — all June-era pre-line; counting them as
+  // post-line corroboration is exactly the blend this guard exists to forbid).
+  const rows = readJsonl(file).filter((r) => r.scorerVersion === BENCH_SCORER && typeof r.accuracyPct === 'number');
+  const excludedPreLine = rows.filter((r) => benchEpochOf(r) === 'pre').length;
+  const excludedNoTs = rows.filter((r) => benchEpochOf(r) === 'no-ts').length;
+  const accs = rows.filter((r) => benchEpochOf(r) === 'post').map((r) => r.accuracyPct);
+  if (accs.length < 2) return { runs: accs.length, deltaPP: null, flat: null, excludedPreLine, excludedNoTs };
+  return { runs: accs.length, deltaPP: +(accs[accs.length - 1] - accs[0]).toFixed(1), flat: Math.abs(accs[accs.length - 1] - accs[0]) < 5, excludedPreLine, excludedNoTs };
 }
 
 // ── Frozen-baseline counterfactual (the control arm's policy store) ───────────
@@ -418,11 +552,76 @@ function selftest() {
   process.exit(0);
 }
 
+// ── --preflight: re-baseline readiness (Wave 4) — no routing, no writes ───────
+// A fair post-line series requires the instrument to be verifiably sound BEFORE the
+// control baseline is frozen. This mode checks exactly the preconditions whose silent
+// absence produced the pre-2026-07-31 confound, so nobody can re-run the eval on a
+// broken instrument by accident. Exit 0 only when every check passes.
+function preflight() {
+  const checks = [];
+  const inst = probeInstrument();
+  checks.push({
+    name: 'better-sqlite3 native opens from the ruflo agentdb root', ok: inst.bsqliteNativeOk === true,
+    note: inst.bsqliteNativeOk === true ? 'open+SELECT 1 ok (not the sql.js/WASM fallback)'
+      : inst.bsqliteNativeOk === false ? 'resolve/require/open FAILED — AgentDB would silently fall back to WASM; repair (npm rebuild better-sqlite3 in that tree) before baselining'
+        : 'could not assess (attribution module or npm root unavailable)',
+  });
+  checks.push({
+    name: 'ruflo #2786 bridge→trajectory writer state is KNOWN', ok: inst.bridge2786 !== null,
+    note: inst.bridge2786 === null ? 'installed dist not found — cannot record writer provenance'
+      : 'bridgeRecordFeedback → recordTrajectory is ' + (inst.bridge2786 ? 'LIVE (each post-task double-writes)' : 'not present (upstream moved/removed it — flag self-retired)'),
+  });
+  // Kit learning-loop sentinels: without BOTH, the JS arm is write-only and the
+  // treatment arm cannot differ from control by training (SEAM-SENTINEL-V1 precedent).
+  try {
+    const attr = require(path.join(__dirname, 'trajectory-attribution.cjs'));
+    const root = attr.resolveNpmRoot();
+    const dist = path.join(root, 'ruflo', 'node_modules', '@claude-flow', 'cli', 'dist', 'src');
+    const intel = fs.readFileSync(path.join(dist, 'memory', 'intelligence.js'), 'utf8');
+    const hooks = fs.readFileSync(path.join(dist, 'mcp-tools', 'hooks-tools.js'), 'utf8');
+    checks.push({ name: 'SONA-TRAIN-V1 sentinel present (train seam)', ok: intel.includes('SONA-TRAIN-V1'), note: 'memory/intelligence.js' });
+    checks.push({ name: 'RUFLO-LORA-ADAPT-V1 sentinel present (consume seam)', ok: hooks.includes('RUFLO-LORA-ADAPT-V1'), note: 'mcp-tools/hooks-tools.js' });
+  } catch (e) {
+    checks.push({ name: 'kit learning-loop sentinels readable', ok: false, note: 'installed dist unreadable: ' + e.message });
+  }
+  // Attribution wiring: the Stop hook must be recording trajectory sources, or the
+  // new series inherits the same unattributable-writers confound.
+  try {
+    const hook = fs.readFileSync(path.join(CWD, '.claude', 'helpers', 'aqe-post-route.cjs'), 'utf8');
+    checks.push({ name: 'Stop-hook trajectory attribution wired (traj-attr-v1)', ok: hook.includes('traj-attr-v1'), note: '.claude/helpers/aqe-post-route.cjs' });
+  } catch (e) {
+    checks.push({ name: 'Stop-hook trajectory attribution wired (traj-attr-v1)', ok: false, note: '.claude/helpers/aqe-post-route.cjs unreadable' });
+  }
+  // Baseline epoch: absent is fine (first run freezes post-line); pre-line is a hard stop.
+  let manifest = null;
+  try { manifest = JSON.parse(fs.readFileSync(manifestPath(BASELINE_DIR), 'utf8')); } catch (e) {}
+  checks.push({
+    name: 'control baseline is post-epoch (or absent, to be frozen now)',
+    ok: !manifest || !baselinePreEpoch(manifest),
+    note: !manifest ? 'no baseline yet — first collection (or --rebaseline) freezes one post-line'
+      : baselinePreEpoch(manifest) ? 'frozen ' + manifest.created + ' < ' + EPOCH_LINE + ' — run --rebaseline'
+        : 'frozen ' + manifest.created,
+  });
+  const failed = checks.filter((x) => !x.ok);
+  if (JSON_OUT) {
+    process.stdout.write(JSON.stringify({ preflight: true, epochLine: EPOCH_LINE, checks, ready: failed.length === 0 }, null, 2) + '\n');
+  } else {
+    console.log('\n══ Re-baseline preflight (measurement epoch ' + EPOCH_LINE.slice(0, 10) + ') ══');
+    for (const x of checks) console.log('  ' + (x.ok ? '✓' : '✗') + ' ' + x.name + (x.note ? '  — ' + x.note : ''));
+    console.log(failed.length === 0
+      ? '\nREADY — freeze the baseline with --rebaseline, then run one plain eval per session (≥' + MIN_RUNS + ' sessions, same host + stack).\n'
+      : '\nNOT READY (' + failed.length + ' failing) — fix the above BEFORE freezing a baseline, or the new series repeats the pre-line confound.\n');
+  }
+  process.exit(failed.length === 0 ? 0 : 1);
+}
+
 // Pure helpers exported for unit tests (stats + baseline lifecycle). Requiring the module
 // does NOT run main (guarded below), so tests never spawn ruflo or touch a live store.
 module.exports = {
   verdictOf, permP, cohensD, sigmaSeparation, mean, spread,
   hashState, snapshotState, freezeBaseline, manifestPath, SNAPSHOT_PATHS, SCORER,
+  EPOCH_LINE, EPOCH_ID, epochOf, baselinePreEpoch, readPairedArms, probeInstrument,
+  benchEpochOf, readBenchTrend, tsSuspectFuture,
 };
 if (require.main !== module) return;
 
@@ -432,17 +631,20 @@ if (has('-h') || has('--help')) {
   process.exit(0);
 }
 if (has('--selftest')) selftest();
+if (has('--preflight')) preflight();
 
 let collected = null;
 if (!ANALYSIS_ONLY) collected = collectSession();
 
 // Live runs read only rows measured against the just-used baseline; analysis-only counts all.
-const { t, c } = readPairedArms(EVAL_HIST, collected ? collected.baselineId : null);
+const { t, c, excludedPreLine, excludedNoTs, suspectFutureTs } = readPairedArms(EVAL_HIST, collected ? collected.baselineId : null);
 const bench = readBenchTrend(BENCH_HIST);
 const v = verdictOf(t, c);
 const result = {
   scorerVersion: SCORER, seeds: SEEDS, session: collected,
-  treatment: t, control: c, benchTrend: bench, ...v,
+  treatment: t, control: c, benchTrend: bench,
+  epoch: { line: EPOCH_LINE, id: EPOCH_ID, excludedPreLine, excludedNoTs, suspectFutureTs, reason: EPOCH_REASON },
+  ...v,
 };
 
 if (JSON_OUT) { process.stdout.write(JSON.stringify(result, null, 2) + '\n'); process.exit(v.verdict === 'IMPROVING' ? 0 : 1); }
@@ -454,13 +656,22 @@ const C = process.stdout.isTTY
 console.log(C.b + '\n══ Cross-Session Self-Improvement Proof (G3 / gate #4) ══' + C.x);
 if (collected) console.log('This session: treatment ' + (collected.treatmentAcc * 100).toFixed(1) + '%  control ' + (collected.controlAcc * 100).toFixed(1) + '%  (seeds=' + SEEDS + ', n=' + collected.n + ')');
 else console.log(C.d + 'analysis-only (--history-file ' + EVAL_HIST + ') — no live routing' + C.x);
+if (excludedPreLine > 0) {
+  console.log(C.y + 'EPOCH LINE ' + EPOCH_LINE + ': ' + excludedPreLine + ' pre-line row(s) EXCLUDED from the gate' + C.x);
+  console.log(C.d + '  (' + EPOCH_REASON + ' — kept as history, never blended with post-line data)' + C.x);
+}
+if (excludedNoTs > 0) console.log(C.y + 'EPOCH LINE: ' + excludedNoTs + ' row(s) with missing/unparseable ts EXCLUDED from the gate' + C.x + C.d + ' (unplaceable against the line — cannot be proven post-repair)' + C.x);
+if (suspectFutureTs > 0) console.log(C.y + 'CLOCK SANITY: ' + suspectFutureTs + ' counted row(s) are stamped >24h beyond this host\'s clock' + C.x + C.d + ' (forged-or-skewed ts — still counted, gate unchanged; investigate before trusting the verdict)' + C.x);
 console.log('Paired sessions: ' + C.b + v.n + C.x + C.d + ' (need ≥' + MIN_RUNS + ')' + C.x +
   '  ·  treatment μ ' + (mean(t) * 100).toFixed(1) + '%  control μ ' + (mean(c) * 100).toFixed(1) + '%');
 console.log('Between-arm: Δ ' + C.b + (v.deltaPP >= 0 ? '+' : '') + v.deltaPP + 'pp' + C.x +
   '  separation ' + (v.sigma === 999 ? '∞' : v.sigma) + 'σ' + C.d + ' (gate ≥' + SIGMA_MIN + 'σ)' + C.x +
   '  perm p' + (v.permP < 0.001 ? '<0.001' : '=' + v.permP) + '  d=' + (v.cohensD === 999 ? '∞' : v.cohensD) +
   '  control ' + (v.controlFlat ? C.g + 'flat' + C.x : C.y + 'NOT flat' + C.x));
-if (bench.deltaPP != null) console.log(C.d + 'Bench treatment trend (norm-v1, corroborating): ' + (bench.deltaPP >= 0 ? '+' : '') + bench.deltaPP + 'pp over ' + bench.runs + ' runs' + C.x);
+const benchExcl = (bench.excludedPreLine || 0) + (bench.excludedNoTs || 0);
+const benchExclNote = benchExcl ? ' (' + (bench.excludedPreLine || 0) + ' pre-line + ' + (bench.excludedNoTs || 0) + ' unplaceable-ts row(s) excluded)' : '';
+if (bench.deltaPP != null) console.log(C.d + 'Bench treatment trend (norm-v1, corroborating): ' + (bench.deltaPP >= 0 ? '+' : '') + bench.deltaPP + 'pp over ' + bench.runs + ' runs' + benchExclNote + C.x);
+else if (benchExcl) console.log(C.d + 'Bench treatment trend: no post-line series yet' + benchExclNote + C.x);
 const vc = v.verdict === 'IMPROVING' ? C.g : v.verdict === 'NOT-IMPROVING' ? C.r : C.y;
 console.log(C.b + 'VERDICT: ' + vc + v.verdict + C.x);
 console.log(C.d + v.reason + C.x + '\n');

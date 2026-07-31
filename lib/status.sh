@@ -359,7 +359,46 @@ fi
 
 header "daemon" "process truth (pgrep, not state files)"
 if [[ "$DAEMON_RUNNING" -eq 1 ]]; then
-  warn "running (pid ${DAEMON_PIDS// /, }) — BILLED; stop with: ruflo daemon stop"
+  # DAEMON-HINT-SCOPE-V1: detection above ($DAEMON_PIDS/$DAEMON_RUNNING) stays
+  # deliberately MACHINE-WIDE — a daemon for a different workspace still bills
+  # the operator's account 24/7, and this kit's history includes real token
+  # burn from under-surfacing that fact. Only the REMEDIATION hint changes:
+  # `ruflo daemon stop` run from $TARGET_DIR is itself workspace-scoped (same
+  # exact-match semantics as `ruflo daemon status --workspace <dir>` and
+  # kit_daemon_scope_split's MINE bucket — see lib/common.sh for the
+  # parent/subdirectory rationale), so telling an operator "stop with: ruflo
+  # daemon stop" for a daemon that command cannot reach is actionable-wrong
+  # advice — the same defect class B24-DAEMON-SCOPE-V1 fixed in
+  # verify-learning's daemon advisory. Reuses kit_daemon_scope_split so the
+  # workspace comes from the process's own argv, never a state file.
+  _DSCOPE="$(kit_daemon_scope_split "$TARGET_DIR" 2>/dev/null)"
+  _DMINE=() _DOTHER=() _DUNKNOWN=()
+  while IFS=$'\t' read -r _dpid _dstate _dws; do
+    [[ -z "$_dpid" ]] && continue
+    case "$_dstate" in
+      MINE)    _DMINE+=("$_dpid") ;;
+      OTHER)   _DOTHER+=("$_dpid ($_dws)") ;;
+      UNKNOWN) _DUNKNOWN+=("$_dpid") ;;
+    esac
+  done <<< "$_DSCOPE"
+  if [[ ${#_DMINE[@]} -gt 0 ]]; then
+    _p="$(IFS=,; echo "${_DMINE[*]}")"
+    warn "running for THIS target (pid ${_p}) — BILLED; stop with: ruflo daemon stop"
+  fi
+  if [[ ${#_DOTHER[@]} -gt 0 ]]; then
+    _p="$(IFS='; '; echo "${_DOTHER[*]}")"
+    warn "running for a DIFFERENT workspace (pid ${_p}) — still BILLED to whoever owns it, but 'ruflo daemon stop' from here is workspace-scoped and will NOT reach it; stop it from its own workspace"
+  fi
+  if [[ ${#_DUNKNOWN[@]} -gt 0 ]]; then
+    _p="$(IFS=,; echo "${_DUNKNOWN[*]}")"
+    warn "running (pid ${_p}) — still BILLED; scope could not be determined (no --workspace in argv), so whether 'ruflo daemon stop' from here reaches it is unknown — verify with: ps -p ${_p} -o args="
+  fi
+  # Fail-safe: never let a classification gap silently swallow the BILLED
+  # warning — if scope-split found nothing at all (e.g. node unavailable) but
+  # the plain pgrep detection above says a daemon IS running, still warn.
+  if [[ ${#_DMINE[@]} -eq 0 && ${#_DOTHER[@]} -eq 0 && ${#_DUNKNOWN[@]} -eq 0 ]]; then
+    warn "running (pid ${DAEMON_PIDS// /, }) — BILLED; scope not assessable — 'ruflo daemon stop' from here may not reach it if it belongs to a different workspace"
+  fi
 else
   pass "stopped (cost-safe default)"
 fi

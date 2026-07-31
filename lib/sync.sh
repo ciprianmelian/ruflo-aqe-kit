@@ -10,10 +10,13 @@ set -uo pipefail
 # Order (mirrors agentic-kit's `ak sync` — heal everything an upgrade wipes,
 # then re-verify): fix-ruflo → fix-aqe → fix-statusbar → fix-brain (skipped
 # cleanly when absent) → verify-learning (read-only, NON-fatal). --dry-run is
-# propagated to every stage. Exit is nonzero ONLY when a fix stage HARD-fails
-# (present but did not run to completion) — a stage that completes with manual-
-# action warnings is a `warn`, and verify-learning's partial/hollow verdict
-# never flips the exit (a fresh project is legitimately hollow).
+# propagated to every stage. Exit is nonzero when a fix stage HARD-fails: it
+# either did not run to completion (crash), or it completed but a SECURITY or
+# NATIVE-INTEGRITY repair itself failed (SEVERE-FIX-V1, exit code 20 — see
+# run_fix() below) — a stage that completes with only cosmetic/manual-action
+# warnings is a `warn` and does not flip the exit. verify-learning's
+# partial/hollow verdict never flips the exit (a fresh project is legitimately
+# hollow).
 # ============================================================================
 
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -53,12 +56,59 @@ record() {
   STAGE_NAME+=("$1"); STAGE_RESULT+=("$2"); STAGE_CHANGES+=("$3"); STAGE_DETAIL+=("$4")
 }
 
-# run_fix <label> <script> <completion-regex>
-# ok   = exit 0. warn = nonzero exit BUT the completion marker printed (ran to
-# the end; the nonzero is manual-actions, not a crash). fail = nonzero AND no
-# completion marker (hard failure) → flips the sync exit code.
+# run_fix <label> <script>
+#
+# SEVERE-FIX-V1 exit-code contract (the ONLY signal used to grade a stage —
+# never the stage's printed output). Grading used to `grep` the transcript for
+# a "completion marker" string to distinguish a crash from a completed-with-
+# warnings run; fix-ruflo prints an unconditional "Log: <path>" line as its
+# very last statement regardless of outcome, so that marker was present even
+# on a hard failure and the grep always matched — sync's own exit code could
+# never flip nonzero no matter how badly a fix stage failed.
+#   0  = ok     — clean run, nothing to review.
+#   21 = warn   — completed to the end; only cosmetic/manual-action drift
+#                 remains (pre-existing kit convention for these scripts).
+#   20 = fail   — completed to the end, but a SECURITY or NATIVE-INTEGRITY
+#                 repair itself failed (SEVERE_ERRORS>0 — currently emitted by
+#                 fix-ruflo.sh for RUVECTOR-EXECSAFE-V1 / AGENTDB-NESTED-NATIVE-V1).
+#                 Hard-fails and flips sync's own exit code.
+#   *  = fail   — any other nonzero code (including 1, 2, 126, 127, 128+n, 130)
+#                 means the script did NOT run to completion (syntax error,
+#                 unbound var, killed, ...). Also hard-fails.
+#
+# EXIT-1-COLLISION-V1 (round 2): this contract originally reserved exit 1 for
+# `warn`. That collided with reality: fix-ruflo.sh (and the other fix-*.sh
+# stages) run under `set -uo pipefail` with `-e` deliberately omitted, and on
+# this kit's target bash, a script FILE (not `bash -c`) that references an
+# unset variable anywhere under `set -u` aborts with exit status 1 — verified
+# directly. So a genuine mid-script crash (e.g. one occurring AFTER a real
+# SEVERE_ERRORS-incrementing failure had already run) was graded identically
+# to "completed cleanly, cosmetic drift only" — the same class of defect this
+# contract exists to close, recurring through the exit code instead of the
+# output text. Fixed by moving `warn` off of 1 entirely, onto 21 — chosen, like
+# 20, from outside bash's whole crash-code family (1, 2, 126, 127, 128+n, 130),
+# so neither reserved value can ever be produced by an accidental abort. Any
+# code that isn't 0/20/21 — including plain 1 — is now unambiguously a hard
+# fail, whether it came from an intentional early-exit or a genuine crash.
+# SEVERE-FIX-V1 exit contract, SHARED BY ALL FOUR fix-*.sh stages:
+#   0  = clean
+#   21 = warn — completed, cosmetic/manual-action drift only (ERRORS>0, SEVERE_ERRORS==0)
+#   20 = severe — a SECURITY or NATIVE-INTEGRITY repair failed (SEVERE_ERRORS>0)
+#   anything else (incl. plain 1) = did not run to completion -> hard fail
+# The warn code is 21, NOT 1, deliberately: these stages run `set -uo pipefail`
+# WITHOUT -e, and an unbound-variable reference aborts a script FILE with exit 1
+# (`bash -c` gives 127 — the file form is what run_fix uses). Reserving 1 for
+# "graceful warn" therefore made an accidental mid-script abort indistinguishable
+# from a clean cosmetic run, so a genuinely failed security repair graded as a
+# soft warning and sync still exited 0. 20/21 sit outside bash's whole crash-code
+# family (1, 2, 126, 127, 128+n, 130), making this a whitelist: unrecognised
+# means failed, which is the safe direction.
+# NOTE for future contributors: today only fix-ruflo.sh emits 20/21 deliberately —
+# fix-aqe.sh, fix-statusbar.sh and fix-brain.sh carry no bash-level `exit N` and
+# fall through to 0. If you add a graceful warn to any of them, use 21. Reaching
+# for `exit 1` out of habit would be misgraded here as "did not complete".
 run_fix() {
-  local label="$1" script="$2" complete_re="$3"
+  local label="$1" script="$2"
   if [[ ! -f "$script" ]]; then
     info "$label: script not present — skipping"
     record "$label" skip "-" "not present"
@@ -82,28 +132,42 @@ run_fix() {
     changes="$(parse_changes "$out")"
     chg_disp="$changes change(s)"
   fi
-  if [[ "$rc" -eq 0 ]]; then
-    pass "$label complete ($chg_disp)"
-    record "$label" ok "$changes" ""
-  elif grep -qE "$complete_re" <<< "$out"; then
-    warn "$label completed with manual actions (exit $rc)"
-    record "$label" warn "$changes" "exit $rc — manual actions"
-  else
-    fail "$label did NOT complete (exit $rc)"
-    record "$label" fail "$changes" "exit $rc — did not complete"
-    HARD_FAIL=1
-  fi
+  case "$rc" in
+    0)
+      pass "$label complete ($chg_disp)"
+      record "$label" ok "$changes" ""
+      ;;
+    21)
+      warn "$label completed with manual actions (exit $rc)"
+      record "$label" warn "$changes" "exit $rc — manual actions"
+      ;;
+    20)
+      fail "$label: a SECURITY or NATIVE-INTEGRITY repair failed (exit $rc)"
+      record "$label" fail "$changes" "exit $rc — severe: security/native-integrity repair failed"
+      HARD_FAIL=1
+      ;;
+    *)
+      fail "$label did NOT complete (exit $rc)"
+      record "$label" fail "$changes" "exit $rc — did not complete"
+      HARD_FAIL=1
+      ;;
+  esac
 }
 
-run_fix "fix-ruflo"     "$KIT_LIB/fix-ruflo.sh"     'Log:'
-run_fix "fix-aqe"       "$KIT_LIB/fix-aqe.sh"       'fix-aqe complete'
-run_fix "fix-statusbar" "$KIT_LIB/fix-statusbar.sh" 'Restart Claude Code|statusline'
-run_fix "fix-brain"     "$KIT_LIB/fix-brain.sh"     'fix-brain complete'
+run_fix "fix-ruflo"     "$KIT_LIB/fix-ruflo.sh"
+run_fix "fix-aqe"       "$KIT_LIB/fix-aqe.sh"
+run_fix "fix-statusbar" "$KIT_LIB/fix-statusbar.sh"
+run_fix "fix-brain"     "$KIT_LIB/fix-brain.sh"
 
 # ── verify-learning: read-only liveness, NON-fatal (never flips exit) ────────
 header "verify-learning" "read-only loop liveness (non-fatal)"
 if [[ -f "$KIT_LIB/verify-learning.sh" ]]; then
-  VL_JSON="$(bash "$KIT_LIB/verify-learning.sh" "$TARGET_DIR" --json 2>/dev/null | tail -1)"
+  # VL-DRYRUN-FORWARD-V1: verify-learning runs as a separate bash process, so it
+  # cannot inherit $DRY_RUN — the flag must be forwarded explicitly or the stage
+  # runs live during `sync --dry-run`. It used not to be, which is why a dry run
+  # still left `.agentic-qe/` behind (created as an upstream side effect of the
+  # `aqe ruvector status` probe). Reuses the same _dryflag array run_fix passes.
+  VL_JSON="$(bash "$KIT_LIB/verify-learning.sh" "$TARGET_DIR" --json ${_dryflag[@]+"${_dryflag[@]}"} 2>/dev/null | tail -1)"
   VL_VERDICT="$(node -e "try{process.stdout.write((JSON.parse(process.argv[1]).verdict)||'unknown')}catch(e){process.stdout.write('unknown')}" "$VL_JSON" 2>/dev/null || echo unknown)"
   case "$VL_VERDICT" in
     live)    pass "learning loop live" ;;

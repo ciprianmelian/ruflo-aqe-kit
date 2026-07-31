@@ -63,7 +63,13 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 else
   if command -v ruflo >/dev/null 2>&1; then
     ruflo daemon stop >/tmp/upgrade-daemon-stop.log 2>&1 || true
-    pass "Daemon stop signal sent (see /tmp/upgrade-daemon-stop.log)"
+    # DAEMON-HINT-SCOPE-V1: behavior unchanged — `ruflo daemon stop` (no --all)
+    # is itself workspace-scoped, and that is the CORRECT semantic here: this
+    # upgrade must never stop a daemon belonging to a different project. Only
+    # made the message honest about that scope, so it doesn't read like a
+    # kill-any-daemon action to an operator who's seen the unscoped detection
+    # used elsewhere in this kit (status.sh, setup.sh, verify-learning).
+    pass "Daemon stop signal sent for this workspace (see /tmp/upgrade-daemon-stop.log)"
   else
     info "ruflo not yet on PATH — daemon stop skipped (will be re-seated at step 8)"
   fi

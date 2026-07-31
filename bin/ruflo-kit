@@ -242,6 +242,77 @@ _kit_check_target_exists_firstarg() {
   _kit_target_exists_or_refuse "$verb" "$allow_new" "$tgt" "$@"
 }
 
+# _kit_dispatcher_divergent_path <resolved-target> "$@" — WAVE 5 / B20. The
+# ONE predicate: bench/dashboard/harvest resolve via _kit_firstarg_resolve,
+# which ONLY ever looks at $1 (round-3 comment above). If $1 is flag-shaped,
+# resolution falls back to cwd/$RUFLO_KIT_TARGET even when a later argument
+# is a real, existing directory the user plainly meant as the target (the
+# confirmed B14 gap: aqe-harvest.cjs/selfimprove-bench.cjs never see the
+# user's original argv, only the already-resolved cwd, so they cannot detect
+# this themselves). The dispatcher is the only place holding BOTH the
+# original argv and the resolved target at once — call this AFTER
+# <resolved-target> is computed; it only OBSERVES that pairing and prints
+# nothing itself. Nothing it finds is returned into resolution: neither
+# caller below feeds its output back into `t`, the shift, or the cd target —
+# this is read-only, so it cannot reintroduce the multi-arg-scan-as-
+# resolution mistake (the `--port 3939` false positive) that made round 3's
+# guard diverge from actual behavior. On a match, echoes the diverging path
+# and returns 0; otherwise returns 1 with no output — callers below decide
+# separately what a match MEANS (warn vs refuse), but never what it IS.
+_kit_dispatcher_divergent_path() {
+  local tgt="$1"; shift
+  _kit_firstarg_is_target "$@" && return 1    # target-first: nothing to diverge from
+  local tgt_real; tgt_real="$(cd "$tgt" 2>/dev/null && pwd -P)" || tgt_real="$tgt"
+  local a a_real
+  for a in "$@"; do
+    case "$a" in --*) continue ;; esac        # flag tokens are never target candidates
+    a_real="$(cd "$a" 2>/dev/null && pwd -P)" || continue   # not an existing dir: no claim to make
+    [[ "$a_real" == "$tgt_real" ]] && continue              # same directory as resolved target: no divergence
+    printf '%s' "$a"
+    return 0
+  done
+  return 1
+}
+
+# _kit_notice_dispatcher_divergence <verb> <resolved-target> "$@" — for the
+# READ-ONLY verb (dashboard): report on stderr, never block. dashboard is
+# foreground/interactive/127.0.0.1-only and ALREADY prints its resolved
+# target unconditionally on STDOUT in its own "listening on" banner
+# (tools/dashboard.cjs), so there is no silent-mutation risk here for a
+# `2>/dev/null` caller to fall into — worst case is a harmless wrong (but
+# still self-reported) display. This is why dashboard gets a notice and not
+# the refusal below.
+_kit_notice_dispatcher_divergence() {
+  local verb="$1" tgt="$2"; shift 2
+  local other; other="$(_kit_dispatcher_divergent_path "$tgt" "$@")" || return 0
+  echo "ruflo-kit $verb: note — '$other' is an existing directory but was NOT treated as the target (resolved target: '$tgt'); only the first argument is checked. Put it first if that's what you meant." >&2
+}
+
+# _kit_refuse_on_dispatcher_divergence <verb> <resolved-target> "$@" — for
+# the MUTATING verbs (bench, harvest), whose real work WRITES into
+# <resolved-target>'s stores (bench: .claude-flow/selfimprove-history.jsonl;
+# harvest: .swarm/lora-weights.json, agentdb.db, .swarm/harvest-state.json).
+# Escalation (B14's critic, round 2): a stderr-only notice protects an
+# interactive user twice but gives a `2>/dev/null` / stdout-only CI consumer
+# ZERO protection — the notice is discarded and the mutation still happens
+# underneath it. A divergence for these two verbs means "the user pointed at
+# X, we are about to WRITE to Y" — not a warning worth proceeding past, a
+# mistake worth stopping. Exits nonzero, which a discarded stderr stream
+# cannot hide, before any cd/exec — no work happens, so nothing is written
+# to the wrong project. Uses the exact same predicate as the notice above,
+# so refusal can never disagree with what would have been reported; the
+# escape hatch (rerun with the real target first) is spelled out in the
+# message itself. Caller MUST do `... || exit 1`.
+_kit_refuse_on_dispatcher_divergence() {
+  local verb="$1" tgt="$2"; shift 2
+  local other; other="$(_kit_dispatcher_divergent_path "$tgt" "$@")" || return 0
+  echo "ruflo-kit $verb: refused — '$other' is an existing directory but was NOT treated as the target (only the first argument is checked)." >&2
+  echo "  '$verb' WRITES to the resolved target ('$tgt'); a likely wrong-target mismatch is not run automatically." >&2
+  echo "  If '$tgt' is really what you meant, rerun without any other existing-directory argument (or pass it explicitly first)." >&2
+  echo "  If you meant '$other', put it FIRST:  ruflo-kit $verb $other [flags...]" >&2
+  return 1
+}
+
 # Per-verb usage: what it does, its flags, and the two facts an operator most
 # needs before running something unfamiliar — does it MUTATE the target, and
 # can it START PROCESSES / cost money (network, native builds, LLM calls).
@@ -575,6 +646,7 @@ case "$cmd" in
     # Single resolution rule shared with the guard above (_kit_firstarg_*) —
     # see the round-3 comment there for why this isn't a duplicated flag list.
     t="$(_kit_firstarg_resolve "$@")"
+    _kit_refuse_on_dispatcher_divergence bench "$t" "$@" || exit 1
     _kit_firstarg_is_target "$@" && shift
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/selfimprove-bench.cjs" "$@" ) ;;
   dashboard)
@@ -583,12 +655,14 @@ case "$cmd" in
     # On-demand LOCAL dashboard (DASHBOARD-V1): foreground, read-only,
     # 127.0.0.1-only, Ctrl-C to stop. Never detaches, never billed.
     t="$(_kit_firstarg_resolve "$@")"
+    _kit_notice_dispatcher_divergence dashboard "$t" "$@"
     _kit_firstarg_is_target "$@" && shift
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/dashboard.cjs" "$@" ) ;;
   harvest)
     _kit_has_help_flag "$@" && { _kit_verb_help harvest; exit 0; }
     _kit_check_target_exists_firstarg harvest 0 "$@" || exit 1
     t="$(_kit_firstarg_resolve "$@")"
+    _kit_refuse_on_dispatcher_divergence harvest "$t" "$@" || exit 1
     _kit_firstarg_is_target "$@" && shift
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/aqe-harvest.cjs" "$@" ) ;;
   version|--version|-v)

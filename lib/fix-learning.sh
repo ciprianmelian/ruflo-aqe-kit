@@ -154,10 +154,44 @@ echo ""
 # Pre-flight: a running daemon holds the DBs (its writers lock the AQE store, so
 # the dream step fails "database is locked") and caches state in memory, so the
 # results of this run won't show until the daemon + Claude Code restart.
-if command -v ruflo >/dev/null 2>&1 && ruflo daemon status 2>/dev/null | grep -qiE 'RUNNING'; then
-  warn "ruflo daemon is RUNNING: it locks the AQE DB (the 'dream' step will fail locked) and caches state."
+#
+# DAEMON-HINT-SCOPE-V1: this used to shell out to `ruflo daemon status`, which
+# has two established problems: (1) its own side effect of instantiating
+# internal config objects just to print a table creates .claude-flow/logs/
+# daemon.log even on this read-only preflight check — the same B24 artifact
+# leak fixed elsewhere in this kit; (2) its output cannot be trusted — observed
+# live printing "Status: STOPPED" alongside a PID in the same table (state
+# files lie, pgrep/argv doesn't). This call's SCOPE was already correct (no
+# --all, so `ruflo daemon status` is workspace-scoped) — replaced with
+# kit_daemon_scope_split (common.sh) purely for a trustworthy, side-effect-free
+# instrument, keeping the same tri-state contract probe_daemon_advisory uses
+# (lib/verify-learning.sh): only a MINE daemon locks THIS target's DBs, so only
+# MINE keeps the causal warning; OTHER is informational and must not claim to
+# lock this target's DBs; UNKNOWN hedges rather than guessing.
+_DSCOPE="$(kit_daemon_scope_split "$TARGET_DIR" 2>/dev/null)"
+_DMINE=() _DOTHER=() _DUNKNOWN=()
+while IFS=$'\t' read -r _dpid _dstate _dws; do
+  [[ -z "$_dpid" ]] && continue
+  case "$_dstate" in
+    MINE)    _DMINE+=("$_dpid") ;;
+    OTHER)   _DOTHER+=("$_dpid ($_dws)") ;;
+    UNKNOWN) _DUNKNOWN+=("$_dpid") ;;
+  esac
+done <<< "$_DSCOPE"
+if [[ ${#_DMINE[@]} -gt 0 ]]; then
+  _p="$(IFS=,; echo "${_DMINE[*]}")"
+  warn "ruflo daemon is RUNNING for THIS target (pid ${_p}): it locks the AQE DB (the 'dream' step will fail locked) and caches state."
   warn "  → for a clean run: 'ruflo daemon stop' first, then after this completes restart the daemon + Claude Code, then verify-learning."
   echo ""
+fi
+if [[ ${#_DUNKNOWN[@]} -gt 0 ]]; then
+  _p="$(IFS=,; echo "${_DUNKNOWN[*]}")"
+  warn "ruflo daemon proc(s) found with no --workspace visible in argv (pid ${_p}) — scope could not be determined; it MAY be locking this target's DBs"
+  echo ""
+fi
+if [[ ${#_DOTHER[@]} -gt 0 ]]; then
+  _p="$(IFS='; '; echo "${_DOTHER[*]}")"
+  info "ruflo daemon(s) running for a DIFFERENT workspace (${_p}) — do not lock this target's DBs"
 fi
 
 ACT_RUN=0; ACT_SKIPPED=0; ACT_FAILED=0

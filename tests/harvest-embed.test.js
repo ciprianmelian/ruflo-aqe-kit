@@ -201,3 +201,43 @@ suite('HARVEST-EMBED-V1 — vecless rows train Sink A via a harvest-time derived
     expect(second.summary).toMatchObject({ trained: 0, note: 'nothing fresh' });
   });
 });
+
+// ── TRAJ-ATTR-V1 (Wave 4): the harvester is one of the writer paths into the LoRA
+// sink and must leave an attribution row bracketing its Sink A pass, parseable by the
+// canonical reader — so an eval-side delta can be attributed to harvest-replay rather
+// than confounded with the per-turn Stop hook. Reuses this file's stub harness.
+suite('TRAJ-ATTR-V1 — harvest attributes its Sink A training window', () => {
+  const attr = require('../tools/trajectory-attribution.cjs');
+
+  it('writes a harvest-sinkA row with the trained count and the weights transition it caused', () => {
+    const base = mkStubBase();
+    const proj = mkProject([
+      { id: 'has-vec', task: 'edit: a.ts', quality: 0.9, embedding: vec(0.5) },
+    ]);
+    const r = runHarvest(proj, base);
+    expect(r.summary.trained).toBe(1);
+    const rows = attr.readEvents(proj);                    // canonical reader (lock-step)
+    expect(rows.length).toBe(1);
+    expect(rows[0].source).toBe('harvest-sinkA');
+    expect(rows[0].trained).toBe(1);
+    expect(rows[0].freshRows).toBe(1);
+    expect(rows[0].weightsBefore).toBeNull();              // sink did not exist pre-harvest
+    expect(rows[0].weightsAfter.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(rows[0].weightsChanged).toBe(true);             // the stub adapter wrote the sink
+  });
+
+  it('a trained=0 pass (all rows refused by the dim guard) still leaves an honest row: "harvest ran, trained nothing"', () => {
+    const base = mkStubBase({ embedderDim: DIM + 3 });     // derived vector fails the dim guard
+    const proj = mkProject([
+      { id: 'no-vec', task: 'edit: b.ts', quality: 0.9, embedding: null },
+    ]);
+    const r = runHarvest(proj, base);
+    expect(r.summary.trained).toBe(0);
+    const rows = attr.readEvents(proj);
+    expect(rows.length).toBe(1);
+    expect(rows[0].source).toBe('harvest-sinkA');
+    expect(rows[0].trained).toBe(0);
+    // saveWeights still ran (stub writes on save) — the row records the transition truthfully
+    expect(typeof rows[0].weightsChanged).toBe('boolean');
+  });
+});

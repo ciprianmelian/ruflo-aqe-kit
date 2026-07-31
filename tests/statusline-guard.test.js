@@ -398,6 +398,227 @@ describe('statusline-guard.cjs — round 3: opportunistic ground-truth via the p
     expect(readInstalled(helpers)).toBe(CANON_CONTENT);
     expect(fs.readFileSync(logPath(proj), 'utf8')).toMatch(/restored canonical statusline/);
   });
+
+  // B10 (A2 round-4 critic follow-up): the sidecar can resolve to a REAL,
+  // existing kit-asset path whose content happens to be zero bytes. Before
+  // this fix, floorBytes = kitAsset.size * MIN_SIZE_FRACTION computed exactly
+  // 0, and validateHeuristically's `floorBytes > 0` guard read that as "no
+  // floor configured" rather than "the floor is zero" — silently skipping the
+  // size check and admitting a candidate of ANY size. These tests prove the
+  // fix has teeth (the exact pre-fix input is still rejected) and that it
+  // doesn't touch the two states it must leave alone: an absent/unresolvable
+  // reference (still falls back to the absolute floor, unchanged), and the
+  // real happy path (still restores normally).
+  describe('B10: zero-length kit asset must not silently disable the size floor', () => {
+    test('sidecar resolves to a REAL but ZERO-BYTE kit asset => REFUSED, not silently admitted', () => {
+      // Anchor-bearing and tiny — exactly the shape that a skipped floor
+      // check would wave through. Differs from the zero-byte kit asset
+      // content so the ground-truth byte-identical short-circuit (verdict =
+      // { ok: true, groundTruth: true }) does NOT apply here; this test is
+      // isolated to the "kitAsset resolved, sha differs" branch where the
+      // floor is computed.
+      const tinyButAnchored = 'function generateStatusline() { return "▊ RuFlo"; }\nconsole.log(generateStatusline());\n';
+      const { proj, helpers } = mkSidecarWorld({
+        kitAssetContent: '', // the defect trigger: resolves fine, size === 0
+        snapshotContent: tinyButAnchored,
+        installed: CLOBBER_CONTENT,
+      });
+      const before = readInstalled(helpers);
+      const r = runGuard(helpers);
+      expect(r.status).toBe(0);
+      expect(readInstalled(helpers)).toBe(before); // refused — must NOT have been restored
+      const log = fs.readFileSync(logPath(proj), 'utf8');
+      expect(log).toMatch(/REFUSED restore/);
+      expect(log).toMatch(/resolved to 0 bytes/);
+    });
+
+    test('sidecar resolves to a ZERO-BYTE kit asset => refusal is diagnosable (names the kit asset path, not a generic heuristic reason)', () => {
+      const tinyButAnchored = 'function generateStatusline() { return "▊ RuFlo"; }\nconsole.log(generateStatusline());\n';
+      const { proj, helpers, kitAssetPath } = mkSidecarWorld({
+        kitAssetContent: '',
+        snapshotContent: tinyButAnchored,
+        installed: CLOBBER_CONTENT,
+      });
+      expect(runGuard(helpers).status).toBe(0);
+      const log = fs.readFileSync(logPath(proj), 'utf8');
+      expect(log).toContain(kitAssetPath);
+      // Distinguishable from the pre-existing generic size-floor refusal message.
+      expect(log).not.toMatch(/below \d+% of the kit asset/);
+      expect(log).not.toMatch(/below \d+B absolute floor/);
+    });
+
+    test('unchanged behavior: an ABSENT/unresolvable kit-asset reference still falls back to the absolute floor', () => {
+      // Same tiny anchor-bearing candidate, but with NO sidecar at all —
+      // proves the zero-byte fix didn't touch the genuinely-null (no
+      // reference) path, which must still be gated by ABSOLUTE_MIN_SIZE_BYTES
+      // exactly as round 4 established.
+      const tinyButAnchored = 'function generateStatusline() { return "▊ RuFlo"; }\nconsole.log(generateStatusline());\n';
+      const { proj, helpers } = mkFixture({ canonicalContent: tinyButAnchored, installed: CLOBBER_CONTENT });
+      const before = readInstalled(helpers);
+      expect(runGuard(helpers).status).toBe(0);
+      expect(readInstalled(helpers)).toBe(before);
+      const log = fs.readFileSync(logPath(proj), 'utf8');
+      expect(log).toMatch(/REFUSED restore/);
+      expect(log).toMatch(/below \d+B absolute floor/);
+      expect(log).not.toMatch(/resolved to 0 bytes/); // this is the null path, not the zero path — must not be conflated
+    });
+
+    test('unchanged behavior: the REAL current statusline.cjs still restores normally through a non-zero sidecar reference', () => {
+      // Verified against the actual shipped kit asset (not a fixture stand-in)
+      // — proves the B10 fix leaves the genuine happy path untouched.
+      const realAsset = fs.readFileSync(CANONICAL_ASSET, 'utf8');
+      const { proj, helpers } = mkSidecarWorld({
+        kitAssetContent: realAsset,
+        snapshotContent: realAsset,
+        installed: CLOBBER_CONTENT,
+      });
+      expect(runGuard(helpers).status).toBe(0);
+      expect(readInstalled(helpers)).toBe(realAsset);
+      expect(fs.readFileSync(logPath(proj), 'utf8')).toMatch(/verified against live kit asset/);
+    });
+  });
+
+  // B10-sibling (surfaced while fixing B10, confirmed by the team lead as a
+  // guard-clause fix, not a restructure): kitAsset.sha === want is the
+  // ground-truth branch's STRONGEST positive verdict — it skips every
+  // heuristic entirely. But that equality is trivially satisfiable with
+  // neither side telling us anything: sha256("") is a fixed value, so a
+  // zero-byte canonical snapshot and a zero-byte resolved kit asset always
+  // match. Before this fix, that combination reached `verdict = { ok: true,
+  // groundTruth: true }` and restored the empty snapshot while logging
+  // "verified against live kit asset" — the strongest claim the guard can
+  // make, issued for two files that are both nothing.
+  describe('B10-sibling: a ground-truth sha match on BOTH-EMPTY content must not verify', () => {
+    test('zero-byte snapshot + zero-byte resolved kit asset => REFUSED, not restored, NOT logged as verified', () => {
+      const { proj, helpers } = mkSidecarWorld({
+        kitAssetContent: '', // zero bytes
+        snapshotContent: '', // zero bytes — sha256("") matches the kit asset's sha256("") trivially
+        installed: CLOBBER_CONTENT,
+      });
+      const before = readInstalled(helpers);
+      const r = runGuard(helpers);
+      expect(r.status).toBe(0);
+      expect(readInstalled(helpers)).toBe(before); // refused — must NOT have restored empty content
+      const log = fs.readFileSync(logPath(proj), 'utf8');
+      expect(log).toMatch(/REFUSED restore/);
+      expect(log).toMatch(/BOTH zero bytes/);
+      expect(log).not.toMatch(/verified against live kit asset/); // the strongest verdict must never be issued here
+    });
+
+    test('the refusal reason names the actual kit asset path, not a generic heuristic message', () => {
+      const { proj, helpers, kitAssetPath } = mkSidecarWorld({
+        kitAssetContent: '',
+        snapshotContent: '',
+        installed: CLOBBER_CONTENT,
+      });
+      expect(runGuard(helpers).status).toBe(0);
+      const log = fs.readFileSync(logPath(proj), 'utf8');
+      expect(log).toContain(kitAssetPath);
+      expect(log).not.toMatch(/missing required anchor/); // never reaches the heuristic anchor/size checks
+      expect(log).not.toMatch(/below \d+% of the kit asset/);
+      expect(log).not.toMatch(/below \d+B absolute floor/);
+    });
+
+    test('unchanged behavior: a non-empty snapshot that matches a non-empty kit asset still verifies (ground truth happy path intact)', () => {
+      // Same shape as the pre-existing "sidecar resolves + matches" test
+      // above, restated here to sit next to the both-empty regression so the
+      // contrast is explicit: non-empty match verifies, empty "match" refuses.
+      const { proj, helpers } = mkSidecarWorld({
+        kitAssetContent: CANON_CONTENT,
+        snapshotContent: CANON_CONTENT,
+        installed: CLOBBER_CONTENT,
+      });
+      expect(runGuard(helpers).status).toBe(0);
+      expect(readInstalled(helpers)).toBe(CANON_CONTENT);
+      expect(fs.readFileSync(logPath(proj), 'utf8')).toMatch(/verified against live kit asset/);
+    });
+
+    test('unchanged behavior: the REAL current statusline.cjs still takes the ground-truth path normally', () => {
+      // Verified against the actual shipped kit asset, not a fixture — proves
+      // the both-empty guard clause doesn't touch the genuine non-empty
+      // ground-truth path.
+      const realAsset = fs.readFileSync(CANONICAL_ASSET, 'utf8');
+      expect(realAsset.length).toBeGreaterThan(0); // sanity: premise of "non-empty real asset" actually holds
+      const { proj, helpers } = mkSidecarWorld({
+        kitAssetContent: realAsset,
+        snapshotContent: realAsset,
+        installed: CLOBBER_CONTENT,
+      });
+      expect(runGuard(helpers).status).toBe(0);
+      expect(readInstalled(helpers)).toBe(realAsset);
+      expect(fs.readFileSync(logPath(proj), 'utf8')).toMatch(/verified against live kit asset/);
+    });
+  });
+
+  // B10 round 3 (critic follow-up to the round-2 sibling fix): a sha match
+  // proves two files are IDENTICAL, not that either is VALID. wantSize > 0
+  // closed the "both zero bytes" degenerate case, but a lone "\n" (or any
+  // other inert-but-nonzero content) still clears `wantSize > 0` while being
+  // exactly as meaningless as the empty-string case — and the realistic path
+  // is fix-statusbar.sh writing the snapshot FROM the kit asset, so a kit
+  // asset reduced to whitespace upstream propagates the same "\n" to both
+  // sides and matches trivially. These tests prove the class is closed (three
+  // different whitespace values, not just the one the critic picked), not
+  // just the literal repro.
+  describe('B10 round 3: a ground-truth sha match on WHITESPACE-ONLY (but non-empty) content must not verify', () => {
+    test.each([
+      ['a single newline', '\n'],
+      ['two spaces', '  '],
+      ['a lone tab', '\t'],
+    ])('%s on BOTH sides (matching sha, size > 0) => REFUSED, not restored, NOT logged as verified', (_label, whitespace) => {
+      const { proj, helpers } = mkSidecarWorld({
+        kitAssetContent: whitespace,
+        snapshotContent: whitespace, // matches kitAssetContent exactly => sha match, wantSize > 0
+        installed: CLOBBER_CONTENT,
+      });
+      expect(whitespace.length).toBeGreaterThan(0); // sanity: this is the wantSize > 0 case, not the already-fixed zero-byte case
+      const before = readInstalled(helpers);
+      const r = runGuard(helpers);
+      expect(r.status).toBe(0);
+      expect(readInstalled(helpers)).toBe(before); // refused — must NOT have restored whitespace over the installed file
+      const log = fs.readFileSync(logPath(proj), 'utf8');
+      expect(log).toMatch(/REFUSED restore/);
+      expect(log).not.toMatch(/verified against live kit asset/); // the strongest verdict must never be issued for inert content
+    });
+
+    test('the refusal reason cites the structural failure (missing anchor), not a generic or empty-specific message', () => {
+      const { proj, helpers, kitAssetPath } = mkSidecarWorld({
+        kitAssetContent: '\n',
+        snapshotContent: '\n',
+        installed: CLOBBER_CONTENT,
+      });
+      expect(runGuard(helpers).status).toBe(0);
+      const log = fs.readFileSync(logPath(proj), 'utf8');
+      expect(log).toContain(kitAssetPath);
+      expect(log).toMatch(/missing required anchor on an executable line/); // the actual reason: structurally insane, not merely mismatched
+      expect(log).not.toMatch(/BOTH zero bytes/); // this is the wantSize>0 case — must not be conflated with the zero-byte sibling fix
+    });
+
+    test('unchanged behavior: a non-empty, anchor-bearing snapshot that matches a non-empty kit asset still verifies', () => {
+      const { proj, helpers } = mkSidecarWorld({
+        kitAssetContent: CANON_CONTENT,
+        snapshotContent: CANON_CONTENT,
+        installed: CLOBBER_CONTENT,
+      });
+      expect(runGuard(helpers).status).toBe(0);
+      expect(readInstalled(helpers)).toBe(CANON_CONTENT);
+      expect(fs.readFileSync(logPath(proj), 'utf8')).toMatch(/verified against live kit asset/);
+    });
+
+    test('unchanged behavior: the REAL current statusline.cjs still takes the ground-truth path normally', () => {
+      // Verified against the actual shipped kit asset, not a fixture — proves
+      // the round-3 structural check doesn't touch the genuine happy path.
+      const realAsset = fs.readFileSync(CANONICAL_ASSET, 'utf8');
+      const { proj, helpers } = mkSidecarWorld({
+        kitAssetContent: realAsset,
+        snapshotContent: realAsset,
+        installed: CLOBBER_CONTENT,
+      });
+      expect(runGuard(helpers).status).toBe(0);
+      expect(readInstalled(helpers)).toBe(realAsset);
+      expect(fs.readFileSync(logPath(proj), 'utf8')).toMatch(/verified against live kit asset/);
+    });
+  });
 });
 
 describe('statusline-guard.cjs — round 3: REQUIRED_ANCHORS regression guard (F4 sentinel-decay class)', () => {

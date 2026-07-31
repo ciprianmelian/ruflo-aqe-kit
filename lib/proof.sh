@@ -5,13 +5,13 @@ set -uo pipefail
 # ============================================================================
 # lib/proof.sh — PROOF-V1. Prove the ruflo + AQE stack actually works, twice.
 #
-#   bin/ruflo-kit proof <target>              # 15 probes, run TWICE (x2), verdict
-#   bin/ruflo-kit proof <target> --single     # 15 probes, ONE pass
+#   bin/ruflo-kit proof <target>              # 16 probes, run TWICE (x2), verdict
+#   bin/ruflo-kit proof <target> --single     # 16 probes, ONE pass
 #   bin/ruflo-kit proof <target> --json       # machine shape
 #   bin/ruflo-kit proof <target> --dry-run    # list what would run, exit 0
 #
 # EVERY assertion is DISK-DERIVED or REAL command output — never an MCP/daemon
-# self-report (a broken server happily says "healthy"). Fifteen probes:
+# self-report (a broken server happily says "healthy"). Sixteen probes:
 #   P1  ruflo-cli       ruflo --version exits 0 + prints a semver
 #   P2  ruflo-mcp       ruflo mcp start answers one JSON-RPC initialize
 #   P3  aqe             aqe --version + aqe-mcp handshake (.mcp.json command)
@@ -41,12 +41,24 @@ set -uo pipefail
 #                       fresh-target fallback when nothing is installed yet.
 #                       --json swarmdb.vectorCount == sqlite sum (±5) +
 #                       tests.testCases>=testFiles with countMethod 'regex-scan'
+#   P16 memory-roundtrip a real ruflo memory store -> retrieve -> independent
+#                       on-disk read -> purge, entirely inside a disposable
+#                       tmp dir (MEMORY-ROUNDTRIP-V1; kit_memory_roundtrip_check,
+#                       lib/common.sh). Every other memory/store check in this
+#                       file only proves a store exists, holds rows, or accepts
+#                       a momentary write lock — never that a written value
+#                       actually comes back out through an independent reader.
+#                       FAILs on a genuine round-trip gap OR on "nothing to
+#                       assess" (ruflo absent) — see the probe's own comment
+#                       for why that is not a WARN.
 #
 # NOTE (P12): `ruflo hooks route` may append one route-capture row to the swarm
 # store — this probe is read-MOSTLY, not strictly read-only. P9's hook-handler
 # drive (pre-bash) is read-only: hook-handler.cjs only inspects the JSON payload
 # string against a fixed dangerous-command list — it never executes the payload.
-# Everything else is read-only (P13's BEGIN IMMEDIATE; ROLLBACK mutates nothing).
+# P16 writes and reads only inside its own disposable mktemp dir — it never
+# touches the target's real .agentic-qe/, .swarm/, or agentdb.db. Everything
+# else is read-only (P13's BEGIN IMMEDIATE; ROLLBACK mutates nothing).
 #
 # x2 driver (default): pass 1 runs in the inherited env; pass 2 runs under a
 # CLEAN env (`env -i HOME PATH TERM`) so it must re-derive every fact from disk.
@@ -744,6 +756,62 @@ NODE
   esac
 }
 
+# P16 memory-roundtrip (MEMORY-ROUNDTRIP-V1, Wave-2 B13): delegates to
+# kit_memory_roundtrip_check (lib/common.sh) — store -> CLI retrieve ->
+# independent on-disk read (sqlite3 CLI or the node better-sqlite3 fallback) ->
+# purge -> post-purge retrieve, entirely inside a disposable mktemp dir. See
+# that function's header comment for the full rationale (adopted from
+# agentic-kit's verifyMemory): every OTHER store check in this file
+# (kit_sqlite_rw_check / stores-writable, the AQE capture-arm wiring check)
+# only ever proves PRESENCE — a store exists, accepts a momentary write lock,
+# holds rows — never that a value written through the real CLI actually comes
+# back out through a reader independent of that same CLI. This probe never
+# touches the target's own .agentic-qe/, .swarm/, or agentdb.db.
+#
+# Verdict mapping (tri-state -> PASS/FAIL — no WARN branch):
+#   healthy        -> PASS  full round trip verified, independent read included
+#                     whenever a sqlite instrument was available to check with.
+#   gap            -> FAIL  ruflo IS present but the round trip broke somewhere
+#                     — a real defect, not a missing instrument.
+#   not-assessable -> FAIL, deliberately NOT WARN. This follows P6 bsqlite's
+#                     precedent ("PROVED must not be earned blind"), not P7
+#                     brain's ("KB absent" WARN): the brain KB is a genuinely
+#                     optional, documented multi-GB opt-in component that many
+#                     intact hosts will never install by design, so its
+#                     absence carries no information about health. `ruflo` is
+#                     the opposite — it is not an optional dependency of this
+#                     probe, it IS the memory layer proof exists to verify.
+#                     A host where kit_memory_roundtrip_check returns
+#                     not-assessable (ruflo missing from PATH, or the host
+#                     can't even provide a scratch `mktemp -d`) does not newly
+#                     fail an otherwise-healthy target: ruflo's absence
+#                     already hard-FAILs P1 ruflo-cli (and starves P3/P9/P10/
+#                     P12 of anything real to drive), and proof is documented
+#                     to run only after setup's global installs have already
+#                     put ruflo on PATH. A mktemp failure is the same story
+#                     one layer down — a host that cannot provide a scratch
+#                     directory has a broken-er problem than this probe, not a
+#                     legitimately ruflo-less fresh target. FAIL here is
+#                     therefore never a NEW way to lose PROVED, only an
+#                     honest, non-silent echo of a failure already gating the
+#                     proof elsewhere.
+probe_memory_roundtrip() {
+  local res state detail
+  res="$(kit_memory_roundtrip_check 2>/dev/null)"
+  state="${res%%|*}"; detail="${res#*|}"
+  case "$state" in
+    healthy)
+      record_probe "memory-roundtrip" PASS "$detail"
+      ;;
+    gap)
+      record_probe "memory-roundtrip" FAIL "$detail"
+      ;;
+    *)
+      record_probe "memory-roundtrip" FAIL "not-assessable: $detail — ruflo is not optional here (already fatal upstream at P1 ruflo-cli); PROVED must not be earned blind"
+      ;;
+  esac
+}
+
 run_all_probes() {
   probe_ruflo_cli
   probe_ruflo_mcp
@@ -760,6 +828,7 @@ run_all_probes() {
   probe_stores_writable
   probe_daemon_gates
   probe_statusline_truth
+  probe_memory_roundtrip
 }
 
 # ── Emitters ─────────────────────────────────────────────────────────────────
@@ -783,7 +852,7 @@ emit_single_json() {
 
 print_single_table() {
   local failed=0 warned=0 i
-  header "proof" "15-probe disk-evidence proof (single pass)"
+  header "proof" "16-probe disk-evidence proof (single pass)"
   kit_banner
   echo ""
   printf "  %-18s %-8s %s\n" "PROBE" "VERDICT" "DETAIL"
@@ -809,7 +878,7 @@ run_single() {
     if [[ "$JSON" -eq 1 ]]; then
       echo '{"dryRun":true,"probes":[],"failed":0,"warned":0}'
     else
-      echo "[dry-run] would run 15 disk-evidence probes against $TARGET_DIR (no commands executed)"
+      echo "[dry-run] would run 16 disk-evidence probes against $TARGET_DIR (no commands executed)"
     fi
     exit 0
   fi
@@ -826,7 +895,7 @@ run_x2() {
     if [[ "$JSON" -eq 1 ]]; then
       echo '{"dryRun":true,"stable":true,"verdict":"PROVED"}'
     else
-      echo "[dry-run] would run the 15 probes TWICE:"
+      echo "[dry-run] would run the 16 probes TWICE:"
       echo "  pass 1: bash $KIT_LIB/proof.sh $TARGET_DIR --single --json   (inherited env)"
       echo "  pass 2: env -i HOME PATH TERM bash $KIT_LIB/proof.sh $TARGET_DIR --single --json   (clean env)"
       echo "  verdict PROVED iff both passes have zero FAIL and identical verdict vectors"

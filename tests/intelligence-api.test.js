@@ -46,11 +46,24 @@ beforeEach(() => {
   originalCwd = process.cwd();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'osam-intel-api-'));
   process.chdir(tmpDir);
+  // ROOT-PIN: intelligence.cjs resolves its data dir via resolveProjectRoot(),
+  // which walks UP from cwd looking for a `.git` or `.claude-flow` marker.
+  // os.tmpdir() is a directory SHARED by every process on the machine, and
+  // other suites/tools have been known to leave a stray `.claude-flow` sitting
+  // directly at that shared root (e.g. a spawned child that defaulted its cwd
+  // to os.tmpdir() instead of its own fixture dir). When that happens, the
+  // walk-up escapes this test's empty tmpDir and lands on real, accumulated
+  // project data one or more levels up — silently defeating the sandbox.
+  // Pinning CLAUDE_PROJECT_DIR (checked first, no walk-up) makes the fixture
+  // authoritative regardless of what garbage other processes left in the
+  // shared tmp root.
+  process.env.CLAUDE_PROJECT_DIR = tmpDir;
   intel = loadFreshIntel();
 });
 
 afterEach(() => {
   process.chdir(originalCwd);
+  delete process.env.CLAUDE_PROJECT_DIR;
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 

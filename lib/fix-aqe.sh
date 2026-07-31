@@ -95,7 +95,14 @@ header "2" ".claude helpers + hook wiring"
 if [[ ! -d "$HELPER_SRC" ]]; then
   warn "no assets/claude-helpers/ source dir — skipping helper install"
 else
-  mkdir -p "$CLAUDE_HELPERS"
+  # B11: this mkdir used to run unconditionally, ahead of the per-file dry-run
+  # checks below, so `fix-aqe --dry-run` against a fresh target physically
+  # created .claude/helpers/. Gate it — a dry-run only reports what it would do.
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    [[ -d "$CLAUDE_HELPERS" ]] || info "[dry-run] would create directory: $CLAUDE_HELPERS"
+  else
+    mkdir -p "$CLAUDE_HELPERS"
+  fi
   # _derive-outcome.cjs MUST install alongside its consumers: aqe-post-route.cjs and
   # ruflo-train-subagent.cjs `require('./_derive-outcome.cjs')` relative to __dirname,
   # so the oracle has to land in .claude/helpers/ too (listed first for clarity).
@@ -822,6 +829,246 @@ if [[ -n "$GNM_MC" ]] && ls "$MC_ONNX_DIR"/model*.onnx >/dev/null 2>&1; then
   pass "AQE MiniLM weights present in package cache (disk-hit on next embed)"
 else
   warn "AQE MiniLM weights not in package cache — first embed will download (network needed)"
+fi
+
+# ── Step 10: resolveProjectRoot walk-up boundary exclusion (INTEL-ROOTWALK-V1) ──
+# .claude/helpers/intelligence.cjs's resolveProjectRoot() walks UP from cwd
+# accepting a bare `.claude-flow` directory with no corroborating `.git` — a
+# shared/ancestor directory (e.g. the OS temp root, or $HOME) can accumulate a
+# stray `.claude-flow` left by an unrelated writer, and any nested
+# fixture/subdir lacking its own marker silently inherits that ancestor's
+# project state. Same defect shape as the historical ~/.agentic-qe
+# findProjectRoot hijack (topmost-wins leaking one project's learning into
+# another), resolved upstream in aqe 3.10.4 by anchoring to the
+# nearer/corroborated root.
+#
+# Revision history (all superseded, all left as recognized migration sources
+# below so every prior tier reaches the current form in one hop):
+#   v1 "depth-0" — trusted a bare `.claude-flow` only at the walk's own
+#     origin. Regressed a real case: a non-git project with `.claude-flow`
+#     at its root, invoked from a subdirectory, no longer found its own
+#     root and fell back to the origin, fragmenting state into a stray
+#     per-subdirectory `.claude-flow`.
+#   v2 "shared-root exclusion, realpath-per-directory" — excluded $HOME/OS
+#     temp root/fs root by comparing `fs.realpathSync(candidate)` against a
+#     realpath'd-only exclusion set. Had a real bypass: a caller can pass an
+#     alias-form startDir the walk never resolves — a realpath'd-only
+#     exclusion set never string-matches a stray marker sitting exactly at
+#     the boundary in alias form, so it was adopted anyway. Also missed CI
+#     runners whose real temp root is a distinct env var (e.g. GitHub
+#     Actions' RUNNER_TEMP) from `os.tmpdir()`.
+#   v3 "boundary set, string-normalized, both raw+realpath forms, +literal
+#     /tmp" — precomputed a set of the raw AND realpath'd, trailing-
+#     separator-normalized form of $HOME/`os.tmpdir()`/literal `/tmp`/
+#     $TMPDIR/$TEMP/$TMP/fs-root, string-matched at check time. Closed the
+#     v2 alias bypass and the missing-`/tmp` gap, and dropped the per-level
+#     realpath cost entirely (a pure string comparison). Had TWO real
+#     problems of its own: (a) $TMPDIR/$TEMP/$TMP were trusted verbatim —
+#     an operator setting e.g. `TMPDIR=$BUILD_DIR` (a plausible CI
+#     misconfiguration) would silently exclude that entire real project;
+#     (b) STRING comparison — even of realpath'd values — is fooled by a
+#     case-insensitive-but-preserving filesystem (macOS APFS): realpathSync
+#     preserves input case, so a case-differing alias of a boundary never
+#     string-matched it, and a stray marker sitting there was adopted
+#     anyway. This reproduced the ORIGINAL defect through a new alias
+#     class.
+#
+# v4 (current): identity, not strings. Boundary membership is decided by
+# `(dev, ino)` from `fs.statSync`, precomputed once per boundary and stat'd
+# once per candidate directory in the walk — never by comparing path
+# strings, realpath'd or not. This closes case-aliasing, symlink-aliasing,
+# trailing separators, and `..` segments in a single mechanism, with no
+# platform gating and no normalization guesswork (a `toLowerCase()`-style
+# fix would be wrong on case-SENSITIVE volumes, where two distinct
+# directories can differ only in case). Each `statSync` is wrapped in
+# try/catch so a nonexistent boundary or candidate contributes nothing
+# rather than throwing. $TMPDIR/$TEMP/$TMP are validated — absolute path
+# AND existing directory — before being trusted; this rejects empty,
+# relative, and nonexistent values, but by design cannot distinguish
+# "operator meant this as a temp root" from "operator misconfigured it"
+# without guessing, so a $TMPDIR genuinely pointed at a real, existing
+# project root remains a documented residual failure mode (tested, not
+# hidden) rather than something silently guessed around. `.git` and
+# `.claude-flow` are both gated by the SAME boundary check (a yadm-style
+# dotfiles `.git` at $HOME is the historical `~/.agentic-qe` hijack
+# through a different marker) — this is intentional and unchanged from v3,
+# not a new decision. A project living UNDER an excluded root is
+# unaffected, since only the root directory itself is ever excluded, never
+# its children. CLAUDE_PROJECT_DIR stays checked first and unconditionally,
+# unchanged. There is exactly one production call site (module load) at a
+# depth of a few levels per fresh hook subprocess, never a hot loop —
+# correctness, not per-level cost, is what matters here; do not
+# reintroduce string/realpath comparison to "optimize" this.
+#
+# v5: the boundary set built at the top of resolveProjectRoot is a ONE-SHOT
+# snapshot with no re-check. If a single stat() during that construction
+# fails transiently (EMFILE under fd pressure, an EACCES race, ENOENT/ESTALE
+# during a remount), v4 silently dropped that boundary from the set for the
+# rest of the call — even though the walk itself later reaches that exact
+# directory once the transient condition has cleared, and adopts a bare
+# `.claude-flow` sitting there as if it were a legitimate project (the
+# original defect, reintroduced via a construction-time race rather than an
+# alias). Proved against the real, unmodified file with a stateful
+# fs.statSync monkeypatch that throws once for the boundary path and behaves
+# normally afterward, including for the walk's own later re-check — the
+# candidate-side check (isSharedRoot during the walk) does NOT have this
+# problem, since `fs.existsSync(dir/.git)` hits the identical access barrier
+# at the identical instant and the two failures cancel out; the
+# construction side has no such re-check to cancel against. v5 distinguishes
+# ENOENT/ENOTDIR (genuinely absent — skip is correct) from any other errno
+# (unknown — must not silently degrade to absent): an unknown failure sets
+# `_rootwalkDegraded`, and while degraded this call stops trusting bare
+# `.claude-flow` entirely, falling through to `.git` only (still gated by
+# the same isSharedRoot check as before — this is the existing, disclosed
+# yadm-dotfiles tradeoff, unchanged, not a new one). Rare and
+# self-correcting — the next hook invocation gets a fresh call and a fresh
+# boundary set — so this trades occasional non-detection for never adopting
+# an unverified boundary, the same fail-closed direction as everywhere else
+# in this function.
+#
+# The installed file is regenerated by upstream `ruflo init`/`aqe init`
+# (byte-identical to the copy bundled inside the ruflo/claude-flow npm
+# packages) and only ever seeded here when absent (HELPER-SEED-V1 above), so
+# heal it in place the same way HOOK-BLOCK-EXIT2-V1 heals hook-handler.cjs:
+# defect_gate on the literal bug, a single anchored string patch that writes
+# nothing unless the whole anchor matches (ANCHOR_NOT_FOUND -> untouched),
+# self-retiring the day upstream ships the fix itself. Six pre-patch forms
+# are recognized (pristine, v1, v2, v3-without-/tmp, v3-with-/tmp, v4) so
+# every prior tier migrates straight to the current form in one hop.
+header "10" "resolveProjectRoot walk-up boundary exclusion (INTEL-ROOTWALK-V1)"
+INTEL="$CLAUDE_HELPERS/intelligence.cjs"
+if [[ ! -f "$INTEL" ]]; then
+  warn "intelligence.cjs not present — skipping"
+elif grep -q "_rootwalkDegraded" "$INTEL" 2>/dev/null; then
+  pass "resolveProjectRoot already identity-boundary-excluded with degraded-boundary handling (INTEL-ROOTWALK-V1 v5)"
+elif defect_gate "$INTEL" "fs\.existsSync\(path\.join\(dir, '\.claude-flow'\)\)\) \{" "pristine bare .claude-flow walk-up" >/dev/null \
+     || grep -q "INTEL-ROOTWALK-V1" "$INTEL" 2>/dev/null; then
+  if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+    info "[dry-run] would rewrite resolveProjectRoot .claude-flow walk-up to identity-based (dev,ino) boundary exclusion with degraded-boundary handling (INTEL-ROOTWALK-V1 v5)"
+  else
+    [[ -e "$INTEL.rootwalk-bak" ]] || cp "$INTEL" "$INTEL.rootwalk-bak"
+    patcher="$(mktemp)"
+    cat > "$patcher" <<'PJS'
+const fs = require('fs'); const F = process.argv[2];
+let raw = fs.readFileSync(F, 'utf8');
+if (raw.includes('_rootwalkDegraded')) { process.exit(0); }
+const crlf = raw.includes('\r\n');
+let s = crlf ? raw.replace(/\r\n/g, '\n') : raw;
+
+// Six recognized pre-patch forms, all migrating straight to the current
+// (v5, identity-based + degraded-boundary handling) shape in one hop.
+const anchorPristine = "  let dir = path.resolve(startDir || process.cwd());\n  while (true) {\n    if (fs.existsSync(path.join(dir, '.git')) ||\n        fs.existsSync(path.join(dir, '.claude-flow'))) {\n      return dir;\n    }";
+const anchorV1 = "  const origin = path.resolve(startDir || process.cwd()); // INTEL-ROOTWALK-V1\n  let dir = origin;\n  while (true) {\n    if (fs.existsSync(path.join(dir, '.git'))) return dir;\n    // A bare .claude-flow with no corroborating .git is trusted only at the\n    // walk origin (depth 0); an ancestor bare .claude-flow (e.g. a stray\n    // marker left by another writer in a shared temp root) is no longer\n    // silently adopted while walking up.\n    if (dir === origin && fs.existsSync(path.join(dir, '.claude-flow'))) return dir;";
+const anchorV2 = "  const origin = path.resolve(startDir || process.cwd()); // INTEL-ROOTWALK-V1\n  // A bare .claude-flow with no corroborating .git is trusted at any walk-up\n  // depth EXCEPT when the candidate directory is itself shared infrastructure\n  // ($HOME, the OS temp root, or the filesystem root) -- those accumulate\n  // stray markers left by unrelated writers (the historical ~/.agentic-qe\n  // hijack was HOME; a stray marker at a shared OS temp root is the concrete\n  // case this guards). .git remains trusted at any depth -- an unambiguous\n  // project-root signal. A project living UNDER an excluded root (e.g.\n  // <tmp>/proj/.claude-flow) is unaffected -- only the root itself is\n  // excluded, not its children.\n  const _rootwalkRealpath = (p) => { try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); } };\n  const _rootwalkExcluded = new Set();\n  try { _rootwalkExcluded.add(_rootwalkRealpath(require('os').homedir())); } catch (e) {}\n  try { _rootwalkExcluded.add(_rootwalkRealpath(require('os').tmpdir())); } catch (e) {}\n  _rootwalkExcluded.add(path.resolve(path.parse(origin).root));\n  const isSharedRoot = (d) => _rootwalkExcluded.has(_rootwalkRealpath(d));\n  let dir = origin;\n  while (true) {\n    if (fs.existsSync(path.join(dir, '.git'))) return dir;\n    if (fs.existsSync(path.join(dir, '.claude-flow')) && !isSharedRoot(dir)) return dir;";
+const anchorV3NoTmp = "  const origin = path.resolve(startDir || process.cwd()); // INTEL-ROOTWALK-V1\n  // A bare .claude-flow OR .git is trusted at any walk-up depth EXCEPT when\n  // the candidate directory IS itself shared infrastructure ($HOME, the OS\n  // temp root incl. TMPDIR/TEMP/TMP, or the filesystem root) -- those\n  // accumulate stray markers left by unrelated writers (the historical\n  // ~/.agentic-qe hijack was HOME; a stray marker at a shared OS temp root\n  // is the concrete case this guards; a yadm-style dotfiles .git at $HOME\n  // is the same hazard through a different marker, so both markers are\n  // excluded uniformly at a boundary, not just .claude-flow). The boundary\n  // set is precomputed ONCE per call (never per directory in the walk) and\n  // stores BOTH the raw and the realpath'd form of each entry, normalized --\n  // a caller can pass an alias-form startDir, and the walk itself never\n  // resolves symlinks, so matching only the realpath'd form would miss it.\n  // A project living UNDER an excluded root is unaffected -- only the root\n  // itself is excluded, not its children. If the origin itself is a\n  // boundary, the walk exhausts and falls back to the origin.\n  const _rootwalkNorm = (p) => {\n    const s = String(p);\n    const stripped = s.replace(/[\\\\/]+$/, '');\n    return stripped.length > 0 ? stripped : s.slice(0, 1);\n  };\n  const _rootwalkBoundary = new Set();\n  const _rootwalkAddBoundary = (p) => {\n    if (!p) return;\n    _rootwalkBoundary.add(_rootwalkNorm(p));\n    try { _rootwalkBoundary.add(_rootwalkNorm(fs.realpathSync(p))); } catch (e) {}\n  };\n  try { _rootwalkAddBoundary(require('os').homedir()); } catch (e) {}\n  try { _rootwalkAddBoundary(require('os').tmpdir()); } catch (e) {}\n  try { _rootwalkAddBoundary(process.env.TMPDIR); } catch (e) {}\n  try { _rootwalkAddBoundary(process.env.TEMP); } catch (e) {}\n  try { _rootwalkAddBoundary(process.env.TMP); } catch (e) {}\n  try { _rootwalkAddBoundary(path.parse(origin).root); } catch (e) {}\n  const isSharedRoot = (d) => _rootwalkBoundary.has(_rootwalkNorm(d));\n  let dir = origin;\n  while (true) {\n    if (!isSharedRoot(dir)) {\n      if (fs.existsSync(path.join(dir, '.git'))) return dir;\n      if (fs.existsSync(path.join(dir, '.claude-flow'))) return dir;\n    }";
+const anchorV3WithTmp = "  const origin = path.resolve(startDir || process.cwd()); // INTEL-ROOTWALK-V1\n  // A bare .claude-flow OR .git is trusted at any walk-up depth EXCEPT when\n  // the candidate directory IS itself shared infrastructure ($HOME, the OS\n  // temp root incl. TMPDIR/TEMP/TMP, or the filesystem root) -- those\n  // accumulate stray markers left by unrelated writers (the historical\n  // ~/.agentic-qe hijack was HOME; a stray marker at a shared OS temp root\n  // is the concrete case this guards; a yadm-style dotfiles .git at $HOME\n  // is the same hazard through a different marker, so both markers are\n  // excluded uniformly at a boundary, not just .claude-flow). The boundary\n  // set is precomputed ONCE per call (never per directory in the walk) and\n  // stores BOTH the raw and the realpath'd form of each entry, normalized --\n  // a caller can pass an alias-form startDir, and the walk itself never\n  // resolves symlinks, so matching only the realpath'd form would miss it.\n  // A project living UNDER an excluded root is unaffected -- only the root\n  // itself is excluded, not its children. If the origin itself is a\n  // boundary, the walk exhausts and falls back to the origin.\n  const _rootwalkNorm = (p) => {\n    const s = String(p);\n    const stripped = s.replace(/[\\\\/]+$/, '');\n    return stripped.length > 0 ? stripped : s.slice(0, 1);\n  };\n  const _rootwalkBoundary = new Set();\n  const _rootwalkAddBoundary = (p) => {\n    if (!p) return;\n    _rootwalkBoundary.add(_rootwalkNorm(p));\n    try { _rootwalkBoundary.add(_rootwalkNorm(fs.realpathSync(p))); } catch (e) {}\n  };\n  try { _rootwalkAddBoundary(require('os').homedir()); } catch (e) {}\n  try { _rootwalkAddBoundary(require('os').tmpdir()); } catch (e) {}\n  try { _rootwalkAddBoundary('/tmp'); } catch (e) {}\n  try { _rootwalkAddBoundary(process.env.TMPDIR); } catch (e) {}\n  try { _rootwalkAddBoundary(process.env.TEMP); } catch (e) {}\n  try { _rootwalkAddBoundary(process.env.TMP); } catch (e) {}\n  try { _rootwalkAddBoundary(path.parse(origin).root); } catch (e) {}\n  const isSharedRoot = (d) => _rootwalkBoundary.has(_rootwalkNorm(d));\n  let dir = origin;\n  while (true) {\n    if (!isSharedRoot(dir)) {\n      if (fs.existsSync(path.join(dir, '.git'))) return dir;\n      if (fs.existsSync(path.join(dir, '.claude-flow'))) return dir;\n    }";
+
+const anchorV4 = "  const origin = path.resolve(startDir || process.cwd()); // INTEL-ROOTWALK-V1\n  // A bare .claude-flow OR .git is trusted at any walk-up depth EXCEPT when\n  // the candidate directory IS itself shared infrastructure ($HOME, the OS\n  // temp root incl. the literal /tmp + TMPDIR/TEMP/TMP, or the filesystem\n  // root). Identity is compared by (dev, ino) from fs.statSync, NOT by\n  // string -- a prior string-based revision (even after realpath) was\n  // fooled by case-insensitive-but-preserving filesystems (macOS APFS):\n  // realpathSync preserves input case, so a case-differing alias of $HOME\n  // never string-matched the boundary set and a stray marker there was\n  // adopted anyway. Comparing filesystem identity instead closes\n  // case-aliasing, symlink-aliasing, trailing separators, and '..'\n  // segments in one move, with no platform gating and no normalization\n  // guesswork. TMPDIR/TEMP/TMP are validated (absolute + existing) before\n  // being trusted, since they are operator-controlled and a plausible CI\n  // misconfiguration (e.g. TMPDIR pointed at a real build/project\n  // directory) would otherwise exclude that project's own marker from\n  // every subdirectory -- validation rejects empty/relative/nonexistent\n  // values, but cannot distinguish 'meant as a temp root' from\n  // 'misconfigured to point at a real project' without guessing, so that\n  // residual failure mode is accepted and covered by a test, not hidden.\n  // A project living UNDER an excluded root is unaffected -- only the root\n  // itself is excluded, not its children. If the origin itself is a\n  // boundary, the walk exhausts and falls back to the origin. There is\n  // exactly one production call site (module load, below) at a depth of a\n  // few levels per fresh hook subprocess -- correctness, not per-level\n  // cost, is what matters here.\n  const _rootwalkStatSafe = (p) => { try { return fs.statSync(p); } catch (e) { return null; } };\n  const _rootwalkValidEnvTemp = (p) => !!p && path.isAbsolute(p) && fs.existsSync(p);\n  const _rootwalkBoundaryIds = new Set();\n  const _rootwalkAddBoundary = (p) => {\n    if (!p) return;\n    const st = _rootwalkStatSafe(p);\n    if (st) _rootwalkBoundaryIds.add(st.dev + ':' + st.ino);\n  };\n  try { _rootwalkAddBoundary(require('os').homedir()); } catch (e) {}\n  try { _rootwalkAddBoundary(require('os').tmpdir()); } catch (e) {}\n  try { _rootwalkAddBoundary('/tmp'); } catch (e) {}\n  try { if (_rootwalkValidEnvTemp(process.env.TMPDIR)) _rootwalkAddBoundary(process.env.TMPDIR); } catch (e) {}\n  try { if (_rootwalkValidEnvTemp(process.env.TEMP)) _rootwalkAddBoundary(process.env.TEMP); } catch (e) {}\n  try { if (_rootwalkValidEnvTemp(process.env.TMP)) _rootwalkAddBoundary(process.env.TMP); } catch (e) {}\n  try { _rootwalkAddBoundary(path.parse(origin).root); } catch (e) {}\n  const isSharedRoot = (d) => {\n    const st = _rootwalkStatSafe(d);\n    return st ? _rootwalkBoundaryIds.has(st.dev + ':' + st.ino) : false;\n  };\n  let dir = origin;\n  while (true) {\n    if (!isSharedRoot(dir)) {\n      if (fs.existsSync(path.join(dir, '.git'))) return dir;\n      if (fs.existsSync(path.join(dir, '.claude-flow'))) return dir;\n    }";
+
+const replacement = [
+  "  const origin = path.resolve(startDir || process.cwd()); // INTEL-ROOTWALK-V1",
+  "  // A bare .claude-flow OR .git is trusted at any walk-up depth EXCEPT when",
+  "  // the candidate directory IS itself shared infrastructure ($HOME, the OS",
+  "  // temp root incl. the literal /tmp + TMPDIR/TEMP/TMP, or the filesystem",
+  "  // root). Identity is compared by (dev, ino) from fs.statSync, NOT by",
+  "  // string -- a prior string-based revision (even after realpath) was",
+  "  // fooled by case-insensitive-but-preserving filesystems (macOS APFS):",
+  "  // realpathSync preserves input case, so a case-differing alias of $HOME",
+  "  // never string-matched the boundary set and a stray marker there was",
+  "  // adopted anyway. Comparing filesystem identity instead closes",
+  "  // case-aliasing, symlink-aliasing, trailing separators, and '..'",
+  "  // segments in one move, with no platform gating and no normalization",
+  "  // guesswork. TMPDIR/TEMP/TMP are validated (absolute + existing) before",
+  "  // being trusted, since they are operator-controlled and a plausible CI",
+  "  // misconfiguration (e.g. TMPDIR pointed at a real build/project",
+  "  // directory) would otherwise exclude that project's own marker from",
+  "  // every subdirectory -- validation rejects empty/relative/nonexistent",
+  "  // values, but cannot distinguish 'meant as a temp root' from",
+  "  // 'misconfigured to point at a real project' without guessing, so that",
+  "  // residual failure mode is accepted and covered by a test, not hidden.",
+  "  // A project living UNDER an excluded root is unaffected -- only the root",
+  "  // itself is excluded, not its children. If the origin itself is a",
+  "  // boundary, the walk exhausts and falls back to the origin. There is",
+  "  // exactly one production call site (module load, below) at a depth of a",
+  "  // few levels per fresh hook subprocess -- correctness, not per-level",
+  "  // cost, is what matters here.",
+  "  const _rootwalkStatSafe = (p) => { try { return fs.statSync(p); } catch (e) { return null; } };",
+  "  const _rootwalkValidEnvTemp = (p) => !!p && path.isAbsolute(p) && fs.existsSync(p);",
+  "  const _rootwalkBoundaryIds = new Set();",
+  "  // INTEL-ROOTWALK-V1 v5: a boundary's stat can fail transiently (EMFILE",
+  "  // under fd pressure, an EACCES race, ENOENT/ESTALE during a remount) --",
+  "  // treating ANY failure as \"this boundary does not exist\" silently drops",
+  "  // it from the set for the rest of this call, even if the walk later",
+  "  // reaches that exact directory once the transient condition has",
+  "  // cleared, adopting a bare .claude-flow sitting there as if it were a",
+  "  // legitimate project. ENOENT/ENOTDIR genuinely mean absent (skip is",
+  "  // correct); any other errno means UNKNOWN, and unknown must not",
+  "  // silently degrade to absent -- so it sets _rootwalkDegraded instead,",
+  "  // and while degraded this call stops trusting bare .claude-flow",
+  "  // entirely (falls through to .git only, which stays gated by the same",
+  "  // isSharedRoot check as before -- unchanged from the disclosed,",
+  "  // accepted yadm-dotfiles tradeoff). Rare and self-correcting (the next",
+  "  // hook invocation gets a fresh call and fresh boundary set), so this",
+  "  // trades occasional non-detection for never adopting an unverified",
+  "  // boundary -- the same fail-closed direction as everywhere else here.",
+  "  let _rootwalkDegraded = false;",
+  "  const _rootwalkAddBoundary = (p) => {",
+  "    if (!p) return;",
+  "    try {",
+  "      const st = fs.statSync(p);",
+  "      _rootwalkBoundaryIds.add(st.dev + ':' + st.ino);",
+  "    } catch (e) {",
+  "      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return;",
+  "      _rootwalkDegraded = true;",
+  "    }",
+  "  };",
+  "  try { _rootwalkAddBoundary(require('os').homedir()); } catch (e) { _rootwalkDegraded = true; }",
+  "  try { _rootwalkAddBoundary(require('os').tmpdir()); } catch (e) { _rootwalkDegraded = true; }",
+  "  try { _rootwalkAddBoundary('/tmp'); } catch (e) { _rootwalkDegraded = true; }",
+  "  try { if (_rootwalkValidEnvTemp(process.env.TMPDIR)) _rootwalkAddBoundary(process.env.TMPDIR); } catch (e) { _rootwalkDegraded = true; }",
+  "  try { if (_rootwalkValidEnvTemp(process.env.TEMP)) _rootwalkAddBoundary(process.env.TEMP); } catch (e) { _rootwalkDegraded = true; }",
+  "  try { if (_rootwalkValidEnvTemp(process.env.TMP)) _rootwalkAddBoundary(process.env.TMP); } catch (e) { _rootwalkDegraded = true; }",
+  "  try { _rootwalkAddBoundary(path.parse(origin).root); } catch (e) { _rootwalkDegraded = true; }",
+  "  const isSharedRoot = (d) => {",
+  "    const st = _rootwalkStatSafe(d);",
+  "    return st ? _rootwalkBoundaryIds.has(st.dev + ':' + st.ino) : false;",
+  "  };",
+  "  let dir = origin;",
+  "  while (true) {",
+  "    if (!isSharedRoot(dir)) {",
+  "      if (fs.existsSync(path.join(dir, '.git'))) return dir;",
+  "      if (!_rootwalkDegraded && fs.existsSync(path.join(dir, '.claude-flow'))) return dir;",
+  "    }"
+].join('\n');
+
+let matched = false;
+if (s.includes(anchorV4)) { s = s.split(anchorV4).join(replacement); matched = true; }
+else if (s.includes(anchorV3WithTmp)) { s = s.split(anchorV3WithTmp).join(replacement); matched = true; }
+else if (s.includes(anchorV3NoTmp)) { s = s.split(anchorV3NoTmp).join(replacement); matched = true; }
+else if (s.includes(anchorV2)) { s = s.split(anchorV2).join(replacement); matched = true; }
+else if (s.includes(anchorV1)) { s = s.split(anchorV1).join(replacement); matched = true; }
+else if (s.includes(anchorPristine)) { s = s.split(anchorPristine).join(replacement); matched = true; }
+
+if (!matched) { console.error('ANCHOR_NOT_FOUND'); process.exit(2); }
+// Fail closed: verify the replacement actually landed before writing anything.
+if (!s.includes('_rootwalkDegraded')) { console.error('ANCHOR_NOT_FOUND'); process.exit(2); }
+
+if (crlf) s = s.replace(/\n/g, '\r\n');
+fs.writeFileSync(F, s);
+PJS
+    node "$patcher" "$INTEL"; rc=$?; rm -f "$patcher"
+    if [[ $rc -ne 0 ]]; then
+      warn "INTEL-ROOTWALK-V1 anchor not found in intelligence.cjs (dist drift) — re-anchor needed, NOT applied"
+    elif node --check "$INTEL" 2>/dev/null && grep -q "_rootwalkDegraded" "$INTEL"; then
+      fix "resolveProjectRoot .claude-flow/.git walk-up now uses (dev,ino) filesystem identity for boundary exclusion with degraded-boundary handling (unknown stat failures no longer silently treated as absent) (INTEL-ROOTWALK-V1)"
+      pass "root-walk identity-based boundary exclusion with degraded-boundary handling applied"
+    else
+      warn "INTEL-ROOTWALK-V1 patch produced invalid JS or verification failed — restoring backup"
+      cp "$INTEL.rootwalk-bak" "$INTEL"
+    fi
+  fi
+else
+  pass "bare .claude-flow walk-up defect not found — nothing to heal (self-retired)"
 fi
 
 echo -e "\n============================================"

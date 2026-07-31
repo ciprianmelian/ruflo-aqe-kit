@@ -162,7 +162,9 @@ header "1" "sqlite stores (WAL-safe online backup)"
 COUNTS_JSON=""; _first=1; SNAP_FAIL=0
 UNREADABLE_STORES=()
 for rel in $PRESENT_SQLITE; do
-  if kit_sqlite_backup "$TARGET_DIR/$rel" "$DEST/$rel"; then
+  kit_sqlite_backup "$TARGET_DIR/$rel" "$DEST/$rel"
+  _bk_rc=$?
+  if [[ "$_bk_rc" -eq 0 ]]; then
     _snapshot_normalize_journal "$DEST/$rel"   # best-effort; store_counts_json is the real gate
     [[ "$_first" -eq 0 ]] && COUNTS_JSON="$COUNTS_JSON,"
     if cj="$(store_counts_json "$DEST/$rel")"; then
@@ -175,8 +177,15 @@ for rel in $PRESENT_SQLITE; do
       SNAP_FAIL=1
     fi
     _first=0
+  elif [[ "$_bk_rc" -eq 2 ]]; then
+    # B17: rc 2 = never attempted (input missing or no sqlite instrument on
+    # this host) — distinct from rc 1 below, a real backup attempt that
+    # produced nothing. Both still fail the snapshot identically; only the
+    # diagnosis differs.
+    fail "sqlite backup NOT ATTEMPTED for $rel (input missing or no sqlite instrument available on this host)"
+    SNAP_FAIL=1
   else
-    fail "sqlite backup FAILED for $rel"
+    fail "sqlite backup FAILED for $rel (attempted, but produced no usable output)"
     SNAP_FAIL=1
   fi
 done

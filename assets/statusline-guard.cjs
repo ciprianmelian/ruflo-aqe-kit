@@ -108,12 +108,18 @@ function anchorOnExecutableLine(src, anchor) {
   return src.split('\n').some((line) => line.includes(anchor) && !line.trim().startsWith('//'));
 }
 
-// Full heuristic validation: non-empty, parses, carries all required anchors
-// on executable (non-comment) lines, and clears the size floor computed by
-// the caller. Returns { ok, reason } — reason is only meaningful when ok is
-// false, and is written straight into the guard log so a refusal is
-// diagnosable on sight.
-function validateHeuristically(src, floorBytes, floorReason) {
+// Non-empty, parses as JS, and carries all required anchors on executable
+// (non-comment) lines. Returns { ok, reason } — reason is only meaningful
+// when ok is false. Deliberately factored out from validateHeuristically
+// (round 3 / B10 round 3): a sha match against a resolved kit asset proves
+// two files are IDENTICAL, never that either one is VALID — two identical
+// corrupt files match perfectly, and the realistic path here is exactly
+// that: fix-statusbar.sh writes the canonical snapshot FROM the kit asset,
+// so a kit asset corrupted upstream propagates to both sides and matches
+// trivially. Running these structural checks on the ground-truth path too
+// (see below) turns "ground truth" into "verified identical AND
+// structurally sane," not a full bypass of sanity checking.
+function validateStructurally(src) {
   if (!src || src.length === 0) return { ok: false, reason: 'empty' };
   try {
     // eslint-disable-next-line no-new
@@ -126,7 +132,30 @@ function validateHeuristically(src, floorBytes, floorReason) {
       return { ok: false, reason: 'missing required anchor on an executable line: ' + JSON.stringify(anchor) };
     }
   }
-  if (typeof floorBytes === 'number' && floorBytes > 0 && src.length < floorBytes) {
+  return { ok: true };
+}
+
+// Full heuristic validation: the structural checks above, plus the size
+// floor computed by the caller. Returns { ok, reason } — reason is only
+// meaningful when ok is false, and is written straight into the guard log
+// so a refusal is diagnosable on sight.
+function validateHeuristically(src, floorBytes, floorReason) {
+  const structural = validateStructurally(src);
+  if (!structural.ok) return structural;
+  // B10 fix: this used to also require `floorBytes > 0`, on the assumption
+  // that a falsy floorBytes meant "no floor was computed." That's wrong: a
+  // sidecar-resolved kit asset that is itself zero-length computes a real,
+  // deliberate floor of exactly 0 (see the call site below, which now
+  // refuses outright rather than ever handing this function a 0), and a
+  // `> 0` test can't tell that apart from "no floor argument was given at
+  // all" (undefined/null, the actual "not configured" case). `typeof
+  // floorBytes === 'number'` alone is the correct presence check — it
+  // already excludes undefined/null, and a computed 0 is harmless here
+  // regardless (src.length is always >= 1 by this point, so `src.length <
+  // 0` can never fire; the enforcement for a broken zero-length reference
+  // lives at the caller, which refuses before a nonsensical 0 floor is ever
+  // built).
+  if (typeof floorBytes === 'number' && src.length < floorBytes) {
     return { ok: false, reason: 'candidate is ' + src.length + 'B, below ' + floorReason };
   }
   return { ok: true };
@@ -161,6 +190,7 @@ try {
   if (fs.existsSync(canonical)) {
     const shaOf = (f) => sha256(fs.readFileSync(f));
     const want = shaOf(canonical); // candidate's own sha — reused below as ground truth's "candidate sha"
+    const wantSize = fs.statSync(canonical).size; // sibling of the B10 fix below: needed to tell "verified identical" from "identically empty"
     const have = fs.existsSync(installed) ? shaOf(installed) : '(missing)';
     if (have !== want) {
       const logDir = path.resolve(dir, '..', '..', '.claude-flow');
@@ -175,10 +205,49 @@ try {
       let verdict;
       let groundTruthNote = '';
 
-      if (kitAsset && kitAsset.sha === want) {
-        // Byte-identical to a real, currently-existing kit asset. Strictly
-        // stronger than any heuristic — skip them entirely.
-        verdict = { ok: true, groundTruth: true };
+      if (kitAsset && kitAsset.sha === want && wantSize > 0) {
+        // Byte-identical to a real, currently-existing kit asset, and
+        // non-empty by byte count. Round 3 (B10 round 3 critic): a sha
+        // match proves the two files are IDENTICAL, never that either one
+        // is VALID — two identical corrupt files match perfectly, and the
+        // realistic path here is exactly that: fix-statusbar.sh writes the
+        // canonical snapshot FROM the kit asset, so if the kit asset is
+        // ever reduced to inert content upstream (or corrupted some other
+        // way), both sides inherit it and match trivially (the critic's
+        // repro: a canonical snapshot of a single "\n" and a kit asset of a
+        // single "\n" — same sha, both size 1, `wantSize > 0` satisfied,
+        // restored and logged as verified before this fix). Run the same
+        // structural checks (parses as JS, carries the required anchors)
+        // the heuristic path already requires — cheap, since this content
+        // is already being read to compute `want`'s sha, and it only runs
+        // when a mismatch was already detected (have !== want), never on
+        // every tick. This makes "ground truth" mean "verified identical
+        // AND structurally sane," not a full bypass of sanity checking.
+        // Deliberately NOT re-applying the size floor here: a byte-identical
+        // match to a live kit asset is already a stronger size signal than
+        // any floor heuristic could be.
+        const structural = validateStructurally(fs.readFileSync(canonical, 'utf8'));
+        if (structural.ok) {
+          verdict = { ok: true, groundTruth: true };
+        } else {
+          verdict = { ok: false, reason: 'byte-identical to kit asset ' + kitAsset.path + ' but ' + structural.reason };
+        }
+      } else if (kitAsset && kitAsset.sha === want) {
+        // B10-sibling fix: kitAsset.sha === want is trivially satisfiable
+        // with NEITHER side telling us anything — sha256("") is a fixed
+        // value, so a zero-byte canonical snapshot and a zero-byte resolved
+        // kit asset always match here. Without `wantSize > 0` above, that
+        // would fall into the branch above and issue this guard's STRONGEST
+        // positive verdict ("verified against live kit asset") for two
+        // files that are both nothing, then copy the empty snapshot over
+        // the installed statusline. Refuse and name the actual reason,
+        // rather than falling through to the mismatch branch below (whose
+        // groundTruthNote wording assumes the shas differ, which they don't
+        // here).
+        verdict = {
+          ok: false,
+          reason: 'canonical snapshot and resolved kit asset ' + kitAsset.path + ' are BOTH zero bytes — a sha match on empty content is not ground truth',
+        };
       } else if (kitAsset) {
         // Round 4 fix #4: ground truth WAS available via the sidecar, but the
         // candidate didn't match it (could be a stale-but-legitimate snapshot
@@ -187,12 +256,30 @@ try {
         // Log this distinctly from "no sidecar at all" either way.
         groundTruthNote = ' [ground truth available via sidecar — kit asset ' + kitAsset.path +
           ' sha ' + kitAsset.sha.slice(0, 12) + ' != candidate sha ' + want.slice(0, 12) + ' — falling back to heuristic]';
-        // Round 4 fix #2: use the resolved kit asset's ACTUAL size as the
-        // floor reference — never the installed file, which is smallest
-        // exactly when it's the stub this guard is healing.
-        const floorBytes = kitAsset.size * MIN_SIZE_FRACTION;
-        const floorReason = Math.round(MIN_SIZE_FRACTION * 100) + '% of the kit asset\'s ' + kitAsset.size + 'B (' + kitAsset.path + ')';
-        verdict = validateHeuristically(fs.readFileSync(canonical, 'utf8'), floorBytes, floorReason);
+        if (kitAsset.size === 0) {
+          // B10 fix: a sidecar-resolvable but ZERO-LENGTH kit asset is not
+          // "no size reference available" — it's evidence the kit asset
+          // itself is broken. Computing floorBytes = 0 * MIN_SIZE_FRACTION
+          // and handing it to validateHeuristically would (pre-fix) admit a
+          // candidate of ANY size, since a 0 floor never rejects anything.
+          // Refuse outright instead of falling back further: a zero-byte
+          // reference can't tell us "no floor is required" (that's the
+          // no-kitAsset branch below, still gated by the absolute floor) —
+          // it tells us the reference itself is unusable, which is a
+          // stronger reason to distrust the heuristic path, not a reason to
+          // skip it.
+          verdict = {
+            ok: false,
+            reason: 'kit asset ' + kitAsset.path + ' resolved to 0 bytes — refusing to use a zero-length reference as a size floor',
+          };
+        } else {
+          // Round 4 fix #2: use the resolved kit asset's ACTUAL size as the
+          // floor reference — never the installed file, which is smallest
+          // exactly when it's the stub this guard is healing.
+          const floorBytes = kitAsset.size * MIN_SIZE_FRACTION;
+          const floorReason = Math.round(MIN_SIZE_FRACTION * 100) + '% of the kit asset\'s ' + kitAsset.size + 'B (' + kitAsset.path + ')';
+          verdict = validateHeuristically(fs.readFileSync(canonical, 'utf8'), floorBytes, floorReason);
+        }
       } else {
         // No resolvable kit-asset reference at all — fall back to the
         // conservative absolute floor (still never the installed file).
