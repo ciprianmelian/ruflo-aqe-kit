@@ -199,16 +199,63 @@ function runBackup(driver, db, dest, env) {
   return { rc: m ? Number(m[1]) : null, stdout: r.stdout, stderr: r.stderr, code: r.status };
 }
 
+// Reconstructs the literal ORIGINAL (pre-B17, pre-Patch-72) `kit_sqlite_backup`
+// — the bare rc=1-for-everything version this whole B17 fix line replaces.
+// EMBEDDED, not `git show <ref>:lib/common.sh` — a prior version of this file
+// pinned to `HEAD`, and the moment the B17 fix was committed (Patch 72,
+// ac124a8) HEAD moved past the bug these teeth tests exist to reproduce,
+// silently turning "proves the bug was real" into "reconstructs the fixed
+// code and asserts it's still fixed" — a tautology that still happened to
+// pass, for the wrong reason. Pinning to a specific SHA (e.g. `0561b7c`, the
+// last commit before any of this session's fixes) would dodge that one
+// failure mode but introduces an equivalent one under a history rewrite
+// (rebase/squash/force-push), and this file already has a strictly more
+// robust, git-independent pattern two functions below (mkRound2Lib,
+// mkRound3Lib, for states that were NEVER committed at all) — this fixture
+// now matches that same convention for consistency, rather than mixing
+// styles for no reason. Small enough (17 lines) that embedding costs nothing
+// noteworthy; ratchet up mkOriginalLib.recordedFromSha if this text is ever
+// intentionally re-synced against a later baseline.
+function mkOriginalLib(base) {
+  const originalLib = `kit_sqlite_backup() {
+  local db="$1" dest="$2"
+  [[ -f "$db" ]] || return 1
+  mkdir -p "$(dirname "$dest")" 2>/dev/null
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" ".backup '$dest'" 2>/dev/null
+  else
+    local bs; bs="$(npm root -g 2>/dev/null)/ruflo/node_modules/better-sqlite3"
+    [[ -d "$bs" ]] || return 1
+    node -e '
+      const B = require(process.argv[1]);
+      const db = new B(process.argv[2], { readonly: true, fileMustExist: true });
+      db.backup(process.argv[3]).then(() => { db.close(); process.exit(0); })
+        .catch(() => { process.exit(1); });
+    ' "$bs" "$db" "$dest" 2>/dev/null
+  fi
+  [[ -s "$dest" ]]
+}
+`;
+  const lib = path.join(base, 'original-lib');
+  fs.mkdirSync(lib, { recursive: true });
+  const libPath = path.join(lib, 'common.sh');
+  fs.writeFileSync(libPath, originalLib);
+  return libPath;
+}
+// recordedFromSha: '0561b7c' (Patch 71, the last commit before this
+// session's B17/B19 work) — informational only; this fixture does not read
+// git at test-run time.
+mkOriginalLib.recordedFromSha = '0561b7c';
+
 // Reconstructs the literal ROUND-2 `kit_sqlite_backup` (cmd_rc gate + the
 // SELECT-1 readback, but no `|| return 1` clamp on the CLI arm, and writing
 // directly to `$dest` rather than a tmp sibling) — used by the round-3 (a)
 // and (c) teeth tests below. Round 2 was never committed to git (all of this
-// session's fixes landed only in the working tree), so unlike the round-1
-// teeth test (which can `git show HEAD:lib/common.sh`), there is no commit
-// to diff against here — this is reconstructed verbatim from the source in
-// this file's own edit history instead. The node arm is stubbed to a fixed
-// `cmd_rc=1` (unreachable in these tests, which always have sqlite3 on
-// PATH) purely so the file stays syntactically self-contained.
+// session's fixes landed only in the working tree), so — same reasoning as
+// mkOriginalLib above — this is reconstructed verbatim from the source in
+// this file's own edit history instead of consulting git. The node arm is
+// stubbed to a fixed `cmd_rc=1` (unreachable in these tests, which always
+// have sqlite3 on PATH) purely so the file stays syntactically self-contained.
 function mkRound2Lib(base) {
   const round2Lib = `kit_sqlite_backup() {
   local db="$1" dest="$2"
@@ -362,20 +409,16 @@ describe('kit_sqlite_backup — B17 round 2: the success gate must check the com
 
 describe('kit_sqlite_backup — B17 round 2 regression: pre-fix code reported SUCCESS for a failed command with stale dest content', () => {
   it('should_proveTeeth_byShowingThePreFixCodeReturnedRc0_forAFailingSourceWithStaleDestContent', () => {
-    // Same teeth mechanism as the round-1 regression below (git show HEAD —
-    // HEAD predates every fix in this session, round 1 AND round 2, since
-    // neither was ever committed): reconstruct the ORIGINAL kit_sqlite_backup
-    // and run the exact critic repro against it, proving the bug was real,
-    // not merely described.
-    const preFix = execSync('git show HEAD:lib/common.sh', { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+    // Teeth mechanism: mkOriginalLib (embedded, git-independent — see its
+    // own doc comment for why this file no longer uses `git show HEAD`).
+    // Reconstruct the ORIGINAL kit_sqlite_backup and run the exact critic
+    // repro against it, proving the bug was real, not merely described.
     const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sqbackup-teeth2-')));
     worlds.push(base);
-    const preFixLib = path.join(base, 'prefix-lib');
-    fs.mkdirSync(preFixLib, { recursive: true });
-    fs.writeFileSync(path.join(preFixLib, 'common.sh'), preFix);
+    const libPath = mkOriginalLib(base);
     const drv = path.join(base, 'driver.sh');
     writeExec(drv, `#!/usr/bin/env bash
-source "${preFixLib}/common.sh"
+source "${libPath}"
 kit_sqlite_backup "$1" "$2"
 echo "rc=$?"
 `);
@@ -395,21 +438,16 @@ echo "rc=$?"
 
 describe('kit_sqlite_backup — B17 regression: pre-fix code conflated both cases into rc=1', () => {
   it('should_proveTeeth_byShowingThePreFixCodeReturnsTheSameRc1ForBothMissingInputAndEmptyOutput', () => {
-    // Teeth proof: revert ONLY lib/common.sh to the last commit, run both
-    // scenarios above against that pre-fix code, and confirm they were
-    // genuinely indistinguishable (both rc=1) before this fix — not merely
-    // asserted in prose. Restores the working-tree fix unconditionally,
-    // even if an assertion throws, so a failure here can never leave the
-    // fix un-applied for the rest of the suite.
-    const preFix = execSync('git show HEAD:lib/common.sh', { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+    // Teeth proof: run both scenarios below against the embedded ORIGINAL
+    // pre-fix `kit_sqlite_backup` (mkOriginalLib — git-independent, see its
+    // doc comment) and confirm they were genuinely indistinguishable (both
+    // rc=1) before this fix — not merely asserted in prose.
     const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sqbackup-teeth-')));
     worlds.push(base);
-    const preFixLib = path.join(base, 'prefix-lib');
-    fs.mkdirSync(preFixLib, { recursive: true });
-    fs.writeFileSync(path.join(preFixLib, 'common.sh'), preFix);
+    const libPath = mkOriginalLib(base);
     const drv = path.join(base, 'driver.sh');
     writeExec(drv, `#!/usr/bin/env bash
-source "${preFixLib}/common.sh"
+source "${libPath}"
 kit_sqlite_backup "$1" "$2"
 echo "rc=$?"
 `);

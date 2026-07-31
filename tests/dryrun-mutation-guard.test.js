@@ -51,8 +51,11 @@
  * directory taken before and after the run — not a spot check.
  *
  * Teeth: every "fixed" assertion is paired with a "TEETH" test that runs the
- * exact pre-fix script content (`git show HEAD:lib/X.sh`) against the same
- * fixture shape and asserts the OLD defect (the mutation happens). A pre-fix
+ * exact pre-fix script content (`git show <PRE_FIX_REF>:lib/X.sh` — a FIXED
+ * commit, not HEAD; see PRE_FIX_REF's own comment below for why a moving
+ * HEAD silently turns this into a tautology the instant the fix is
+ * committed) against the same fixture shape and asserts the OLD defect (the
+ * mutation happens). A pre-fix
  * script must run from inside the kit's real lib/ directory (never a copied
  * "fakelib") so its `KIT_DIR`/`KIT_ASSETS` resolution (common.sh derives both
  * from the running script's own path) still finds the real assets/ tree —
@@ -157,15 +160,45 @@ function runScript(scriptPath, args, extraEnv) {
   return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), signal: r.signal };
 }
 
-// Writes `git show HEAD:lib/<name>` into a dotfile temp script INSIDE the
-// real lib/ directory (so KIT_DIR/KIT_ASSETS resolve against the real kit,
-// exactly like the post-fix script does), runs it, then removes the temp
-// script unconditionally (even on assertion failure, via try/finally at each
-// call site).
+// PRE_FIX_REF: the specific commit these B11 pre-fix reconstructions read
+// from — NOT HEAD. HEAD is a MOVING target: the instant this session's fixes
+// land in a commit, `git show HEAD:lib/<name>` starts returning the FIXED
+// code, and every "TEETH: pre-fix ... DOES <bad thing>" assertion below
+// starts comparing fixed-to-fixed and fails — not because the fix broke, but
+// because the test's own premise (HEAD = old code) silently stopped being
+// true. This is not hypothetical: it happened for real when Waves 4+5 landed
+// as commit ac124a8 — this exact suite went from 19/19 to 12/19, all 7
+// failures in this one helper, nowhere else. `0561b7c` is Patch 71, the
+// commit immediately BEFORE ac124a8 (and therefore before every fix this
+// file's B11 suite exercises) — a fixed point in history that stays the
+// correct "before" baseline no matter how many further commits land on top.
+// If you are tempted to "modernise" this back to HEAD: don't — that
+// reintroduces the exact bug this comment documents.
+//
+// The OTHER valid pattern, used by withPreFixSessionInit()/
+// withPreFixSessionInitDaemon() further below in this same file: when the
+// pre-fix body can be derived by splicing a known-old snippet back INTO a
+// fresh copy of the CURRENT file (rather than fetching a whole historical
+// file from git), that splice is commit-stable by construction — it never
+// consults git at all, so there is no ref to keep in sync. That pattern was
+// worked out mid-session for the session-init.sh case specifically because
+// HEAD predated the whole session and was already the wrong baseline for a
+// different reason; it just was not retrofitted onto this older helper at
+// the time. Prefer it when the pre-fix body is a small, literal, known-in-
+// advance change to today's file; use a pinned SHA (this constant) when
+// reconstructing the pre-fix body requires the historical FILE, not just a
+// known snippet reversed.
+const PRE_FIX_REF = '0561b7c';
+
+// Writes `git show <PRE_FIX_REF>:lib/<name>` into a dotfile temp script
+// INSIDE the real lib/ directory (so KIT_DIR/KIT_ASSETS resolve against the
+// real kit, exactly like the post-fix script does), runs it, then removes
+// the temp script unconditionally (even on assertion failure, via
+// try/finally at each call site).
 function withPreFixScript(name, fn) {
   const relName = `.pretest-b11-${name}`;
   const dst = path.join(REPO, 'lib', relName);
-  const content = execFileSync('git', ['show', `HEAD:lib/${name}`], { cwd: REPO, encoding: 'utf8' });
+  const content = execFileSync('git', ['show', `${PRE_FIX_REF}:lib/${name}`], { cwd: REPO, encoding: 'utf8' });
   fs.writeFileSync(dst, content);
   fs.chmodSync(dst, 0o755);
   try {

@@ -244,7 +244,8 @@ exit 0
 // `commonShOverride` (optional): raw file content to write as lib/common.sh
 // instead of copying the current working-tree file — used by the B19 teeth
 // regression to run the REAL proof.sh against the pre-fix helper (via
-// `git show HEAD:lib/common.sh`), rather than merely asserting the fixed
+// `git show <pinned-SHA>:lib/common.sh` — see that test's own comment for
+// why a pinned SHA, not `HEAD`), rather than merely asserting the fixed
 // code's current behavior.
 function mkKit(base, { commonShOverride } = {}) {
   const kit = path.join(base, 'kit');
@@ -370,10 +371,11 @@ exit 0
 // `commonShOverride` (optional, passed through to mkKit): raw lib/common.sh
 // content to use instead of the current working-tree file — lets the B19
 // teeth regression below run the REAL proof.sh against the PRE-FIX helper
-// (via `git show HEAD:lib/common.sh`) rather than only asserting the fixed
-// code's current output, closing the gap a critic found: this test
-// previously proved its claim only by hand (interactively, during
-// development), with no committed mechanism reproducing it — unlike B17,
+// (via `git show <pinned-SHA>:lib/common.sh` — pinned, not `HEAD`; see that
+// test's own comment) rather than only asserting the fixed code's current
+// output, closing the gap a critic found: this test previously proved its
+// claim only by hand (interactively, during development), with no committed
+// mechanism reproducing it — unlike B17,
 // which already had one.
 function buildNoInstrument({ commonShOverride } = {}) {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'proof-memrt-noinstr-')));
@@ -491,12 +493,30 @@ describe('probe_memory_roundtrip (P16) — B19 teeth: the pre-fix helper genuine
   it('should_proveTeeth_byRunningTheRealProofShAgainstThePreFixLibCommonSh_andSeeingItReportPass', () => {
     // Closes the gap a critic named: the test above only asserts the FIXED
     // code's current behavior — it never itself reproduced the pre-fix
-    // defect the way the B17 tests do (`git show HEAD:lib/common.sh`). HEAD
-    // predates the B19 fix (never committed this session), so this rebuilds
-    // the identical fixture with the ORIGINAL kit_memory_roundtrip_check and
-    // runs the REAL, unmodified proof.sh against it end-to-end — not a
-    // shortcut unit call — to prove the false PASS was real.
-    const preFix = execSync('git show HEAD:lib/common.sh', { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+    // defect. This rebuilds the identical fixture with the ORIGINAL
+    // kit_memory_roundtrip_check and runs the REAL, unmodified proof.sh
+    // against it end-to-end — not a shortcut unit call — to prove the false
+    // PASS was real.
+    //
+    // Pinned to a specific SHA (`0561b7c`, Patch 71 — the last commit before
+    // this session's B17/B19 fixes), NOT `HEAD`: an earlier version of this
+    // test pinned to HEAD, and the moment the fix was committed (Patch 72,
+    // ac124a8) HEAD moved past the bug, silently turning "proves the false
+    // PASS was real" into "reconstructs the fixed helper and asserts it's
+    // still fixed" — a tautology that still happened to pass, for the wrong
+    // reason (confirmed live: this exact test went red the moment Patch 72
+    // landed, for exactly that reason). A SHA pin has its own residual
+    // fragility (a history rewrite — rebase/squash/force-push — would still
+    // break it), but that is a far rarer, more deliberate event than "a
+    // fix commits," which is guaranteed to happen. Not embedded as a literal
+    // fixture string (the more robust alternative this repo already uses
+    // elsewhere, e.g. tests/intel-rootwalk-patch.test.js, and this file's own
+    // sibling tests/kit-sqlite-backup-rc.test.js for kit_sqlite_backup):
+    // `buildNoInstrument`'s `commonShOverride` replaces the ENTIRE
+    // lib/common.sh (proof.sh sources the whole file, not just one
+    // function), which is ~1000 lines — hand-embedding that is disproportionate
+    // duplication for one test versus a single pinned SHA with this comment.
+    const preFix = execSync('git show 0561b7c:lib/common.sh', { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
     const { json } = buildNoInstrument({ commonShOverride: preFix });
     expect(json).not.toBeNull();
     const p = probe(json, 'memory-roundtrip');

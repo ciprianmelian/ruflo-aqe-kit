@@ -50,9 +50,21 @@
  * not merely that a no-op stub happened not to write anything.
  *
  * Teeth: TEETH tests run the exact pre-fix script content (`git show
- * HEAD:lib/verify-learning.sh` — HEAD still holds the unpatched version, since
- * this fix is uncommitted working-tree state) against the same fixture shape
- * and assert the OLD defect (the artifact appears even under --dry-run).
+ * <PRE_FIX_REF>:lib/verify-learning.sh` — a FIXED commit, NOT HEAD) against
+ * the same fixture shape and assert the OLD defect (the artifact appears
+ * even under --dry-run).
+ *
+ * PRE_FIX_REF is pinned to a specific SHA rather than HEAD on purpose: HEAD
+ * is a MOVING target, and the instant this fix lands in a commit, `git show
+ * HEAD:...` starts returning the FIXED script — every TEETH assertion below
+ * would then compare fixed-to-fixed and fail, not because the fix broke but
+ * because the test's own premise (HEAD = old code) silently stopped being
+ * true. This already happened for real this session: this exact suite went
+ * 10/10 -> 9/10 the moment this fix's commit (ac124a8) landed, because this
+ * file still read `HEAD:lib/verify-learning.sh` at the time. See
+ * tests/dryrun-mutation-guard.test.js's PRE_FIX_REF for the sibling fix and
+ * the fuller writeup — same defect, same repair, different file. Do not
+ * "modernise" this back to HEAD.
  */
 'use strict';
 
@@ -157,14 +169,24 @@ function runScript(scriptPath, target, args, extraEnv) {
   return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), signal: r.signal };
 }
 
-// Writes `git show HEAD:lib/verify-learning.sh` into a dotfile temp script
-// INSIDE the real lib/ directory (so KIT_DIR/KIT_ASSETS resolve exactly like
-// the post-fix script does), runs it, then removes the temp script
-// unconditionally — mirrors tests/dryrun-mutation-guard.test.js's convention.
+// PRE_FIX_REF: pinned to a specific commit, not HEAD — see this file's header
+// docstring for why (HEAD moves past the fix the moment it's committed,
+// silently turning every TEETH assertion below into a fixed-vs-fixed
+// tautology). 0561b7c is Patch 71, the commit immediately before this fix
+// landed as part of ac124a8 — confirmed it still has the unconditional `aqe
+// ruvector status` call with no $DRY_RUN gate. Do not "modernise" this back
+// to HEAD.
+const PRE_FIX_REF = '0561b7c';
+
+// Writes `git show <PRE_FIX_REF>:lib/verify-learning.sh` into a dotfile temp
+// script INSIDE the real lib/ directory (so KIT_DIR/KIT_ASSETS resolve
+// exactly like the post-fix script does), runs it, then removes the temp
+// script unconditionally — mirrors tests/dryrun-mutation-guard.test.js's
+// convention (same PRE_FIX_REF pin, same reasoning, sibling fix).
 function withPreFixScript(fn) {
   const relName = '.pretest-b24-verify-learning.sh';
   const dst = path.join(REPO, 'lib', relName);
-  const content = execFileSync('git', ['show', 'HEAD:lib/verify-learning.sh'], { cwd: REPO, encoding: 'utf8' });
+  const content = execFileSync('git', ['show', `${PRE_FIX_REF}:lib/verify-learning.sh`], { cwd: REPO, encoding: 'utf8' });
   fs.writeFileSync(dst, content);
   fs.chmodSync(dst, 0o755);
   try {
