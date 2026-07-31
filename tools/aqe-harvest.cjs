@@ -7,6 +7,9 @@
  * Source DB (.agentic-qe/memory.db) is opened READ-ONLY. Idempotent via a writable
  * .swarm/harvest-state.json ledger (source stays read-only). Causal edges are SKIPPED
  * (no real cause->effect pairs in the data — Integrity Rule: no fabricated relations).
+ * HARVEST-EMBED-V1: embedding-NULL rows (capture's async embed lost the race with
+ * subprocess exit) get their vector DERIVED here with the exact upstream recipe, so
+ * ledger consumption no longer turns a timing gap into a train-never for Sink A.
  * Run from the project root. Usage: node scripts/aqe-harvest.cjs
  */
 const fs = require('fs');
@@ -19,9 +22,11 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
   // Global node_modules: `npm root -g` is the truth (a custom npm prefix like
   // ~/.npm-global diverges from the execPath-derived guess, e.g. system node at
   // /usr/bin/node with globals elsewhere); execPath stays as the offline fallback.
-  let nodeBase;
+  // KIT_HARVEST_NODE_BASE overrides for the kit's own tests (stub toolchain tree,
+  // KIT_RUFLO_DIST_SRC precedent) — never set it in live operation.
+  let nodeBase = process.env.KIT_HARVEST_NODE_BASE || '';
   try {
-    nodeBase = require('child_process').execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }).toString().trim();
+    if (!nodeBase) nodeBase = require('child_process').execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }).toString().trim();
   } catch (e) {}
   if (!nodeBase || !fs.existsSync(nodeBase)) {
     nodeBase = path.join(path.dirname(path.dirname(process.execPath)), 'lib', 'node_modules');
@@ -52,14 +57,18 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
     process.stdout.write(JSON.stringify({ trained: 0, skills: 0, episodes: 0, note: 'no captured_experiences table (fresh AQE store — nothing to harvest)' }) + '\n');
     return;
   }
-  // HARVEST-VECLESS-V1: aqe 3.12.2's capture hook stores experiences WITHOUT
-  // embeddings (observed on the first fresh-target e2e: 5 real edit experiences,
-  // all embedding-NULL). Sink B (reflexion.storeEpisode) needs no vector — the
-  // task/output/reward/success columns are complete real data — so requiring an
-  // embedding here silently discarded every session experience. Embedding-less
-  // rows now harvest to Sink B only; Sink A keeps its per-row vector guard (no
-  // fabricated training vectors). verify-learning probe #2 mirrors this filter —
-  // keep the two byte-identical.
+  // HARVEST-VECLESS-V1: aqe's capture paths write the experience row FIRST and
+  // embed async-after (hook subprocess + middleware, both fire-and-forget with a
+  // bare catch) — the freshest rows lose that race and read embedding-NULL here.
+  // Sink B (reflexion.storeEpisode) needs no vector — the task/output/reward/
+  // success columns are complete real data — so vecless rows always harvest to
+  // Sink B. Sink A keeps its per-row vector guard (never train on a missing or
+  // wrong-dim vector); since HARVEST-EMBED-V1 (below, in the Sink A loop) a
+  // vecless row's vector is DERIVED at harvest time with the exact upstream
+  // recipe instead of being skipped — because the ledger consumes rows
+  // permanently, a skip here was a train-never for that row even after
+  // upstream's lazy backfill filled the pool column. verify-learning probe #2
+  // mirrors the SELECT filter below — keep the two byte-identical.
   const rows = db.prepare(
     'SELECT rowid, id, task, agent, domain, success, quality, result_json, embedding ' +
     'FROM captured_experiences WHERE success=1 AND quality>=0.7 ORDER BY rowid'
@@ -70,18 +79,50 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
   if (!fresh.length) { process.stdout.write(JSON.stringify({ trained: 0, skills: 0, episodes: 0, note: 'nothing fresh' }) + '\n'); return; }
 
   // ---- Sink A: ruflo SONA LoRA (proven direct primitive) ----
-  let trained = 0;
+  let trained = 0, trainedEmbeddedAtHarvest = 0;
   try {
     const lora = await import('file://' + path.join(cliBase, 'dist', 'src', 'ruvector', 'lora-adapter.js'));
     const adapter = await lora.getLoRAAdapter();
     const dim = adapter.config && adapter.config.inputDim;
+    // HARVEST-EMBED-V1: lazy singleton for the MiniLM embedder — loaded only if a
+    // vecless row is actually encountered, and only tried once per run.
+    let embedFn = null, embedTried = false;
+    const getEmbedder = async () => {
+      if (embedTried) return embedFn;
+      embedTried = true;
+      try {
+        const m = await import('file://' + path.join(aqeBase, 'dist', 'learning', 'real-embeddings.js'));
+        if (m && typeof m.computeRealEmbedding === 'function') embedFn = m.computeRealEmbedding;
+        else _err('HARVEST-EMBED-V1: real-embeddings.js exports no computeRealEmbedding — vecless rows stay SinkB-only');
+      } catch (e) { _err('HARVEST-EMBED-V1: embedder unavailable (' + e.message + ') — vecless rows stay SinkB-only'); }
+      return embedFn;
+    };
     for (const r of fresh) {
+      let v = null, derived = false;
       const b = r.embedding;
-      if (!b || b.byteLength < 4) continue;
-      const v = new Float32Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 4));
-      if (dim && v.length !== dim) continue;
+      if (b && b.byteLength >= 4) {
+        v = new Float32Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 4));
+      } else {
+        // HARVEST-EMBED-V1: derive the missing vector with the EXACT upstream
+        // recipe — real-embeddings.js MiniLM over `${domain}: ${task}`.slice(0,512),
+        // the same model/text/dim the middleware backfill writes to the pool. A
+        // deterministic derivation from the row's real text, not a fabricated
+        // vector. Source db stays read-only: the pool's embedding column remains
+        // upstream's to fill. On any failure the row degrades to SinkB-only,
+        // exactly the pre-V1 behavior.
+        const embed = await getEmbedder();
+        if (embed) {
+          try {
+            const out = await embed((String(r.domain || '') + ': ' + String(r.task || '')).slice(0, 512));
+            const arr = (out && (out.embedding || out.vector || out.data)) || out;
+            if (arr && arr.length) { v = Float32Array.from(arr); derived = true; }
+          } catch (e) { _err('HARVEST-EMBED-V1: embed failed for ' + r.id + ' (' + e.message + ')'); }
+        }
+      }
+      if (!v || (dim && v.length !== dim)) continue;
       adapter.train(v, v, r.quality);
       trained++;
+      if (derived) trainedEmbeddedAtHarvest++;
     }
     adapter.saveWeights();
   } catch (e) { _err('SinkA(LoRA) failed:', e.message); }
@@ -132,5 +173,5 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
     fs.writeFileSync(ledgerPath, JSON.stringify({ ids: newIds, lastRowid, updatedAt: new Date().toISOString() }, null, 2));
   } catch (e) { _err('ledger write failed:', e.message); }
 
-  process.stdout.write(JSON.stringify({ trained, skills, episodes, freshConsumed: fresh.length }) + '\n');
+  process.stdout.write(JSON.stringify({ trained, trainedEmbeddedAtHarvest, skills, episodes, freshConsumed: fresh.length }) + '\n');
 })().catch(e => { _err('FATAL:', e.message); process.exit(1); });

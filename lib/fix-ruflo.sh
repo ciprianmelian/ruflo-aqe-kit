@@ -800,6 +800,10 @@ PJS
 #        .claude-flow/.ruflo-explore.jsonl (the bench reads explore-rate + counterfactuals).
 # Best-effort try/catch: any error falls back to the exact deterministic [0] pick.
 # Idempotent (RUFLO-ROUTE-EXPLORE-V1), reversible (.explore-bak).
+# DUAL ANCHOR (2026-07-31): ruflo 3.33.0 #2864 replaced the semanticResult[0] pick with
+# an eligibleSemantic find() (learned patterns gated on support/reliability) — the patcher
+# tries the >=3.33 ELIG anchor first, then the LEGACY <=3.32 anchor; the ELIG replacement
+# replicates upstream's eligibility predicate in its explore scan. Same sentinel string.
 wire_route_exploration() {
   [[ "$DRY_RUN" -ne 1 ]] || return 0
   local cfroot ht
@@ -814,13 +818,19 @@ const fs = require('fs');
 const target = process.argv[2];
 let s = fs.readFileSync(target, 'utf-8');
 if (s.includes('RUFLO-ROUTE-EXPLORE-V2')) { process.exit(0); }
-const OLD = `        if (semanticResult.length > 0 && semanticResult[0].score > 0.4) {
+// Two upstream anchor generations (same seam, same sentinel):
+//   LEGACY (<=3.32.x): direct semanticResult[0] pick.
+//   ELIG   (>=3.33.0, #2864): upstream's eligibleSemantic find() — learned patterns
+//          gated on support>=2 && reliability>=0.75. The ELIG replacement REPLICATES
+//          that predicate in the explore scan so exploration can never resurrect a
+//          candidate upstream deliberately filtered.
+const LEGACY_OLD = `        if (semanticResult.length > 0 && semanticResult[0].score > 0.4) {
             const topMatch = semanticResult[0];
             agents = topMatch.metadata.agents || ['coder', 'researcher'];
             confidence = topMatch.score;
             matchedPattern = topMatch.intent;
         }`;
-const NEW = `        if (semanticResult.length > 0 && semanticResult[0].score > 0.4) {
+const LEGACY_NEW = `        if (semanticResult.length > 0 && semanticResult[0].score > 0.4) {
             // RUFLO-ROUTE-EXPLORE-V2: ε-greedy pick over DISTINCT ELIGIBLE AGENTS.
             // V1 sampled by INDEX over the raw top-K, but the top-K can contain duplicate
             // agent labels (e.g. two 'testing-task' patterns both → tester) — so an
@@ -890,7 +900,87 @@ const NEW = `        if (semanticResult.length > 0 && semanticResult[0].score > 
             confidence = topMatch.score;
             matchedPattern = topMatch.intent;
         }`;
-if (!s.includes(OLD)) { console.error('ANCHOR_NOT_FOUND'); process.exit(2); }
+const ELIG_OLD = `        if (eligibleSemantic) {
+            const topMatch = eligibleSemantic;
+            agents = topMatch.metadata.agents || ['coder', 'researcher'];
+            confidence = topMatch.score;
+            matchedPattern = topMatch.intent;
+        }`;
+const ELIG_NEW = `        if (eligibleSemantic) {
+            // RUFLO-ROUTE-EXPLORE-V2: ε-greedy pick over DISTINCT ELIGIBLE AGENTS.
+            // (re-anchored for >=3.33.0 #2864: upstream's eligibleSemantic gating — learned
+            // patterns need support>=2 && reliability>=0.75 — is replicated in _ok() below,
+            // so the explore scan can never resurrect a candidate upstream filtered out.)
+            // Guarantees chosenAgent != exploitAgent whenever decision==='explore'.
+            let topMatch = eligibleSemantic;
+            try {
+                const _GATE = 0.4, _K = 3, _SCAN = 8;
+                const _agentOf = (_r) => (_r && _r.metadata && _r.metadata.agents && _r.metadata.agents[0]) || null;
+                const _ok = (_r) => {
+                    if (!_r || _r.score <= _GATE) return false;
+                    const _learned = (_r.intent && _r.intent.startsWith('learned-')) || (_r.metadata && _r.metadata.source === 'learned');
+                    if (!_learned) return true;
+                    return Number((_r.metadata && _r.metadata.support) ?? 0) >= 2
+                        && Number((_r.metadata && _r.metadata.reliability) ?? 0) >= 0.75;
+                };
+                const _seen = new Set();
+                const _distinct = []; // highest-score entry per distinct eligible agent, score order
+                for (const _r of semanticResult.slice(0, _SCAN)) {
+                    if (!_ok(_r)) continue;
+                    const _ag = _agentOf(_r);
+                    if (!_ag || _seen.has(_ag)) continue; // first (=highest score) wins per agent
+                    _seen.add(_ag);
+                    _distinct.push(_r);
+                    if (_distinct.length >= _K) break;
+                }
+                let _eps;
+                const _envEps = process.env.RUFLO_ROUTE_EPSILON;
+                const _stateDir = join(resolve('.'), '.claude-flow');
+                const _statePath = join(_stateDir, '.ruflo-explore-state.json');
+                let _count = 0;
+                try { if (existsSync(_statePath)) _count = (JSON.parse(readFileSync(_statePath, 'utf-8')).count) || 0; } catch { }
+                if (_envEps !== undefined && _envEps !== '') {
+                    _eps = Math.max(0, Math.min(1, parseFloat(_envEps)));
+                } else {
+                    // linear decay 0.15 -> 0.05 over first 200 routed tasks, then floor 0.05
+                    _eps = _count >= 200 ? 0.05 : 0.15 - (0.10 * (_count / 200));
+                }
+                // exploit = first eligible entry (== upstream's eligibleSemantic identity).
+                const _exploit = _distinct[0] || eligibleSemantic;
+                const _exploitAgent = _agentOf(_exploit) || 'coder';
+                let _decision = 'exploit';
+                topMatch = _exploit;
+                // explore requires >= 2 DISTINCT eligible agents; sample among the OTHERS.
+                if (_eps > 0 && _distinct.length > 1 && Math.random() < _eps) {
+                    const _altIdx = 1 + Math.floor(Math.random() * (_distinct.length - 1));
+                    topMatch = _distinct[_altIdx];
+                    _decision = 'explore';
+                }
+                const _chosenAgent = _agentOf(topMatch) || _exploitAgent;
+                // persist incremented decay counter (only when ε is decay-driven, i.e. no env override)
+                try {
+                    if (_envEps === undefined || _envEps === '') {
+                        mkdirSync(_stateDir, { recursive: true });
+                        writeFileSync(_statePath, JSON.stringify({ count: _count + 1 }));
+                    }
+                } catch { }
+                // append decision to the explore log for the bench
+                try {
+                    mkdirSync(_stateDir, { recursive: true });
+                    writeFileSync(join(_stateDir, '.ruflo-explore.jsonl'),
+                        JSON.stringify({ decision: _decision, chosenAgent: _chosenAgent, exploitAgent: _exploitAgent, distinctAgents: _distinct.length, epsilon: Math.round(_eps * 1000) / 1000, score: Math.round(topMatch.score * 1000) / 1000, ts: new Date().toISOString() }) + '\\n',
+                        { flag: 'a' });
+                } catch { }
+            }
+            catch { topMatch = eligibleSemantic; /* RUFLO-ROUTE-EXPLORE-V2 fail-safe — exact deterministic pick */ }
+            agents = topMatch.metadata.agents || ['coder', 'researcher'];
+            confidence = topMatch.score;
+            matchedPattern = topMatch.intent;
+        }`;
+let OLD = null, NEW = null;
+if (s.includes(ELIG_OLD))        { OLD = ELIG_OLD;   NEW = ELIG_NEW; }
+else if (s.includes(LEGACY_OLD)) { OLD = LEGACY_OLD; NEW = LEGACY_NEW; }
+if (!OLD) { console.error('ANCHOR_NOT_FOUND'); process.exit(2); }
 s = s.split(OLD).join(NEW);
 fs.writeFileSync(target, s);
 REXPATCH

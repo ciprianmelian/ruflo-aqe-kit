@@ -110,8 +110,9 @@ probe_reflexion_store() {
   struct=$((epi + ski))
   # HOLLOW is judged against what harvest can actually consume: eligible rows in
   # .agentic-qe captured_experiences (success=1, quality>=0.7 — the exact
-  # tools/aqe-harvest.cjs filter; embedding-less rows harvest to the reflexion
-  # sink, HARVEST-VECLESS-V1, so they count as harvestable). Flat .swarm memory_entries are NOT a
+  # tools/aqe-harvest.cjs filter; embedding-less rows count as harvestable — they
+  # always reach the reflexion sink (HARVEST-VECLESS-V1) and since HARVEST-EMBED-V1
+  # also train Sink A via a harvest-time derived vector). Flat .swarm memory_entries are NOT a
   # harvest source — the kit's own init/pretrain seeds them, so using them as the
   # "should have harvested" signal misclassified EVERY fresh post-setup target as
   # broken (first fresh-target e2e, 2026-07-18) and contradicted SETUP-V1's
