@@ -294,6 +294,9 @@ Promise.race([run,new Promise(r=>setTimeout(()=>r(["not-assessable","timed out a
   # escapes cannot displace the verdict.
   out="$(printf '%s' "$out" | tail -1)"
   state="${out%% *}"; detail="${out#* }"
+  # Published for probe #15: a NULL vector downstream is #13's fault, not the
+  # capture path's, and #15 must not double-report this defect as its own.
+  EMBEDDER_STATE="$state"
   case "$state" in
     healthy) ok "in-process embedder LIVE — $detail (#13)" ;;
     broken)  bad "in-process embedder DEAD: $detail — capture rows will carry NULL or fake vectors and every downstream store degrades silently. Heal: bin/ruflo-kit sync $TARGET_DIR (AQE-EMBEDDER-RESOLVE-V1) (#13)" ;;
@@ -337,105 +340,110 @@ probe_capture_diversity() {
   fi
 }
 
-# ── Probe #15: capture embed OUTCOME (EMBED-OUTCOME-V1) ──────────────────────
-# #13 asks "can the embedder work"; this asks "did the vector actually land".
-# They are NOT the same question, and today this repo proves it: #13 PASSes on a
-# healthy embedder while 100% of new rows land with embedding NULL. Mechanism is
-# in the installed dist (hooks-AGE3HCFI.js): the hook INSERTs the row, then fires
-# an UN-AWAITED async IIFE that embeds and UPDATEs, wrapped in a bare `catch{}`.
-# Nothing awaits it and nothing logs it, so under host contention the subprocess
-# exits before the ~135ms embed completes and the vector is lost silently.
+# ── Probe #15: capture embed landing (CAPTURE-EMBED-LANDING-V1) ─────────────
+# DRIVE the real capture hook and assert its vector LANDS. This replaces a
+# column census that could not tell the truth, for a reason worth recording:
 #
-# GRACE WINDOW is the whole design problem: that embed is async-after, so the
-# freshest rows legitimately have no vector yet. Measured longitudinally (diff
-# the NULL id-set over time, since the schema records no embed time): max
-# observed fill latency 33 min, and filling is BURSTY — one target read ~30%
-# NULL at 15-60min old, then 0% four minutes later. 60 min is 1.8x the max
-# latency and one stabilization interval past where the measurement stops
-# moving, so it tolerates the burst rather than crying wolf on it.
+# The census asked "what fraction of settled rows have no vector". But upstream's
+# ExperienceReplay backfill (LIMIT 200, no ORDER BY, no age filter) fires on
+# EVERY aqe-mcp boot and silently repairs history — so a census reports how
+# recently a server booted, never whether capture works. Demonstrated: a store
+# with 21 genuine capture losses read 0% NULL after ONE boot; and on this repo,
+# every band at or past 120m reads 0% while capture is 100% dead. The old ≥60m
+# window graded that same target a soft "LEAKING" at 7%.
 #
-# THRESHOLDS from the worst rolling 200-row window across both targets: the
-# known-good regime is not "near zero", it is ZERO over 3362 rows / 2964
-# windows. The partial-loss regime peaks at 29%. FAIL at 50% therefore sits
-# 1.7x above the worst degraded window and at half the broken regime.
+# The vectors are indistinguishable — a backfilled row is Buffer.equals()-
+# identical to what capture would have written, and no column records when an
+# embedding was written. So NO point-in-time census of the pool can separate
+# "capture works" from "a backfill mopped up". Driving the path is the only
+# honest observation available.
 #
-# NB: harvest opens the pool READ-ONLY and never writes back, so HARVEST-EMBED-V1's
-# derived vectors do not fill this column — it is a pure capture-path signal.
-probe_embed_outcome() {
-  local db="$AQE_DB" ok tbl col n nul pct age
-  # ONE source for the grace window — tools/aqe-embed-sweep.cjs must use the
-  # same value (GRACE_MINUTES there). If they drift, the sweep either races the
-  # capture path's own pending UPDATE or fills rows this probe is still counting.
-  local GRACE_MINUTES=60
-  local graced="completed_at <= datetime('now','-${GRACE_MINUTES} minutes')"
-  if [[ ! -f "$db" ]]; then
-    note "capture embed outcome not assessable — no AQE store at $db [not-assessable] (#15)"; return
+# THE FAULT IS DETERMINISTIC, NOT A RACE: the CLI calls process.exit(0)
+# unconditionally ~8-10ms after the capture INSERT, while the un-awaited embed
+# needs ~104-120ms cold (every hook is a fresh process, so the warm 2.4ms figure
+# is unreachable). Measured 36/36 and 21/21 idle losses in two independent
+# rigs, and 5/5 in a third. Load never enters into it.
+probe_capture_embed_landing() {
+  local hook="$TARGET_DIR/.claude/hooks/aqe-hook.cjs"
+  local base="${KIT_VL_AQE_BASE:-$(npm root -g 2>/dev/null)}"
+  # Prefer the TARGET's own bundle. The shim resolves
+  # <PROJECT>/node_modules/agentic-qe first and only then falls back to npx (which
+  # resolves the global), so certifying the global on a target that runs a local
+  # copy would exercise code the target never executes.
+  local bundle="$base/agentic-qe"
+  [[ -d "$TARGET_DIR/node_modules/agentic-qe" ]] && bundle="$TARGET_DIR/node_modules/agentic-qe"
+  if [[ ! -f "$hook" ]]; then
+    note "capture-embed landing not assessable — no .claude/hooks/aqe-hook.cjs in this target [not-assessable] (#15)"; return
   fi
-  # Openability FIRST: without it a corrupt file makes the sqlite_master query
-  # come back empty and the probe blames a missing table — a wrong reason.
-  ok="$(sqlite_count_safe "$db" "SELECT 1;")"
-  if [[ "$ok" != "1" ]]; then
-    soft "capture embed outcome not assessable — store unreadable (locked, corrupt, or no sqlite instrument) [not-assessable] (#15)"; return
+  if [[ ! -d "$bundle" ]]; then
+    note "capture-embed landing not assessable — no agentic-qe bundle to exercise (${bundle}) [not-assessable] (#15)"; return
   fi
-  tbl="$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='captured_experiences';")"
-  [[ "${tbl:-0}" -eq 0 ]] && { note "capture embed outcome not assessable — captured_experiences table absent (fresh AQE store) [not-assessable] (#15)"; return; }
-  col="$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM pragma_table_info('captured_experiences') WHERE name='embedding';")"
-  [[ "${col:-0}" -eq 0 ]] && { note "capture embed outcome not assessable — pre-embedding schema (no embedding column) [not-assessable] (#15)"; return; }
+  # Gate on #13. A NULL vector when the EMBEDDER is dead is #13's defect, not
+  # the capture path's — without this gate #15 just re-reports #13 under a
+  # second number and an operator fixes the wrong thing.
+  if [[ "${EMBEDDER_STATE:-}" != "healthy" ]]; then
+    note "capture-embed landing not assessable — the embedder itself is not healthy (see #13), so a missing vector here would not be capture's fault [not-assessable] (#15)"; return
+  fi
 
-  n="$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM (SELECT 1 FROM captured_experiences WHERE $graced ORDER BY completed_at DESC LIMIT 200);")"
-  if [[ "${n:-0}" -lt 50 ]]; then
-    note "capture embed outcome not assessable — only ${n:-0} row(s) past the 60m grace window (need 50) [not-assessable] (#15)"; return
-  fi
-  # COALESCE is load-bearing: SUM() over an empty set is NULL, and a NULL here
-  # would render as an empty string — indistinguishable from a failed read.
-  nul="$(sqlite_count_safe "$db" "SELECT COALESCE(SUM(embedding IS NULL),0) FROM (SELECT embedding FROM captured_experiences WHERE $graced ORDER BY completed_at DESC LIMIT 200);")"
-  # ANTI-LAUNDERING: `ruflo-kit embed-sweep` fills this same column. A row it
-  # filled proves nothing about the CAPTURE path, which is what this probe
-  # measures — and unlike probe #16's hash proxies there is NO geometric tell,
-  # because a correct sweep writes byte-identical vectors to a correct capture
-  # (verified: cosine 1.000000). The kit-owned ledger is the only possible
-  # discriminator, so count swept rows as still-lost. Without this, running the
-  # remedy would turn the verdict green while the defect it reports is untouched
-  # — the kit laundering its own evidence.
-  local swept=0
-  if [[ -f "$TARGET_DIR/.swarm/embed-sweep-state.json" ]]; then
-    swept="$(node -e '
-const fs=require("fs"),cp=require("child_process"),path=require("path");
-const PROJ=process.argv[1];
-let ids=[];try{ids=JSON.parse(fs.readFileSync(path.join(PROJ,".swarm","embed-sweep-state.json"),"utf8")).sweptIds||[]}catch(e){process.stdout.write("0");process.exit(0)}
-if(!ids.length){process.stdout.write("0");process.exit(0)}
-const set=new Set(ids);
-let Database=null;
-try{const g=cp.execSync("npm root -g",{stdio:["ignore","pipe","ignore"],timeout:10000}).toString().trim();
-  for(const c of [path.join(g,"agentic-qe","node_modules","better-sqlite3"),path.join(g,"better-sqlite3")]){try{Database=require(c);break}catch(e){}}}catch(e){}
-if(!Database){process.stdout.write("0");process.exit(0)}
-try{const db=new Database(path.join(PROJ,".agentic-qe","memory.db"),{readonly:true,fileMustExist:true});
-  const rows=db.prepare("SELECT id FROM captured_experiences WHERE completed_at <= datetime(\x27now\x27,\x27-'"$GRACE_MINUTES"' minutes\x27) ORDER BY completed_at DESC LIMIT 200").all();
-  db.close();
-  process.stdout.write(String(rows.filter(r=>set.has(r.id)).length));
-}catch(e){process.stdout.write("0")}
-' "$TARGET_DIR" 2>/dev/null)"
-    [[ "$swept" =~ ^[0-9]+$ ]] || swept=0
-  fi
-  pct=$(( (${nul:-0} + swept) * 100 / n ))
-  # Surface the window's age so a verdict describing a long-dead regime is
-  # self-evident rather than silently stale.
-  age="$(sqlite_count_safe "$db" "SELECT CAST((julianday('now')-julianday(MAX(completed_at)))*1440 AS INTEGER) FROM (SELECT completed_at FROM captured_experiences WHERE $graced ORDER BY completed_at DESC LIMIT 200);")"
-  local when="newest graced row ${age:-?}m old"
-  [[ "${swept:-0}" -gt 0 ]] && when="$when; ${swept} of them kit-swept (counted as lost — the sweep fills the column, it does not fix capture)"
-  # Report the EFFECTIVE lost count (NULL + kit-swept), not the raw NULL count —
-  # after a sweep the raw count is 0 while the capture path is just as broken,
-  # and "0 of 200 (100%)" reads like an instrument fault.
-  local lost=$(( ${nul:-0} + ${swept:-0} ))
-  if [[ "$pct" -ge 50 ]]; then
-    # Deliberately does NOT name sync/fix-aqe: the embedder is not the fault here
-    # and no kit verb repairs this. Naming one would be a false instruction.
-    bad "capture embed DEAD: ${lost} of ${n} graced rows (${pct}%) have NO vector — the capture hook's un-awaited embed loses its race with subprocess exit (bare catch{}, upstream), so these rows never carry a vector in the pool. Harvest can still derive at replay time; the pool column stays empty. ${when} (#15)"
-  elif [[ "$pct" -gt 2 ]]; then
-    soft "capture embed LEAKING: ${pct}% of the last ${n} graced rows have no vector (healthy is 0%) — partial vector loss, cause unresolved. ${when} (#15)"
+  local sandbox; sandbox="$(mktemp -d 2>/dev/null)" || { soft "capture-embed landing not assessable — could not create a sandbox [not-assessable] (#15)"; return; }
+  mkdir -p "$sandbox/.claude/hooks" "$sandbox/.agentic-qe" "$sandbox/node_modules"
+  # Copy the TARGET's own shim, not upstream's: a stale shim is a real defect
+  # (it silently discards stdin) and must be exercised, not bypassed.
+  cp "$hook" "$sandbox/.claude/hooks/aqe-hook.cjs" 2>/dev/null
+  ln -s "$bundle" "$sandbox/node_modules/agentic-qe" 2>/dev/null
+  printf 'daemonAutoStart: false\n' > "$sandbox/.agentic-qe/config.yaml"
+
+  # chdir INTO the sandbox before spawning. The hook creates an empty
+  # .agentic-qe in its CWD regardless of AQE_PROJECT_ROOT (the RVF-stray class
+  # from this kit's history) — run it anywhere else and the probe becomes the
+  # drift it exists to detect.
+  local i out
+  ( cd "$sandbox" || exit 1
+    for i in 1 2 3; do
+      printf '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/aqe-probe/w%s.ts"}}' "$i" \
+        | AQE_PROJECT_ROOT="$sandbox" CLAUDE_PROJECT_DIR="$sandbox" RUFLO_DAEMON_MODE=off \
+          node "$sandbox/.claude/hooks/aqe-hook.cjs" post-edit --file "" --success --json >/dev/null 2>&1 &
+    done
+    wait
+  ) >/dev/null 2>&1
+
+  local rows nul
+  rows="$(sqlite_count_safe "$sandbox/.agentic-qe/memory.db" "SELECT COUNT(*) FROM captured_experiences;")"
+  nul="$(sqlite_count_safe "$sandbox/.agentic-qe/memory.db" "SELECT COALESCE(SUM(CASE WHEN embedding IS NULL THEN 1 ELSE 0 END),0) FROM captured_experiences;")"
+  rm -rf "$sandbox" 2>/dev/null
+
+  # "No row" must NEVER mean "broken". AQE_HOOK_NPX=0 with no project-local
+  # bundle makes the shim exit 0 silently and write nothing at all — failing a
+  # host for one env var is exactly the defect class this probe replaces.
+  if [[ "${rows:-0}" -eq 0 ]]; then
+    soft "capture-embed landing not assessable — the hook wrote no capture row at all (shim no-op: no project-local bundle, AQE_HOOK_NPX=0, or the bundle never ran); nothing was exercised [not-assessable] (#15)"
+  elif [[ "${nul:-0}" -eq 0 ]]; then
+    ok "capture embeds LAND — ${rows}/${rows} driven hook captures carried a vector (exercised ${bundle#$base/}) (#15)"
   else
-    ok "capture embeds land: ${pct}% of the last ${n} graced rows lack a vector. ${when} (#15)"
+    bad "capture embed DEAD: ${nul} of ${rows} driven hook captures landed NO vector. The CLI calls process.exit(0) ~8-10ms after the capture INSERT while the un-awaited embed needs ~104ms+ cold, inside a bare catch{} — deterministic, not a race. Rows already in the pool may still LOOK fine: upstream's boot-triggered backfill repairs history indistinguishably. Fix is upstream (await the embed); bin/ruflo-kit embed-sweep backfills the damage. (#15)"
   fi
+}
+
+# Pool vector coverage — DELIBERATELY an INFO line, never a verdict.
+# This counts fills from ANY writer (capture, upstream's ExperienceReplay
+# backfill, ruflo-kit embed-sweep) and cannot attribute them, because a
+# backfilled vector is byte-identical to a captured one and nothing records
+# when an embedding was written. It is repair history, not capture health —
+# graded as a verdict it read "0% NULL, healthy" on a target losing 100%.
+probe_pool_vector_coverage() {
+  local db="$AQE_DB" tot vec pct
+  [[ -f "$db" ]] || return
+  table_exists "$db" captured_experiences || return
+  # consolidated_into is absent on older schemas — scope to it only when present,
+  # or the query errors out and the line silently vanishes.
+  local scope="1=1"
+  [[ "$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM pragma_table_info('captured_experiences') WHERE name='consolidated_into';")" -gt 0 ]] \
+    && scope="consolidated_into IS NULL"
+  tot="$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM captured_experiences WHERE $scope;")"
+  [[ "${tot:-0}" -eq 0 ]] && return
+  vec="$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM captured_experiences WHERE $scope AND embedding IS NOT NULL;")"
+  pct=$(( ${vec:-0} * 100 / tot ))
+  note "pool vector coverage: ${pct}% (${vec}/${tot} rows carry a vector) — counts fills from ANY writer and cannot attribute them; NOT evidence that capture works (see #15)"
 }
 
 # ── Probe #16: stored-vector provenance (STORED-VECTOR-PROVENANCE-V1) ────────
@@ -725,7 +733,8 @@ elif [[ "$SQLITE_BACKEND" == "node" ]]; then
   note "store reads via node better-sqlite3 fallback (sqlite3 CLI not installed)"
 fi
 probe_embedder_liveness
-probe_embed_outcome
+probe_capture_embed_landing
+probe_pool_vector_coverage
 probe_stored_vector_provenance
 probe_capture_diversity
 probe_reflexion_store

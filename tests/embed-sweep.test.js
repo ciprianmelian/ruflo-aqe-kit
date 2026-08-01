@@ -269,33 +269,70 @@ suite('EMBED-SWEEP-V1 — fills lost vectors, refuses when it should', () => {
   });
 });
 
-suite('EMBED-SWEEP-V1 — probe #15 cannot be laundered by the sweep', () => {
+suite('EMBED-SWEEP-V1 — the sweep cannot launder probe #15', () => {
   const many = (n, age) => Array.from({ length: n }, (_, i) => ({ id: `p${i}`, task: `job ${i}`, ageMinutes: age }));
 
-  function runVerify(proj) {
+  function verdict15(proj) {
     const r = spawnSync('bash', [VERIFY, proj], { encoding: 'utf8', timeout: 120000, env: { ...process.env } });
-    return (r.stdout || '') + (r.stderr || '');
+    const out = (r.stdout || '') + (r.stderr || '');
+    return (out.split('\n').find((l) => l.includes('(#15)')) || '');
   }
-  const line15 = (out) => (out.split('\n').find((l) => l.includes('(#15)')) || '');
 
-  it('THE CRUX: after a sweep fills every column, #15 still FAILs and says why', () => {
+  it('filling every column does not move #15 — it no longer reads the pool at all', () => {
+    // The original defence was a ledger marking kit-filled rows as still-lost,
+    // needed because #15 GRADED a column census. #15 is now behavioural
+    // (CAPTURE-EMBED-LANDING-V1): it drives real hooks in its own sandbox, so
+    // no amount of pool repair — by the sweep, or by upstream's boot-triggered
+    // backfill, which the ledger never covered — can touch its verdict.
     const proj = mkProject(many(200, 120));
-    expect(line15(runVerify(proj))).toMatch(/capture embed DEAD/);   // pre-sweep
+    const before = verdict15(proj);
 
     const r = runSweep(proj, mkStubBase('A'));
     expect(r.summary.written).toBe(200);
-    expect(nullCount(proj)).toBe(0);                                  // column IS full
+    expect(nullCount(proj)).toBe(0);            // column IS full now
 
-    const after = line15(runVerify(proj));
-    expect(after).toMatch(/capture embed DEAD/);                      // still failing
-    expect(after).toMatch(/kit-swept/);
-    expect(after).toMatch(/200 of 200/);                              // effective, not raw NULL
+    expect(verdict15(proj)).toBe(before);        // verdict byte-identical
   });
 
-  it('POSITIVE CONTROL: the same full column WITHOUT a sweep ledger PASSes', () => {
-    // Without this pair, a probe hardcoded to FAIL would satisfy the crux test.
-    const proj = mkProject(many(200, 120).map((r) => ({ ...r, embedded: 'A' })));
-    expect(fs.existsSync(path.join(proj, '.swarm', 'embed-sweep-state.json'))).toBe(false);
-    expect(line15(runVerify(proj))).toMatch(/capture embeds land/);
+  it('POSITIVE CONTROL: the harness can observe a #15 verdict changing at all', () => {
+    // Without this, the equality above is satisfied by a probe that emits the
+    // same string no matter what — including one that never runs.
+    const noShim = verdict15(mkProject(many(60, 120)));
+    const withHook = verdict15(mkHookSandboxLite());
+    expect(noShim).not.toBe(withHook);
+    expect(withHook).toMatch(/capture embed DEAD|capture embeds LAND|wrote no capture row/);
+  });
+
+  it('the sweep still records a ledger — it is the rollback record, not a probe input', () => {
+    const proj = mkProject(many(30, 120));
+    runSweep(proj, mkStubBase('A'));
+    const led = JSON.parse(fs.readFileSync(path.join(proj, '.swarm', 'embed-sweep-state.json'), 'utf8'));
+    expect(led.sweptIds).toHaveLength(30);
   });
 });
+
+/** Minimal target carrying a hook shim + un-awaited bundle, so #15 reaches a real verdict. */
+function mkHookSandboxLite() {
+  const t = mktmp('sweep-hook-');
+  fs.mkdirSync(path.join(t, '.claude', 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(t, '.claude', 'hooks', 'aqe-hook.cjs'), `
+const { spawnSync } = require('child_process');
+const path = require('path');
+spawnSync(process.execPath, [path.join(__dirname, '..', '..', 'node_modules', 'agentic-qe', 'bundle.js'), ...process.argv.slice(2)],
+  { stdio: ['inherit', 'pipe', 'pipe'], cwd: process.cwd() });
+`);
+  const b = path.join(t, 'node_modules', 'agentic-qe');
+  fs.mkdirSync(b, { recursive: true });
+  fs.writeFileSync(path.join(b, 'bundle.js'), `
+const Database = require(${JSON.stringify(BSQL)});
+const fs = require('fs'), path = require('path');
+const root = process.env.AQE_PROJECT_ROOT || process.cwd();
+fs.mkdirSync(path.join(root, '.agentic-qe'), { recursive: true });
+const db = new Database(path.join(root, '.agentic-qe', 'memory.db'));
+db.exec("CREATE TABLE IF NOT EXISTS captured_experiences (id TEXT PRIMARY KEY, task TEXT, agent TEXT, domain TEXT, success INTEGER, quality REAL, completed_at TEXT, consolidated_into TEXT, embedding BLOB, embedding_dimension INTEGER)");
+db.prepare("INSERT INTO captured_experiences (id,task,agent,domain,success,quality,completed_at) VALUES (?,?,?,?,1,0.9,datetime('now'))")
+  .run('h'+process.pid+Math.random(),'edit: probe','cli-hook','code');
+process.exit(0);
+`);
+  return t;
+}

@@ -126,67 +126,131 @@ function runVerify(target) {
 }
 const line = (out, tag) => (out.split('\n').find((l) => l.includes(tag)) || '');
 
-suite('probe #15 EMBED-OUTCOME-V1 — did the vector actually land', () => {
-  it('POSITIVE CONTROL: a fully-embedded graced pool PASSes (proves the probe reaches a verdict)', () => {
-    const out = runVerify(mkTarget({ rows: { count: 200, nullCount: 0, ageMinutes: 120 } }));
-    expect(line(out, '(#15)')).toMatch(/capture embeds land/);
+/**
+ * Probe #15 is now BEHAVIOURAL (CAPTURE-EMBED-LANDING-V1): it drives real hooks
+ * in a sandbox instead of censusing the pool. The census was replaced because it
+ * could not tell the truth — upstream's boot-triggered backfill repairs history
+ * indistinguishably (a backfilled vector is byte-identical to a captured one),
+ * so a clean census reports how recently a server booted, not whether capture
+ * works. Demonstrated during design: 98% pool coverage on a target losing 100%.
+ *
+ * Fixtures drive a STUB bundle, never the installed dist, so these tests do not
+ * quietly turn into not-assessable passes the day upstream fixes the defect.
+ */
+function mkHookSandbox({ awaitEmbed, writeRow = true, withShim = true, withBundle = true }) {
+  const t = mktmp('vleo-hook-');
+  if (withShim) {
+    fs.mkdirSync(path.join(t, '.claude', 'hooks'), { recursive: true });
+    // Minimal shim: spawn the bundle with stdin inherited, like the real one.
+    fs.writeFileSync(path.join(t, '.claude', 'hooks', 'aqe-hook.cjs'), `
+const { spawnSync } = require('child_process');
+const path = require('path');
+spawnSync(process.execPath, [path.join(__dirname, '..', '..', 'node_modules', 'agentic-qe', 'bundle.js'), ...process.argv.slice(2)],
+  { stdio: ['inherit', 'pipe', 'pipe'], cwd: process.cwd() });
+`);
+  }
+  if (withBundle) {
+    const b = path.join(t, 'node_modules', 'agentic-qe');
+    fs.mkdirSync(b, { recursive: true });
+    // The defect, reproduced literally: INSERT, fire an un-awaited embed, then
+    // process.exit(0). `awaitEmbed` is the ONLY difference between the teeth
+    // fixture and its positive control.
+    fs.writeFileSync(path.join(b, 'bundle.js'), `
+const Database = require(${JSON.stringify(BSQL)});
+const fs = require('fs'), path = require('path');
+const root = process.env.AQE_PROJECT_ROOT || process.cwd();
+fs.mkdirSync(path.join(root, '.agentic-qe'), { recursive: true });
+const db = new Database(path.join(root, '.agentic-qe', 'memory.db'));
+db.pragma('busy_timeout = 20000');
+db.exec("CREATE TABLE IF NOT EXISTS captured_experiences (id TEXT PRIMARY KEY, task TEXT, agent TEXT, domain TEXT, success INTEGER, quality REAL, completed_at TEXT, consolidated_into TEXT, embedding BLOB, embedding_dimension INTEGER)");
+const id = 'x' + process.pid + Math.random().toString(36).slice(2);
+${writeRow ? `db.prepare("INSERT INTO captured_experiences (id,task,agent,domain,success,quality,completed_at) VALUES (?,?,?,?,1,0.9,datetime('now'))").run(id,'edit: probe','cli-hook','code');` : ''}
+const embed = async () => {
+  await new Promise(r => setTimeout(r, 60));            // stands in for model load
+  const v = Float32Array.from({ length: 384 }, (_, i) => Math.sin(i + 1) + 1.5);
+  const m = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  const n = Float32Array.from(v, x => x / m);
+  try { db.prepare("UPDATE captured_experiences SET embedding=?, embedding_dimension=? WHERE id=?")
+          .run(Buffer.from(n.buffer), 384, id); } catch (e) {}
+};
+${awaitEmbed ? 'embed().then(() => process.exit(0));' : '(async () => { try { await embed(); } catch (e) {} })(); process.exit(0);'}
+`);
+  }
+  return t;
+}
+
+suite('probe #15 CAPTURE-EMBED-LANDING-V1 — drive the hook, assert the vector lands', () => {
+  it('POSITIVE CONTROL: a bundle that AWAITS the embed PASSes', () => {
+    const out = runVerify(mkHookSandbox({ awaitEmbed: true }));
+    expect(line(out, '(#15)')).toMatch(/capture embeds LAND/);
   });
 
-  it('TEETH: the same pool with vectors removed FAILs — one column is the whole difference', () => {
-    const out = runVerify(mkTarget({ rows: { count: 200, nullCount: 200, ageMinutes: 120 } }));
-    expect(line(out, '(#15)')).toMatch(/capture embed DEAD: 200 of 200 graced rows \(100%\)/);
+  it('TEETH: the same fixture with the embed un-awaited before exit FAILs', () => {
+    // One line differs from the control above — that is the upstream defect.
+    const out = runVerify(mkHookSandbox({ awaitEmbed: false }));
+    const l = line(out, '(#15)');
+    expect(l).toMatch(/capture embed DEAD/);
+    expect(l).toMatch(/deterministic, not a race/);
     expect(out).toMatch(/learning loop HOLLOW/);
   });
 
-  it('a partial-loss regime WARNs and does NOT reach the FAIL gate', () => {
-    // 15% — the real degraded target peaked at 29%, so the gate must not fire.
-    const out = runVerify(mkTarget({ rows: { count: 200, nullCount: 30, ageMinutes: 120 } }));
-    expect(line(out, '(#15)')).toMatch(/capture embed LEAKING: 15%/);
-  });
-
-  it('CRY-WOLF GUARD: 200 all-NULL rows INSIDE the grace window must not FAIL', () => {
-    // The embed is async-after and bursty (measured: ~30% NULL at 15-60min, then
-    // 0% four minutes later). Young NULLs are pending, not lost.
-    const out = runVerify(mkTarget({ rows: { count: 200, nullCount: 200, ageMinutes: 5 } }));
-    const l = line(out, '(#15)');
+  it('"no row written" is NOT assessable, never broken', () => {
+    // AQE_HOOK_NPX=0 with no local bundle makes the real shim exit 0 silently.
+    // Failing a host for that would be the exact defect this probe replaced.
+    const l = line(runVerify(mkHookSandbox({ awaitEmbed: false, writeRow: false })), '(#15)');
     expect(l).toMatch(/not assessable/);
-    expect(l).toMatch(/\[not-assessable\]/);
+    expect(l).toMatch(/wrote no capture row/);
     expect(l).not.toMatch(/capture embed DEAD/);
   });
 
-  it('POSITIVE CONTROL for the grace guard: the identical rows aged past 60m DO fail', () => {
-    // Without this pair, a probe that always took the not-assessable branch
-    // would satisfy the cry-wolf test above.
-    const out = runVerify(mkTarget({ rows: { count: 200, nullCount: 200, ageMinutes: 120 } }));
-    expect(line(out, '(#15)')).toMatch(/capture embed DEAD/);
+  it('a target with no hook shim is not assessable', () => {
+    const l = line(runVerify(mkHookSandbox({ awaitEmbed: true, withShim: false })), '(#15)');
+    expect(l).toMatch(/not assessable/);
+    expect(l).toMatch(/no \.claude\/hooks\/aqe-hook\.cjs/);
   });
 
-  it('sample-size edge: 49 graced rows is not-assessable, 50 all-NULL rows FAILs', () => {
-    const under = runVerify(mkTarget({ rows: { count: 49, nullCount: 49, ageMinutes: 120 } }));
-    expect(line(under, '(#15)')).toMatch(/only 49 row\(s\) past the 60m grace/);
-    const at = runVerify(mkTarget({ rows: { count: 50, nullCount: 50, ageMinutes: 120 } }));
-    expect(line(at, '(#15)')).toMatch(/capture embed DEAD/);
+  it('does NOT double-report #13: a dead embedder makes #15 not-assessable', () => {
+    // Without this gate a broken embedder reads as a capture defect and the
+    // operator fixes the wrong thing.
+    const t = mkHookSandbox({ awaitEmbed: false });
+    const badBase = mktmp('vleo-deademb-');
+    const d = path.join(badBase, 'agentic-qe', 'dist', 'learning');
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ type: 'module' }));
+    fs.writeFileSync(path.join(d, 'real-embeddings.js'),
+      `export async function computeRealEmbedding() { throw new Error('not installed'); }\n`);
+    const r = spawnSync('bash', [VERIFY, t], {
+      encoding: 'utf8', timeout: 120000, env: { ...process.env, KIT_VL_AQE_BASE: badBase },
+    });
+    const out = (r.stdout || '') + (r.stderr || '');
+    expect(line(out, '(#13)')).toMatch(/embedder DEAD/);
+    const l15 = line(out, '(#15)');
+    expect(l15).toMatch(/not assessable/);
+    expect(l15).not.toMatch(/capture embed DEAD/);
   });
 
-  it('names no false remedy — no kit verb repairs this fault', () => {
-    const out = runVerify(mkTarget({ rows: { count: 200, nullCount: 200, ageMinutes: 120 } }));
-    const l = line(out, '(#15)');
-    expect(l).not.toMatch(/ruflo-kit sync|fix-aqe/);
-    expect(l).toMatch(/upstream/);
+  it('ISOLATION: leaves no .agentic-qe outside its own sandbox', () => {
+    const t = mkHookSandbox({ awaitEmbed: false });
+    runVerify(t);
+    // The hook creates .agentic-qe in its CWD regardless of AQE_PROJECT_ROOT,
+    // so the probe must chdir into its sandbox or it becomes the drift.
+    expect(fs.existsSync(path.join(REPO, '.agentic-qe', 'memory.db-probe'))).toBe(false);
+    // The sandbox the probe fires in is its own mktemp dir, not the target.
+    expect(fs.existsSync(path.join(t, '.agentic-qe', 'memory.db'))).toBe(false);
   });
 
-  it('distinguishes absent store / absent table / pre-embedding schema by REASON', () => {
-    expect(line(runVerify(mkTarget({ noDb: true })), '(#15)')).toMatch(/no AQE store/);
-    expect(line(runVerify(mkTarget({ noTable: true, patterns: { count: 0, proxyCount: 0 } })), '(#15)'))
-      .toMatch(/captured_experiences table absent/);
-    expect(line(runVerify(mkTarget({ rows: { count: 60, nullCount: 0, ageMinutes: 120 }, noEmbedCol: true })), '(#15)'))
-      .toMatch(/pre-embedding schema/);
+  it('is deterministic across runs — proof runs verify-learning twice', () => {
+    const t = mkHookSandbox({ awaitEmbed: false });
+    const a = line(runVerify(t), '(#15)').replace(/\d+ of \d+/, 'N of N');
+    const b = line(runVerify(t), '(#15)').replace(/\d+ of \d+/, 'N of N');
+    expect(a).toBe(b);
   });
 
-  it('a corrupt store reports UNREADABLE, not "table absent"', () => {
-    // Openability must be probed BEFORE table existence, or a corrupt file
-    // yields an empty sqlite_master query and the probe blames the wrong thing.
-    expect(line(runVerify(mkTarget({ corrupt: true })), '(#15)')).toMatch(/store unreadable/);
+  it('pool coverage is reported as INFO, explicitly not as capture evidence', () => {
+    const out = runVerify(mkTarget({ rows: { count: 60, nullCount: 0, ageMinutes: 120 } }));
+    const l = out.split('\n').find((x) => x.includes('pool vector coverage')) || '';
+    expect(l).toMatch(/cannot attribute them/);
+    expect(l).toMatch(/NOT evidence that capture works/);
   });
 });
 
