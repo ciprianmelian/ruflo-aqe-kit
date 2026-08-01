@@ -1274,14 +1274,29 @@ is_stray_aqe_dir() {
 
 # find_stray_aqe_dirs <target> -> prints one stray dir (absolute) per line. Excludes
 # the canonical root, node_modules, and any vendored agentic-qe source clone.
+#
+# FIND-PRUNE-V1 (issue #8): the exclusions MUST be a -prune, never a `-not -path`
+# post-match filter. `-not -path '*/node_modules/*'` only drops matches from the
+# RESULTS — find still descends through every node_modules in full. On a monorepo
+# with several worktrees each carrying independent node_modules that is millions of
+# stat() calls; the reporter measured >10 minutes on a WSL2 9p mount, stuck in
+# uninterruptible D-state so it could not even be Ctrl-C'd. `-prune` cuts the
+# subtree before descending, making the cost independent of node_modules size.
+#
+# The pattern is `-path '*/node_modules'` (the dir ITSELF), not '*/node_modules/*'
+# (its contents) and not `-name node_modules`. Verified identical to the old result
+# set on BSD find, GNU findutils 4.10.0 and bfs 4.1.1 — including that a .agentic-qe
+# nested inside a pruned dir stays excluded, and that `-name` is NOT a substitute
+# (it would prune a root spelled as a bare relative `node_modules`, which the old
+# filter deliberately kept, since '*/node_modules/*' needs a leading slash).
 find_stray_aqe_dirs() {
   local target="$1" d
   while IFS= read -r d; do
     [[ "$d" == "$target/.agentic-qe" ]] && continue            # canonical root, never a stray
     is_stray_aqe_dir "$d" && echo "$d"
-  done < <(find "$target" -type d -name '.agentic-qe' \
-             -not -path '*/node_modules/*' \
-             -not -path '*/agentic-qe-src/*' 2>/dev/null)
+  done < <(find "$target" \
+             \( -path '*/node_modules' -o -path '*/agentic-qe-src' \) -prune \
+             -o -type d -name '.agentic-qe' -print 2>/dev/null)
 }
 
 # sweep_stray_aqe_dirs <target> <mode>   mode: list | remove

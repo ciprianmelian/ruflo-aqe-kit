@@ -114,7 +114,9 @@ cleanup_pass() {
     else
       warn "WOULD remove stray store: $f  (re-run with --cleanup --confirm)"
     fi
-  done < <(find ./vendor ./.claude -name '*.db' -not -path '*/node_modules/*' 2>/dev/null)
+  done < <(find ./vendor ./.claude \
+             \( -path '*/node_modules' \) -prune \
+             -o -name '*.db' -print 2>/dev/null)   # FIND-PRUNE-V1 (issue #8): prune, don't post-filter
   if [[ "$found" -eq 0 ]]; then
     pass "no stray stores under vendor/ or .claude/"
   elif [[ "$confirm" -eq 1 ]]; then
