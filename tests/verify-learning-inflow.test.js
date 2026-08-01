@@ -65,12 +65,33 @@ function goodDistSrc() {
   fs.writeFileSync(path.join(d, 'mcp-tools', 'hooks-tools.js'), '// RUFLO-LORA-ADAPT-V1\n');
   return d;
 }
+// Probe #13 (EMBEDDER-LIVENESS-V1) DRIVES a real embedder. Pinned to a stub so
+// this file's exact counts do not depend on whether the HOST happens to have
+// @huggingface/transformers installed.
+let _embStub = null;
+function embedderStub() {
+  if (_embStub) return _embStub;
+  _embStub = fs.mkdtempSync(path.join(os.tmpdir(), 'vlinflow-emb-'));
+  const d = path.join(_embStub, 'agentic-qe', 'dist', 'learning');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ type: 'module' }));
+  fs.writeFileSync(path.join(d, 'real-embeddings.js'), `
+export async function computeRealEmbedding() {
+  const n = 384, v = new Array(n);
+  for (let i = 0; i < n; i++) v[i] = Math.sin((i + 1) * 7.13) + 0.5;
+  const m = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  return v.map((x) => x / m);
+}
+`);
+  return _embStub;
+}
+
 function runVerify(target, extra = []) {
   const b = stubBin();
   const dist = goodDistSrc();
   const r = spawnSync('bash', [VERIFY, target, ...extra], {
     encoding: 'utf8', timeout: 20000,
-    env: { ...process.env, PATH: `${b}:${process.env.PATH}`, KIT_RUFLO_DIST_SRC: dist },
+    env: { ...process.env, PATH: `${b}:${process.env.PATH}`, KIT_RUFLO_DIST_SRC: dist, KIT_VL_AQE_BASE: embedderStub() },
   });
   fs.rmSync(b, { recursive: true, force: true });
   fs.rmSync(dist, { recursive: true, force: true });
@@ -170,7 +191,9 @@ describe('probe #12 capture-arm inflow (INFLOW-LIVENESS-V1)', () => {
   test('HERMETICITY: pins the exact info count and the absence of any daemon note (teeth for the pgrep stub)', () => {
     const d = mkTarget({ pool: 0, settings: RUFLO_ONLY });
     const j = parseJson(runVerify(d, ['--json']).stdout);
-    expect(j.info).toBe(6);
+    // 6 -> 7: probe #14 (CAPTURE-DIVERSITY-V1) emits one not-assessable note on
+    // this fixture's empty pool (needs >=50 eligible rows to judge diversity).
+    expect(j.info).toBe(7);
     const human = runVerify(d).stdout;
     expect(human).not.toMatch(/running for THIS target|running for a DIFFERENT workspace|no --workspace visible in argv/);
   });

@@ -85,9 +85,31 @@ function mkDistSrc({ sona = true, lora = true } = {}) {
   return d;
 }
 
+// Probe #13 (EMBEDDER-LIVENESS-V1) DRIVES a real embedder. Left to resolve
+// `npm root -g`, its verdict — and therefore this file's pinned counts — would
+// depend on whether the host happens to have @huggingface/transformers. Pin it
+// to a stub that returns a dense unit vector so the count stays deterministic.
+let _embStub = null;
+function embedderStub() {
+  if (_embStub) return _embStub;
+  _embStub = fs.mkdtempSync(path.join(os.tmpdir(), 'vlseam-emb-'));
+  const d = path.join(_embStub, 'agentic-qe', 'dist', 'learning');
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ type: 'module' }));
+  fs.writeFileSync(path.join(d, 'real-embeddings.js'), `
+export async function computeRealEmbedding() {
+  const n = 384, v = new Array(n);
+  for (let i = 0; i < n; i++) v[i] = Math.sin((i + 1) * 7.13) + 0.5;
+  const m = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  return v.map((x) => x / m);
+}
+`);
+  return _embStub;
+}
+
 function runVerify(target, distSrc, extra = []) {
   const b = stubBin();
-  const env = { ...process.env, PATH: `${b}:${process.env.PATH}` };
+  const env = { ...process.env, PATH: `${b}:${process.env.PATH}`, KIT_VL_AQE_BASE: embedderStub() };
   if (distSrc === null) {
     // Force not-assessable: point at a path with no dist files.
     env.KIT_RUFLO_DIST_SRC = path.join(os.tmpdir(), 'vlseam-nonexistent-' + Date.now());
@@ -132,7 +154,9 @@ describe('verify-learning #11: sona-seam sentinels (SEAM-SENTINEL-V1)', () => {
   it('HERMETICITY: pins the exact info count and the absence of any daemon note (teeth for the pgrep stub)', () => {
     const dist = mkDistSrc({ sona: true, lora: true });
     const j = parseJson(runVerify(target, dist, ['--json']).stdout);
-    expect(j.info).toBe(2);
+    // 2 -> 3: probe #14 (CAPTURE-DIVERSITY-V1) emits one not-assessable note on
+    // this fixture's empty pool (needs >=50 eligible rows to judge diversity).
+    expect(j.info).toBe(3);
     const human = runVerify(target, dist).stdout;
     expect(human).not.toMatch(/running for THIS target|running for a DIFFERENT workspace|no --workspace visible in argv/);
     fs.rmSync(dist, { recursive: true, force: true });

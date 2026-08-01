@@ -166,7 +166,14 @@ suite('HARVEST-EMBED-V1 — vecless rows train Sink A via a harvest-time derived
     expect(lora.calls).toEqual([{ dim: DIM, q: 0.9 }, { dim: DIM, q: 0.9 }]);
   });
 
-  it('degrades the vecless row to SinkB-only when the embedder is unavailable (pre-V1 behavior)', () => {
+  // Crash-safety coverage ONLY: a harvest must not die on a missing embedder.
+  // It deliberately does NOT assert that this is an acceptable steady state —
+  // for seven weeks a permanently dead embedder produced a fully green suite
+  // because nothing anywhere asserted the non-degraded state. What asserts it
+  // now: verify-learning probe #13 (EMBEDDER-LIVENESS-V1), which drives the
+  // embedder and fails on a dead one; and the vecless row is no longer BURNED
+  // by the ledger either (HARVEST-LEDGER-V2, tests/harvest-ledger-v2.test.js).
+  it('degrades the vecless row to SinkB-only when the embedder is unavailable — degraded path, NOT an acceptable steady state', () => {
     const base = mkStubBase({ withEmbedder: false });
     const proj = mkProject([
       { id: 'has-vec', task: 'edit: a.ts', quality: 0.9, embedding: vec(0.5) },

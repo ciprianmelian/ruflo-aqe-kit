@@ -230,6 +230,113 @@ probe_seam_sentinels() {
 # much newer than the last capture suggest the hooks fire but never land
 # (timeout/npx cold-start class) → WARN, never FAIL (a chat-only session
 # legitimately captures nothing).
+# ── Probe #13: in-process embedder liveness (EMBEDDER-LIVENESS-V1) ───────────
+# DRIVE the embedder and classify the vector's GEOMETRY. Every cheaper proxy is
+# a check that cannot tell:
+#   · require.resolve  — a resolvable package with a broken native binding still
+#                        yields dead embeddings
+#   · isTransformerAvailable() — a latch that reads false before AND after failure
+#   · the stored `model` column — it says all-MiniLM-L6-v2 even for hash-proxy rows
+#   · dimension_guard  — a hash proxy is exactly 384-dim and exactly 1536 bytes
+# The one assertion that survives all of those is "a real dense vector came back".
+# cosVsHash is the discriminator that catches the SILENT hash-proxy substitution:
+# the fallback is deterministic, so we recompute it locally (embedding-utils.js's
+# 3-pass sin/charCode loop) and compare. Measured separation on a healthy host:
+# nzFrac 1.00 / cosVsHash -0.017, versus hash-proxy nzFrac 0.63-0.77 /
+# cosVsHash 0.995-0.9997. Not knife-edge.
+# KIT_VL_AQE_BASE overrides the base so a falsification fixture can prove teeth
+# without uninstalling the package (KIT_HARVEST_NODE_BASE precedent).
+probe_embedder_liveness() {
+  local base rejs out state detail
+  base="${KIT_VL_AQE_BASE:-$(npm root -g 2>/dev/null)}"
+  rejs="$base/agentic-qe/dist/learning/real-embeddings.js"
+  if [[ -z "$base" || ! -f "$rejs" ]]; then
+    soft "embedder not assessable — agentic-qe real-embeddings.js absent (${rejs:-<unresolved>}) [not-assessable] (#13)"
+    return
+  fi
+  out="$(node -e '
+// 60s, not 25s: a WARM embedder answers in ~60ms and a DEAD one throws
+// instantly, so this budget is never the thing being measured — it exists only
+// for a cold model load. Too tight and the probe flips healthy/not-assessable
+// under parallel-suite CPU contention, which turns proof x2 UNSTABLE for a
+// reason that has nothing to do with the embedder.
+const T=60000, TEXT="probe: embedder liveness";
+// real-embeddings.js console.logs "[RealEmbeddings] Loading model: ..." on its
+// own stdout. Left alone, that becomes the first token and the verdict parse
+// below reads it as the state — a healthy embedder would report not-assessable.
+// Keep stdout for the verdict ONLY; diagnostics go to stderr.
+for (const k of ["log","info","warn","debug"]) console[k]=(...a)=>{try{process.stderr.write(a.join(" ")+"\n")}catch(e){}};
+const run=(async()=>{
+  const m=await import("file://"+process.argv[1]);
+  if(typeof m.computeRealEmbedding!=="function") return ["not-assessable","module exports no computeRealEmbedding"];
+  const v=await m.computeRealEmbedding(TEXT);
+  if(!v||!v.length) return ["broken","embedder returned an empty vector"];
+  const a=Array.from(v), n=a.length;
+  const nz=a.filter(x=>x!==0).length/n;
+  const norm=Math.sqrt(a.reduce((s,x)=>s+x*x,0));
+  const h=new Array(n).fill(0), s=TEXT.toLowerCase().trim();
+  for(let p=0;p<3;p++) for(let i=0;i<s.length;i++){const c=s.charCodeAt(i);h[(c*(i+1)*(p+1))%n]+=Math.sin(c*(p+1))/(i+1);}
+  const hn=Math.sqrt(h.reduce((t,x)=>t+x*x,0))||1;
+  let d=0; for(let i=0;i<n;i++) d+=a[i]*(h[i]/hn);
+  const cos=norm?d/norm:0;
+  const st=`dim=${n} nzFrac=${nz.toFixed(3)} norm=${norm.toFixed(4)} cosVsHash=${cos.toFixed(4)}`;
+  if(norm===0||nz===0) return ["broken","all-zero vector ("+st+")"];
+  if(cos>0.99) return ["broken","HASH-PROXY fallback, not MiniLM ("+st+")"];
+  if(n!==384) return ["broken","unexpected dimension ("+st+")"];
+  if(nz<0.95) return ["broken","sparse vector ("+st+")"];
+  return ["healthy",st];
+})();
+Promise.race([run,new Promise(r=>setTimeout(()=>r(["not-assessable","timed out after "+T+"ms"]),T))])
+ .then(o=>{process.stdout.write(o[0]+" "+o[1]);process.exit(0)})
+ .catch(e=>{process.stdout.write("broken "+String((e&&e.message)||e).replace(/\s+/g," ").slice(0,220));process.exit(0)});
+' "$rejs" 2>/dev/null)"
+  # Belt and braces: take the LAST stdout line, so any stray print that still
+  # escapes cannot displace the verdict.
+  out="$(printf '%s' "$out" | tail -1)"
+  state="${out%% *}"; detail="${out#* }"
+  case "$state" in
+    healthy) ok "in-process embedder LIVE — $detail (#13)" ;;
+    broken)  bad "in-process embedder DEAD: $detail — capture rows will carry NULL or fake vectors and every downstream store degrades silently. Heal: bin/ruflo-kit sync $TARGET_DIR (AQE-EMBEDDER-RESOLVE-V1) (#13)" ;;
+    *)       soft "embedder not assessable — ${detail:-no verdict from probe} [not-assessable] (#13)" ;;
+  esac
+}
+
+# ── Probe #14: capture input diversity (CAPTURE-DIVERSITY-V1) ────────────────
+# A healthy embedder is NOT sufficient: a stale .claude/hooks/aqe-hook.cjs that
+# spawns with stdio ['ignore',...] discards the stdin the CLI's file-path
+# fallback needs, so every captured row lands as the content-free string
+# "<domain>: edit: " with the path missing. Observed: 3137 of 3139 eligible rows
+# identical on one target, which trained its LoRA 5611 times on ~1 direction
+# (25x this repo's adaptation-norm sum, 43x its max |B|).
+# Measured over the EXACT embedding recipe text, since two rows with different
+# `task` can still collapse to one vector. Healthy baseline here: modeShare
+# 0.087-0.200. Broken target: 0.9994. Thresholds sit 3x above healthy and well
+# below broken. The stale-shim grep is a HINT in the message, never the
+# assertion — modeShare is the property.
+probe_capture_diversity() {
+  local n mode share pct empty_mode
+  n="$(sqlite_count_safe "$AQE_DB" "SELECT COUNT(*) FROM (SELECT 1 FROM captured_experiences WHERE success=1 AND quality>=0.7 ORDER BY rowid DESC LIMIT 200);")"
+  if [[ "${n:-0}" -lt 50 ]]; then
+    note "capture diversity not assessable — only ${n:-0} eligible rows (need 50) [not-assessable] (#14)"
+    return
+  fi
+  mode="$(sqlite_count_safe "$AQE_DB" "SELECT MAX(c) FROM (SELECT COUNT(*) c FROM (SELECT domain,task FROM captured_experiences WHERE success=1 AND quality>=0.7 ORDER BY rowid DESC LIMIT 200) GROUP BY domain||': '||task);")"
+  [[ -z "$mode" || "$mode" -le 0 ]] && { note "capture diversity not assessable — mode query returned nothing [not-assessable] (#14)"; return; }
+  pct=$(( mode * 100 / n ))
+  # An empty-payload mode (recipe text ending in ':' — the stale-shim signature)
+  # is never legitimate, so it trips well below the general gate.
+  empty_mode="$(sqlite_count_safe "$AQE_DB" "SELECT COUNT(*) FROM (SELECT domain,task FROM captured_experiences WHERE success=1 AND quality>=0.7 AND trim(domain||': '||task) LIKE '%:' ORDER BY rowid DESC LIMIT 200);")"
+  if [[ "${empty_mode:-0}" -gt 0 ]] && [[ $(( empty_mode * 100 / n )) -gt 30 ]]; then
+    bad "capture payload EMPTY in $(( empty_mode * 100 / n ))% of the last $n rows — the recipe text ends at ':' with no file path, so they all embed to ONE vector and collapse Sink A. Likely a stale .claude/hooks/aqe-hook.cjs spawning with stdio ['ignore',...] (upstream uses ['inherit','pipe','pipe']), which discards the stdin the file-path fallback reads. Heal: bin/ruflo-kit fix-aqe $TARGET_DIR (#14)"
+  elif [[ "$pct" -gt 60 ]]; then
+    bad "capture diversity COLLAPSED — one text is ${pct}% of the last $n eligible rows; Sink A would train repeatedly on a single vector (#14)"
+  elif [[ "$pct" -ge 35 ]]; then
+    soft "capture diversity low — one text is ${pct}% of the last $n eligible rows (healthy is <35%) (#14)"
+  else
+    ok "capture inputs diverse — most common text is ${pct}% of the last $n eligible rows (#14)"
+  fi
+}
+
 probe_capture_inflow() {
   local pool wired=0 exp_ts gap_h
   pool="$(count_tbl "$AQE_DB" captured_experiences)"
@@ -456,6 +563,8 @@ if [[ "$SQLITE_BACKEND" == "none" ]]; then
 elif [[ "$SQLITE_BACKEND" == "node" ]]; then
   note "store reads via node better-sqlite3 fallback (sqlite3 CLI not installed)"
 fi
+probe_embedder_liveness
+probe_capture_diversity
 probe_reflexion_store
 probe_lora_backend
 probe_seam_sentinels

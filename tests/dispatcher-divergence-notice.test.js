@@ -345,7 +345,10 @@ describe('B20: teeth — neither the notice nor the refusal existed before this 
   it('the same bench divergence was NOT refused under the pre-change dispatcher — it actually ran and WROTE selfimprove-history.jsonl into the ambient cwd', () => {
     const { target, other, home } = freshWorld();
     const before = snapshotTree(target);
-    run(OLD_KIT, ['bench', '--json', other], { cwd: target, home, timeout: 15000 });
+    // 60s, not 15s: this asserts that a REAL mutation happened, so a timeout
+    // fails it for a reason unrelated to the property. 15s was marginal (~9s
+    // isolated) and tipped over under full-suite parallel load.
+    run(OLD_KIT, ['bench', '--json', other], { cwd: target, home, timeout: 60000 });
     const after = snapshotTree(target);
     expect(after).not.toEqual(before); // real mutation happened
     expect(fs.existsSync(path.join(target, '.claude-flow', 'selfimprove-history.jsonl'))).toBe(true);

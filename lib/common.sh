@@ -139,7 +139,12 @@ KIT_AGENTDB_CONTROLLERS=23              # controller classes the nested alpha.10
 # (project installs reject it with EALLOWSCRIPTS — Patch 54). Dual gate makes
 # this self-retiring by construction: the version must be new enough to need it
 # AND the installed npm must actually document the flag.
-KIT_NPM_ALLOW_LIST="better-sqlite3,sqlite3"   # only boot-path native builds
+# onnxruntime-node/sharp are here for AQE-EMBEDDER-RESOLVE-V1: onnxruntime-node's
+# postinstall FETCHES the native libonnxruntime dylib. Blocked, the package still
+# RESOLVES and dies at first inference — a silent-embeddings failure identical to
+# the one that step exists to fix, so the allowlist gap would have re-created it
+# on any npm >=11.17 host.
+KIT_NPM_ALLOW_LIST="better-sqlite3,sqlite3,onnxruntime-node,sharp"   # boot-path + embedder natives
 npm_wants_allow_scripts() {
   local v; v="$(npm --version 2>/dev/null | tr -d '[:space:]')"
   [[ -n "$v" ]] || return 1
@@ -1334,6 +1339,16 @@ _kit_cache_sync() {  # <src-dir> <dst-dir> — merge-update copy; exit 1 if src 
 }
 kit_preserve_model_caches() {  # live package caches → vault. Echoes: PRESERVED:n
   local gnm n=0; gnm="$(npm root -g 2>/dev/null)" || { echo "PRESERVED:0"; return 0; }
+  # AQE-EMBEDDER-RESOLVE-V1 installs @huggingface/transformers TOP-LEVEL (the dep
+  # is devDependencies-only upstream, so it is never nested under agentic-qe).
+  # Before that step existed this vault knew only the nested path, which cannot
+  # exist — so the ONE cache actually on disk (ruflo's, via agentdb's optional
+  # dep) was never preserved. Sweep every real location; hf-v3 is one namespace
+  # because all of them are the same v3+ layout for the same model.
+  _kit_cache_sync "$gnm/@huggingface/transformers/.cache" \
+                  "$(kit_model_vault)/hf-v3" && n=$((n+1))
+  _kit_cache_sync "$gnm/ruflo/node_modules/@huggingface/transformers/.cache" \
+                  "$(kit_model_vault)/hf-v3" && n=$((n+1))
   _kit_cache_sync "$gnm/agentic-qe/node_modules/@huggingface/transformers/.cache" \
                   "$(kit_model_vault)/hf-v3" && n=$((n+1))
   _kit_cache_sync "$gnm/ruflo/node_modules/@xenova/transformers/.cache/Xenova" \
@@ -1342,11 +1357,18 @@ kit_preserve_model_caches() {  # live package caches → vault. Echoes: PRESERVE
 }
 kit_restore_model_caches() {   # vault → freshly-installed package caches. Echoes: RESTORED:n
   local gnm n=0; gnm="$(npm root -g 2>/dev/null)" || { echo "RESTORED:0"; return 0; }
+  local top="$gnm/@huggingface/transformers"
   local aqe="$gnm/agentic-qe/node_modules/@huggingface/transformers"
   local ruf="$gnm/ruflo/node_modules/@xenova/transformers"
   # Restore only into packages that exist (never mkdir a package dir), and only
   # from the matching vault namespace (v2/v3 layouts are similar but not mixed).
-  [[ -d "$aqe" ]] && _kit_cache_sync "$(kit_model_vault)/hf-v3"  "$aqe/.cache" && n=$((n+1))
-  [[ -d "$ruf" ]] && _kit_cache_sync "$(kit_model_vault)/Xenova" "$ruf/.cache/Xenova" && n=$((n+1))
+  # -d follows symlinks, so a SYMLINKED package dir passes the gate and we would
+  # rsync through it into a tree the kit does not own (bytes another package's
+  # upgrade then silently deletes). Own-the-target check: restore only into a
+  # real directory. Never restore into ruflo's @huggingface copy for the same
+  # reason — it belongs to agentdb's optional dep, not to us.
+  [[ -d "$top" && ! -L "$top" ]] && _kit_cache_sync "$(kit_model_vault)/hf-v3"  "$top/.cache" && n=$((n+1))
+  [[ -d "$aqe" && ! -L "$aqe" ]] && _kit_cache_sync "$(kit_model_vault)/hf-v3"  "$aqe/.cache" && n=$((n+1))
+  [[ -d "$ruf" && ! -L "$ruf" ]] && _kit_cache_sync "$(kit_model_vault)/Xenova" "$ruf/.cache/Xenova" && n=$((n+1))
   echo "RESTORED:$n"
 }

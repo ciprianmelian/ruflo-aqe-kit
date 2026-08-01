@@ -812,6 +812,139 @@ else
   pass "exit(1) defect not found in pre-bash block — nothing to heal (self-retired)"
 fi
 
+# ── Step 8b: in-process embedder resolvability (AQE-EMBEDDER-RESOLVE-V1) ─────
+# agentic-qe's real-embeddings.js does `await import('@huggingface/transformers')`
+# in its in-process branch, but agentic-qe declares that package in
+# devDependencies ONLY — and `npm i -g` never installs devDeps. So on a stock
+# global install the import ALWAYS fails and in-process embeddings are dead.
+#
+# The failure is silent, which is why it ran for weeks unnoticed: the caller
+# (ensurePatternEmbedding) swallows the throw at console.debug, so experience
+# rows keep landing while their embedding column stays NULL. Measured on the
+# 2026-08-01 gauntlet target: 2026-06 = 977 rows / 0 NULL, 2026-08 = 236 rows /
+# 236 NULL, i.e. 100% dead with every instrument still green.
+#
+# Heal by installing the package TOP-LEVEL in the global root. agentic-qe
+# resolves it via the ancestor walk (<npm-root>/.. -> <npm-root>), and unlike a
+# nested copy or a symlink into ruflo's tree, a top-level sibling is untouched by
+# `npm i -g agentic-qe` AND `npm i -g ruflo` — so it never needs re-assertion.
+#
+# ASSERT THE PROPERTY, NOT THE ARTIFACT: the probe asks "can agentic-qe resolve
+# it?", never "does directory X exist?". If upstream ever promotes the dep to
+# dependencies/optionalDependencies, npm installs it nested, nested wins the
+# resolution, the probe passes and this step no-ops forever — self-retiring by
+# construction (defect_gate spirit).
+#
+# MONOTONE: this step only ever ADDS. It never removes a copy it did not create
+# and never tears down one layout to impose another — a step that enforced a
+# preferred layout could flip-flop between nested and top-level on every run.
+#
+# SECURITY NOTE (deliberate override, do not silently revert): upstream withholds
+# this dep on purpose (#565) because onnxruntime-node pulls adm-zip <0.6.0,
+# GHSA-xcpc-8h2w-3j85. The kit re-enables it knowingly. Verified mitigation: that
+# exact chain (onnxruntime-node -> adm-zip 0.5.18) is ALREADY installed and
+# loaded on any ruflo host via agentdb's optional dep, so this adds no new
+# exposure class; adm-zip is used at install time to unpack a Microsoft-CDN
+# archive, not attacker-controlled input. Revisit if onnxruntime-node's range
+# moves past adm-zip 0.6.0.
+KIT_HF_TRANSFORMERS_MIN="4.2.0"   # FLOOR, never equality (KIT_AGENTDB_HOISTED_MIN precedent)
+header "8b" "AQE in-process embedder resolvable (AQE-EMBEDDER-RESOLVE-V1)"
+GNM_EMB="$(npm root -g 2>/dev/null)"
+RE_JS="$GNM_EMB/agentic-qe/dist/learning/real-embeddings.js"
+# Resolve FROM real-embeddings.js itself — the importer's location is what Node
+# uses, so this is the same question the failing import asks.
+_emb_resolves() {
+  [[ -f "$RE_JS" ]] || return 1
+  node -e 'require("module").createRequire(process.argv[1]).resolve("@huggingface/transformers")' \
+       "$RE_JS" >/dev/null 2>&1
+}
+# Echoes "<pkg-dir>\t<version>" for the copy agentic-qe actually resolves; rc 1 if
+# undeterminable. NB: `resolve("@huggingface/transformers/package.json")` is NOT
+# usable — the package's exports map denies that subpath (ERR_PACKAGE_PATH_NOT_
+# EXPORTED), which silently yielded an empty version and skipped the floor check
+# entirely on first write of this step. Walk up from the resolved ENTRY instead,
+# and confirm the manifest's name matches so we cannot land on a parent package.
+_emb_pkg_info() {
+  [[ -f "$RE_JS" ]] || return 1
+  node -e '
+const {createRequire}=require("module"),path=require("path"),fs=require("fs");
+let d;try{d=path.dirname(createRequire(process.argv[1]).resolve("@huggingface/transformers"))}catch(e){process.exit(1)}
+for(let i=0;i<8;i++){
+  const p=path.join(d,"package.json");
+  if(fs.existsSync(p)){try{const j=JSON.parse(fs.readFileSync(p,"utf8"));
+    if(j.name==="@huggingface/transformers"){process.stdout.write(d+"\t"+(j.version||""));process.exit(0)}}catch(e){}}
+  const up=path.dirname(d); if(up===d) break; d=up;
+}
+process.exit(1);' "$RE_JS" 2>/dev/null
+}
+if [[ -z "$GNM_EMB" || ! -f "$RE_JS" ]]; then
+  pass "agentic-qe real-embeddings.js not installed — nothing to assert (self-retired)"
+elif _emb_resolves; then
+  EMB_INFO="$(_emb_pkg_info)"; EMB_DIR="${EMB_INFO%%$'\t'*}"; EMB_VER="${EMB_INFO##*$'\t'}"
+  if [[ -z "$EMB_VER" ]]; then
+    # Third state, spoken aloud: resolvable but the manifest could not be read, so
+    # the floor is UNVERIFIED. Never let "could not tell" print as a floor pass.
+    warn "in-process embedder resolvable but version undeterminable — floor $KIT_HF_TRANSFORMERS_MIN NOT verified"
+  elif aqe_semver_lt "$EMB_VER" "$KIT_HF_TRANSFORMERS_MIN"; then
+    warn "embedder resolves but v$EMB_VER < floor $KIT_HF_TRANSFORMERS_MIN — upgrading"
+    kit_npm_global_install "@huggingface/transformers@^$KIT_HF_TRANSFORMERS_MIN" \
+      && fix "embedder upgraded to floor (AQE-EMBEDDER-RESOLVE-V1)" \
+      || warn "embedder upgrade failed — in-process embeddings may be degraded"
+  else
+    pass "in-process embedder resolvable (v$EMB_VER) — ${EMB_DIR#$GNM_EMB/}"
+  fi
+elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+  info "[dry-run] would: npm install -g @huggingface/transformers@^$KIT_HF_TRANSFORMERS_MIN (in-process embeddings currently DEAD)"
+else
+  warn "in-process embedder UNRESOLVABLE from agentic-qe — embeddings are silently dead"
+  if kit_npm_global_install "@huggingface/transformers@^$KIT_HF_TRANSFORMERS_MIN" && _emb_resolves; then
+    fix "in-process embedder installed top-level and now resolves (AQE-EMBEDDER-RESOLVE-V1)"
+    pass "embedder healed — capture rows will carry vectors again"
+  else
+    warn "embedder install did not make it resolvable — in-process embeddings stay dead (see ${KIT_NPM_LOG:-/tmp/ruflo-kit-npm-global.log})"
+  fi
+fi
+
+# ── Step 8c: capture hook shim currency (AQE-HOOK-SHIM-STDIN-V1) ─────────────
+# `aqe init` COPIES .claude/hooks/aqe-hook.cjs into the target once and nothing
+# ever refreshes it. A shim predating upstream's stdin fix spawns the CLI with
+# stdio ['ignore',...], discarding the hook event JSON — and the PostToolUse
+# command passes `--file "$TOOL_INPUT_file_path"`, which Claude Code does NOT
+# expand (upstream #453). With no stdin to fall back on, every captured row
+# lands as the content-free string "<domain>: edit: " with the path missing.
+# Observed on a target carrying a 7-week-old shim: 3137 of 3139 eligible rows
+# identical, which trained its LoRA 5611 times on ~1 direction.
+#
+# ASSERT THE PROPERTY, NOT A HASH: targets legitimately differ from upstream
+# (local hardening, version skew), so a sha256 equality check would flag healthy
+# installs and teach operators to ignore it. What matters is exactly one thing —
+# is stdin readable by the child? Heal by refreshing from the INSTALLED
+# agentic-qe copy, which is upstream's own current shim.
+header "8c" "capture hook shim passes stdin through (AQE-HOOK-SHIM-STDIN-V1)"
+SHIM="$TARGET_DIR/.claude/hooks/aqe-hook.cjs"
+SHIM_SRC="$(npm root -g 2>/dev/null)/agentic-qe/.claude/hooks/aqe-hook.cjs"
+_shim_reads_stdin() { grep -qE "stdio:[[:space:]]*\[[[:space:]]*'inherit'" "$1" 2>/dev/null; }
+if [[ ! -f "$SHIM" ]]; then
+  pass "no aqe-hook.cjs installed here — capture shim not in use (nothing to assert)"
+elif _shim_reads_stdin "$SHIM"; then
+  pass "capture hook shim passes stdin through — file paths reach captured experiences"
+elif [[ ! -f "$SHIM_SRC" ]]; then
+  warn "capture hook shim DISCARDS stdin (captured tasks will lose their file path), and no upstream copy is installed to heal from — reinstall agentic-qe"
+elif ! _shim_reads_stdin "$SHIM_SRC"; then
+  warn "capture hook shim discards stdin, but the installed agentic-qe copy does too — upstream regression, not healable here (leaving target untouched)"
+elif [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+  info "[dry-run] would refresh $SHIM from the installed agentic-qe copy (currently discards stdin)"
+else
+  cp -p "$SHIM" "$SHIM.stdin-bak" 2>/dev/null || true
+  if cp "$SHIM_SRC" "$SHIM" && node --check "$SHIM" 2>/dev/null && _shim_reads_stdin "$SHIM"; then
+    fix "capture hook shim refreshed — stdin now reaches the CLI (AQE-HOOK-SHIM-STDIN-V1)"
+    pass "captured tasks will carry their file path again"
+  else
+    warn "shim refresh failed or produced invalid JS — restoring previous copy"
+    [[ -f "$SHIM.stdin-bak" ]] && cp "$SHIM.stdin-bak" "$SHIM"
+  fi
+fi
+
 # ── Step 9: ONNX model-cache seed (MODEL-CACHE-SEED-V1) ──────────────────────
 # transformers.js ignores TRANSFORMERS_CACHE and caches MiniLM weights INSIDE
 # the global package (@huggingface/transformers/.cache) — wiped on every
@@ -823,12 +956,23 @@ fi
 header "9" "ONNX model-cache seed (MODEL-CACHE-SEED-V1)"
 info "vault: $(kit_model_vault) · $(kit_preserve_model_caches) · $(kit_restore_model_caches)"
 GNM_MC="$(npm root -g 2>/dev/null)"
+# The cache lives inside whichever copy agentic-qe ACTUALLY resolves, so derive
+# that dir instead of hardcoding one. The old probe hardcoded
+# agentic-qe/node_modules/@huggingface/transformers/.cache — a path that CANNOT
+# exist, because the dep is devDependencies-only and never installs there. So it
+# took the else branch unconditionally and had, since the day it was written,
+# only ever printed "weights not in package cache". That reads as a benign cache
+# miss while the real state was "the package is absent and in-process embeddings
+# are permanently dead" — a check that could not tell the two apart.
+MC_PKG_DIR="$(_emb_pkg_info)"; MC_PKG_DIR="${MC_PKG_DIR%%$'\t'*}"
 # v3 caches onnx/model.onnx (fp32) or onnx/model_quantized.onnx depending on dtype — accept either.
-MC_ONNX_DIR="$GNM_MC/agentic-qe/node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/onnx"
-if [[ -n "$GNM_MC" ]] && ls "$MC_ONNX_DIR"/model*.onnx >/dev/null 2>&1; then
-  pass "AQE MiniLM weights present in package cache (disk-hit on next embed)"
+if [[ -z "$GNM_MC" || -z "$MC_PKG_DIR" ]]; then
+  # Distinct third state: not a cache verdict at all. Step 8b owns this failure.
+  warn "MiniLM cache NOT ASSESSABLE — @huggingface/transformers unresolvable from agentic-qe (see Step 8b), so there is no package cache to check"
+elif ls "$MC_PKG_DIR/.cache/Xenova/all-MiniLM-L6-v2/onnx"/model*.onnx >/dev/null 2>&1; then
+  pass "AQE MiniLM weights present in resolved package cache (disk-hit on next embed) — ${MC_PKG_DIR#$GNM_MC/}"
 else
-  warn "AQE MiniLM weights not in package cache — first embed will download (network needed)"
+  warn "AQE MiniLM weights not in package cache at ${MC_PKG_DIR#$GNM_MC/} — first embed will download (network needed)"
 fi
 
 # ── Step 10: resolveProjectRoot walk-up boundary exclusion (INTEL-ROOTWALK-V1) ──

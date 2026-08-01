@@ -14,6 +14,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const _err = (...a) => { try { process.stderr.write(a.map(String).join(' ') + '\n'); } catch (e) {} };
 console.log = _err; console.info = _err; console.warn = _err; console.debug = _err; // keep stdout clean for the summary
 
@@ -55,9 +56,34 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
 
   if (!fs.existsSync(srcDb)) { _err('no AQE memory.db at ' + srcDb); process.exit(1); }
 
-  let ledger = { ids: [], lastRowid: 0 };
-  try { ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf8')); } catch (e) {}
-  const done = new Set(ledger.ids || []);
+  // HARVEST-LEDGER-V2: three outcomes, not two. v1 wrote EVERY fresh row's id
+  // into `ids` regardless of whether Sink A trained it, and `ids` is the sole
+  // eligibility filter — so a row that produced no vector was consumed forever
+  // and could never train, even once the embedder was repaired. Measured at the
+  // time of the fix: 957 such rows on this repo, 589 on the gauntlet target.
+  //
+  //   trained   -> ids           (its text digest is recorded in trainedTexts)
+  //   redundant -> ids           TERMINAL: a duplicate text today is a duplicate
+  //                              forever, so re-offering it can never help
+  //   deferred  -> pendingSinkA  RETRIED: no vector obtainable YET; a working
+  //                              embedder makes it useful, so it must not burn
+  //
+  // Migration is additive and lossless: a v1 ledger (no `v`) reads as v2 with
+  // empty pendingSinkA/trainedTexts, so the burn stops from the next run with
+  // zero risk and nothing re-harvested. Rewinding already-burned ids is a
+  // separate, explicit opt-in (--reclaim) — never automatic.
+  let ledger = { v: 2, ids: [], pendingSinkA: [], trainedTexts: {}, lastRowid: 0 };
+  try {
+    const raw = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+    ledger = {
+      v: 2,
+      ids: Array.isArray(raw.ids) ? raw.ids : [],
+      pendingSinkA: Array.isArray(raw.pendingSinkA) ? raw.pendingSinkA : [],
+      trainedTexts: (raw.trainedTexts && typeof raw.trainedTexts === 'object') ? raw.trainedTexts : {},
+      lastRowid: raw.lastRowid || 0,
+    };
+  } catch (e) {}
+  const RECLAIM = process.argv.slice(2).includes('--reclaim');
 
   const Database = require(path.join(aqeBase, 'node_modules', 'better-sqlite3'));
   const db = new Database(srcDb, { readonly: true, fileMustExist: true });
@@ -90,9 +116,50 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
     'FROM captured_experiences WHERE success=1 AND quality>=0.7 ORDER BY rowid'
   ).all();
   db.close();
-  const fresh = rows.filter(r => !done.has(r.id));
-  _err(`harvestable=${rows.length} fresh=${fresh.length}`);
-  if (!fresh.length) { process.stdout.write(JSON.stringify({ trained: 0, skills: 0, episodes: 0, note: 'nothing fresh' }) + '\n'); return; }
+  // HARVEST-RECLAIM-V1 (opt-in, --reclaim): rewind rows that v1 burned. A row
+  // still holding embedding NULL provably never trained Sink A — v1's own guard
+  // skipped it — so moving it ids -> pendingSinkA re-offers it for Sink A only,
+  // with no Sink B replay and therefore no duplicate episodes.
+  //
+  // GATED, because the premise is checkable and must not be assumed: if ANY past
+  // run reported trainedEmbeddedAtHarvest > 0, then some NULL-embedding row WAS
+  // derived and trained, and the attribution log records only a COUNT — not
+  // which ids. That is exactly a "cannot tell", so refuse rather than guess.
+  if (RECLAIM) {
+    let derivedEver = 0, gateReadable = false;
+    try {
+      const lines = fs.readFileSync(path.join(PROJ, '.claude-flow', 'trajectory-attribution.jsonl'), 'utf8')
+        .split('\n').filter(Boolean);
+      gateReadable = true;
+      for (const ln of lines) {
+        try { const j = JSON.parse(ln); if (j.source === 'harvest-sinkA') derivedEver += (j.trainedEmbeddedAtHarvest || 0); } catch (e) {}
+      }
+    } catch (e) { gateReadable = false; }
+    const ledgered = (ledger.ids || []).length;
+    if (!gateReadable && ledgered > 0) {
+      _err('RECLAIM REFUSED: no readable .claude-flow/trajectory-attribution.jsonl, so it cannot be shown that the burned rows never trained. Not guessing.');
+    } else if (derivedEver > 0) {
+      _err(`RECLAIM REFUSED: ${derivedEver} row(s) were previously derived-and-trained at harvest time, and attribution records only counts, not ids — the untrained set cannot be identified. Not guessing.`);
+    } else {
+      const vecless = new Set(rows.filter(r => !(r.embedding && r.embedding.byteLength >= 4)).map(r => r.id));
+      const moved = [];
+      ledger.ids = (ledger.ids || []).filter(id => (vecless.has(id) ? (moved.push(id), false) : true));
+      ledger.pendingSinkA = Array.from(new Set((ledger.pendingSinkA || []).concat(moved)));
+      _err(`RECLAIM: ${moved.length} burned vecless row(s) returned to pendingSinkA (Sink A retry only)`);
+    }
+  }
+
+  const done = new Set(ledger.ids || []);
+  const pending = new Set(ledger.pendingSinkA || []);
+  const fresh = rows.filter(r => !done.has(r.id) && !pending.has(r.id));
+  // Deferred rows get a Sink A RETRY only. Sink B already stored them and its
+  // storeEpisode is a bare INSERT with no unique constraint (verified against
+  // agentdb's ReflexionMemory dist: episodes.id is AUTOINCREMENT, the harvester
+  // passes no id), so replaying them through Sink B would duplicate 1:1 —
+  // episodes count equals ledger size exactly on both live targets today.
+  const retry = rows.filter(r => pending.has(r.id));
+  _err(`harvestable=${rows.length} fresh=${fresh.length} retrySinkA=${retry.length}`);
+  if (!fresh.length && !retry.length) { process.stdout.write(JSON.stringify({ trained: 0, skills: 0, episodes: 0, note: 'nothing fresh' }) + '\n'); return; }
 
   // ---- Sink A: ruflo SONA LoRA (proven direct primitive) ----
   // TRAJ-ATTR-V1: the harvester is one of the writer paths into .swarm/lora-weights.json
@@ -103,7 +170,9 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
   let trajAttr = null;
   try { trajAttr = require(path.join(__dirname, 'trajectory-attribution.cjs')); } catch (e) {}
   const trajAttrBefore = trajAttr ? trajAttr.snapshotWeights(PROJ) : null;
-  let trained = 0, trainedEmbeddedAtHarvest = 0;
+  let trained = 0, trainedEmbeddedAtHarvest = 0, redundantSinkA = 0, deferredSinkA = 0, degenerateSinkA = 0;
+  const outcomeTerminal = new Set();   // trained | redundant | degenerate  -> ids
+  const outcomeDeferred = new Set();   // no usable vector YET              -> pendingSinkA
   try {
     const lora = await import('file://' + path.join(cliBase, 'dist', 'src', 'ruvector', 'lora-adapter.js'));
     const adapter = await lora.getLoRAAdapter();
@@ -121,7 +190,27 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
       } catch (e) { _err('HARVEST-EMBED-V1: embedder unavailable (' + e.message + ') — vecless rows stay SinkB-only'); }
       return embedFn;
     };
-    for (const r of fresh) {
+    // Retry first: deferred rows owe Sink A a pass, and they are older, so they
+    // should claim a text digest before a newer duplicate does.
+    for (const r of retry.concat(fresh)) {
+      const embedText = (String(r.domain || '') + ': ' + String(r.task || '')).slice(0, 512);
+      const digest = crypto.createHash('sha256').update(embedText).digest('hex').slice(0, 32);
+      // HARVEST-DEDUPE-V1: train at most ONCE per distinct embed text, cumulative
+      // across runs. Sink A's objective is adapter.train(v, v, quality) — a
+      // RECONSTRUCTION, input === target — so the 2nd..Nth presentation of an
+      // identical vector contributes zero new information and only reweights that
+      // one direction against every other. Measured consequence of not doing
+      // this: a target whose capture hook wrote 3137 identical content-free rows
+      // accumulated 5611 updates on ~1 direction, 25x this repo's adaptation-norm
+      // sum and 43x its max |B|. If duplicate frequency should ever count as
+      // importance, it belongs in the bounded `quality` arg — never as unbounded
+      // repetition. Keyed on the input STRING, so it never depends on float
+      // stability (the pipeline is deterministic, but the guard does not rely on it).
+      if (ledger.trainedTexts[digest]) {
+        ledger.trainedTexts[digest]++;
+        redundantSinkA++; outcomeTerminal.add(r.id);
+        continue;
+      }
       let v = null, derived = false;
       const b = r.embedding;
       if (b && b.byteLength >= 4) {
@@ -137,16 +226,27 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
         const embed = await getEmbedder();
         if (embed) {
           try {
-            const out = await embed((String(r.domain || '') + ': ' + String(r.task || '')).slice(0, 512));
+            const out = await embed(embedText);
             const arr = (out && (out.embedding || out.vector || out.data)) || out;
             if (arr && arr.length) { v = Float32Array.from(arr); derived = true; }
           } catch (e) { _err('HARVEST-EMBED-V1: embed failed for ' + r.id + ' (' + e.message + ')'); }
         }
       }
-      if (!v || (dim && v.length !== dim)) continue;
+      // DEFERRED, not burned: no usable vector YET. A repaired embedder (or
+      // upstream's lazy backfill) makes this row trainable, so it must stay
+      // eligible instead of being consumed for nothing — the v1 defect.
+      if (!v || (dim && v.length !== dim)) { deferredSinkA++; outcomeDeferred.add(r.id); continue; }
+      // TERMINAL: computeRealEmbedding returns an all-zero vector for text it
+      // deems non-semantic (JSON metrics, UUIDs, low alpha-ratio). It does not
+      // throw, so without this guard a zero vector reads as a valid derivation
+      // and trains the adapter toward the origin. Deterministic in the text, so
+      // it can never become useful — consume it rather than retry forever.
+      if (!v.some((x) => x !== 0)) { degenerateSinkA++; outcomeTerminal.add(r.id); continue; }
       adapter.train(v, v, r.quality);
+      ledger.trainedTexts[digest] = 1;
       trained++;
       if (derived) trainedEmbeddedAtHarvest++;
+      outcomeTerminal.add(r.id);
     }
     adapter.saveWeights();
   } catch (e) { _err('SinkA(LoRA) failed:', e.message); }
@@ -202,10 +302,37 @@ console.log = _err; console.info = _err; console.warn = _err; console.debug = _e
   // ---- update idempotency ledger ----
   try {
     fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
-    const newIds = (ledger.ids || []).concat(fresh.map(r => r.id));
-    const lastRowid = Math.max(ledger.lastRowid || 0, ...fresh.map(r => r.rowid));
-    fs.writeFileSync(ledgerPath, JSON.stringify({ ids: newIds, lastRowid, updatedAt: new Date().toISOString() }, null, 2));
+    const idSet = new Set(ledger.ids || []);
+    const stillPending = new Set();
+    // A previously-deferred row is promoted to terminal only if this run settled
+    // it; otherwise it stays pending for the next attempt.
+    for (const id of ledger.pendingSinkA || []) {
+      if (outcomeTerminal.has(id)) idSet.add(id); else stillPending.add(id);
+    }
+    // A fresh row Sink A never REACHED (e.g. the adapter import threw) is
+    // deferred, never dropped: Sink B has already stored its episode, and
+    // storeEpisode is a bare INSERT, so re-offering it as fresh would duplicate.
+    for (const r of fresh) {
+      if (outcomeTerminal.has(r.id)) idSet.add(r.id); else stillPending.add(r.id);
+    }
+    const seen = retry.concat(fresh);
+    const lastRowid = seen.length
+      ? Math.max(ledger.lastRowid || 0, ...seen.map(r => r.rowid))
+      : (ledger.lastRowid || 0);
+    fs.writeFileSync(ledgerPath, JSON.stringify({
+      v: 2,
+      ids: Array.from(idSet),
+      pendingSinkA: Array.from(stillPending),
+      trainedTexts: ledger.trainedTexts,
+      lastRowid,
+      updatedAt: new Date().toISOString(),
+    }, null, 2));
   } catch (e) { _err('ledger write failed:', e.message); }
 
-  process.stdout.write(JSON.stringify({ trained, trainedEmbeddedAtHarvest, skills, episodes, freshConsumed: fresh.length }) + '\n');
+  process.stdout.write(JSON.stringify({
+    trained, trainedEmbeddedAtHarvest,
+    redundantSinkA, degenerateSinkA, deferredSinkA,
+    skills, episodes,
+    freshConsumed: fresh.length, retriedSinkA: retry.length,
+  }) + '\n');
 })().catch(e => { _err('FATAL:', e.message); process.exit(1); });
