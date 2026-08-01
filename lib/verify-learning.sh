@@ -363,7 +363,11 @@ probe_capture_diversity() {
 # derived vectors do not fill this column — it is a pure capture-path signal.
 probe_embed_outcome() {
   local db="$AQE_DB" ok tbl col n nul pct age
-  local graced="completed_at <= datetime('now','-60 minutes')"
+  # ONE source for the grace window — tools/aqe-embed-sweep.cjs must use the
+  # same value (GRACE_MINUTES there). If they drift, the sweep either races the
+  # capture path's own pending UPDATE or fills rows this probe is still counting.
+  local GRACE_MINUTES=60
+  local graced="completed_at <= datetime('now','-${GRACE_MINUTES} minutes')"
   if [[ ! -f "$db" ]]; then
     note "capture embed outcome not assessable — no AQE store at $db [not-assessable] (#15)"; return
   fi
@@ -385,15 +389,48 @@ probe_embed_outcome() {
   # COALESCE is load-bearing: SUM() over an empty set is NULL, and a NULL here
   # would render as an empty string — indistinguishable from a failed read.
   nul="$(sqlite_count_safe "$db" "SELECT COALESCE(SUM(embedding IS NULL),0) FROM (SELECT embedding FROM captured_experiences WHERE $graced ORDER BY completed_at DESC LIMIT 200);")"
-  pct=$(( ${nul:-0} * 100 / n ))
+  # ANTI-LAUNDERING: `ruflo-kit embed-sweep` fills this same column. A row it
+  # filled proves nothing about the CAPTURE path, which is what this probe
+  # measures — and unlike probe #16's hash proxies there is NO geometric tell,
+  # because a correct sweep writes byte-identical vectors to a correct capture
+  # (verified: cosine 1.000000). The kit-owned ledger is the only possible
+  # discriminator, so count swept rows as still-lost. Without this, running the
+  # remedy would turn the verdict green while the defect it reports is untouched
+  # — the kit laundering its own evidence.
+  local swept=0
+  if [[ -f "$TARGET_DIR/.swarm/embed-sweep-state.json" ]]; then
+    swept="$(node -e '
+const fs=require("fs"),cp=require("child_process"),path=require("path");
+const PROJ=process.argv[1];
+let ids=[];try{ids=JSON.parse(fs.readFileSync(path.join(PROJ,".swarm","embed-sweep-state.json"),"utf8")).sweptIds||[]}catch(e){process.stdout.write("0");process.exit(0)}
+if(!ids.length){process.stdout.write("0");process.exit(0)}
+const set=new Set(ids);
+let Database=null;
+try{const g=cp.execSync("npm root -g",{stdio:["ignore","pipe","ignore"],timeout:10000}).toString().trim();
+  for(const c of [path.join(g,"agentic-qe","node_modules","better-sqlite3"),path.join(g,"better-sqlite3")]){try{Database=require(c);break}catch(e){}}}catch(e){}
+if(!Database){process.stdout.write("0");process.exit(0)}
+try{const db=new Database(path.join(PROJ,".agentic-qe","memory.db"),{readonly:true,fileMustExist:true});
+  const rows=db.prepare("SELECT id FROM captured_experiences WHERE completed_at <= datetime(\x27now\x27,\x27-'"$GRACE_MINUTES"' minutes\x27) ORDER BY completed_at DESC LIMIT 200").all();
+  db.close();
+  process.stdout.write(String(rows.filter(r=>set.has(r.id)).length));
+}catch(e){process.stdout.write("0")}
+' "$TARGET_DIR" 2>/dev/null)"
+    [[ "$swept" =~ ^[0-9]+$ ]] || swept=0
+  fi
+  pct=$(( (${nul:-0} + swept) * 100 / n ))
   # Surface the window's age so a verdict describing a long-dead regime is
   # self-evident rather than silently stale.
   age="$(sqlite_count_safe "$db" "SELECT CAST((julianday('now')-julianday(MAX(completed_at)))*1440 AS INTEGER) FROM (SELECT completed_at FROM captured_experiences WHERE $graced ORDER BY completed_at DESC LIMIT 200);")"
   local when="newest graced row ${age:-?}m old"
+  [[ "${swept:-0}" -gt 0 ]] && when="$when; ${swept} of them kit-swept (counted as lost — the sweep fills the column, it does not fix capture)"
+  # Report the EFFECTIVE lost count (NULL + kit-swept), not the raw NULL count —
+  # after a sweep the raw count is 0 while the capture path is just as broken,
+  # and "0 of 200 (100%)" reads like an instrument fault.
+  local lost=$(( ${nul:-0} + ${swept:-0} ))
   if [[ "$pct" -ge 50 ]]; then
     # Deliberately does NOT name sync/fix-aqe: the embedder is not the fault here
     # and no kit verb repairs this. Naming one would be a false instruction.
-    bad "capture embed DEAD: ${nul} of ${n} graced rows (${pct}%) have NO vector — the capture hook's un-awaited embed loses its race with subprocess exit (bare catch{}, upstream), so these rows never carry a vector in the pool. Harvest can still derive at replay time; the pool column stays empty. ${when} (#15)"
+    bad "capture embed DEAD: ${lost} of ${n} graced rows (${pct}%) have NO vector — the capture hook's un-awaited embed loses its race with subprocess exit (bare catch{}, upstream), so these rows never carry a vector in the pool. Harvest can still derive at replay time; the pool column stays empty. ${when} (#15)"
   elif [[ "$pct" -gt 2 ]]; then
     soft "capture embed LEAKING: ${pct}% of the last ${n} graced rows have no vector (healthy is 0%) — partial vector loss, cause unresolved. ${when} (#15)"
   else

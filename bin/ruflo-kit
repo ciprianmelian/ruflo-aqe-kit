@@ -22,6 +22,7 @@
 #   bin/ruflo-kit fix-learning /path/to/codebase    # populate/unlock a hollow learning loop
 #   bin/ruflo-kit bench       /path/to/codebase     # self-improvement bench (read-only)
 #   bin/ruflo-kit harvest     /path/to/codebase     # replay AQE experiences
+#   bin/ruflo-kit embed-sweep /path/to/codebase     # backfill lost capture vectors
 #   bin/ruflo-kit version                           # kit + ruflo + aqe versions
 #   bin/ruflo-kit self-update                       # git pull the kit clone
 #
@@ -93,6 +94,7 @@ Commands:
   fix-learning   Populate + unlock a hollow self-learning loop (idempotent, --dry-run)
   bench          Run the self-improvement bench (read-only)
   harvest        Replay AQE experiences into the ruflo substrate
+  embed-sweep    Backfill capture vectors the hook lost (opt-in, --dry-run)
   version        Show kit git sha + detected ruflo / agentic-qe versions
   self-update    git pull the kit clone (fast-forward only)
   help [verb]    Show this help, or a specific verb's usage (e.g. help sync)
@@ -168,7 +170,7 @@ _kit_is_known_verb() {
   case "$1" in
     setup|adopt|snapshot|status|sync|proof|init|fix-ruflo|fix-aqe|fix-brain| \
     fix-statusbar|dashboard|session|session-init|health|upgrade| \
-    verify-learning|fix-learning|bench|harvest|version|self-update) return 0 ;;
+    verify-learning|fix-learning|bench|harvest|embed-sweep|version|self-update) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -538,6 +540,31 @@ Usage: ruflo-kit bench <target> [args passed through to the bench tool]
   Billed / network: NO
 EOF
     ;;
+    embed-sweep) cat <<'EOF'
+Usage: ruflo-kit embed-sweep <target> [--dry-run] [--limit N] [--json]
+
+  Backfill captured_experiences.embedding for rows whose vector the capture
+  hook LOST. agentic-qe's hook inserts the row, then fires an un-awaited embed
+  wrapped in a bare catch{}; under load the subprocess exits first and the
+  vector is gone. Upstream's compensator is itself fire-and-forget and capped
+  at 200 per process boot, so rows accumulate indefinitely.
+
+  Replays a DETERMINISTIC computation — same function, same text, same config
+  as capture would have used — after an identity gate proves this host's
+  embedder reproduces the store's existing vectors. Skips rows younger than
+  60m (the capture path's own embed may still land), never overwrites an
+  existing vector, and never writes the all-zero vector the embedder returns
+  for non-semantic text.
+
+  Does NOT repair the capture path. Probe #15 keeps reporting that fault, and
+  subtracts kit-swept rows so this verb cannot launder its own verdict.
+
+  Mutates target:   YES (.agentic-qe/memory.db embedding column only, plus a
+                    .swarm/embed-sweep-state.json ledger; backs the DB up first)
+  Starts daemon:    NO
+  Billed / network: NO (model weights must already be cached)
+EOF
+    ;;
     harvest) cat <<'EOF'
 Usage: ruflo-kit harvest <target> [args passed through to the harvest tool]
 
@@ -665,6 +692,13 @@ case "$cmd" in
     _kit_refuse_on_dispatcher_divergence harvest "$t" "$@" || exit 1
     _kit_firstarg_is_target "$@" && shift
     ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/aqe-harvest.cjs" "$@" ) ;;
+  embed-sweep)
+    _kit_has_help_flag "$@" && { _kit_verb_help embed-sweep; exit 0; }
+    _kit_check_target_exists_firstarg embed-sweep 0 "$@" || exit 1
+    t="$(_kit_firstarg_resolve "$@")"
+    _kit_refuse_on_dispatcher_divergence embed-sweep "$t" "$@" || exit 1
+    _kit_firstarg_is_target "$@" && shift
+    ( cd "$t" 2>/dev/null || cd "$(pwd)"; exec node "$KIT_DIR/tools/aqe-embed-sweep.cjs" "$@" ) ;;
   version|--version|-v)
     _kit_has_help_flag "$@" && { _kit_verb_help version; exit 0; }
     kit_sha="$(git -C "$KIT_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
