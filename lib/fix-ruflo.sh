@@ -1769,6 +1769,112 @@ if [[ "$RUVECTOR_MCP_FOUND" -eq 0 ]]; then
   pass "No installed ruvector MCP server found (not a dependency here) — nothing to patch"
 fi
 
+# ── Step 3d: memory.db backup source-integrity gate (BACKUP-SOURCE-INTEGRITY-V1) ──
+# Kit issue #6. `backupMemoryDb()` in the installed @claude-flow/cli takes a
+# WAL-safe online snapshot of `.swarm/memory.db` and NEVER runs
+# `PRAGMA integrity_check` on the SOURCE. `restoreMemoryDbFromBackup()` already
+# does the right thing on the way OUT — it verifies each candidate and walks
+# back to a clean one — but there is no check on the way IN, so a corrupt DB is
+# copied forward every night, recorded as `{ backedUp: true }`, and the last
+# clean snapshot rotates out of retention unnoticed. (Reported window: clean
+# 2026-07-19, corrupt by 2026-07-21, every later snapshot corrupt.)
+#
+# TWO unguarded success paths, not one, and covering only the first would
+# reproduce this kit's own signature defect — a check that reports healthy
+# because it never looked at the path that matters:
+#   A. the online backup      (`await db.backup(destPath)`)
+#   B. the byte-copy fallback (`fs.copyFileSync(dbPath, destPath)`, added by
+#      upstream #2798 for encrypted-at-rest sources)
+# B is the WORSE one: a DB corrupt enough that better-sqlite3 refuses to open it
+# throws out of `db.backup()`, lands in the catch, and gets raw-copied and
+# reported as a success. The patch therefore probes ONCE, before either path
+# runs, at the single point where destPath is computed.
+#
+# Corrupt ⇒ the snapshot is STILL taken (best-effort preservation) but tagged
+# `memory-<stamp>.CORRUPT.db`, with an UNCONDITIONAL console.warn — never behind
+# opts.verbose, because a swallowed warning is the actual bug. `sourceIntegrity`
+# / `sourceCorrupt` ride along on every return for programmatic consumers. A
+# `.CORRUPT.db` name still matches the restore path's own `/^memory-.*\.db$/`
+# candidate regex on purpose: restore keeps considering it, then rejects it on
+# its own integrity check and walks back to an older clean snapshot (asserted in
+# tests/backup-source-integrity.test.js, not assumed).
+#
+# WHY THE GATE IS NOT A defect_gate GREP HERE. Two whole-file greps both LIE:
+#   * `integrity_check` reads PRESENT on the confirmed-defective dist, because
+#     the RESTORE function has the pragma — retiring this patch on day one.
+#   * `fs.copyFileSync(dbPath, destPath)` (path B's literal) reads ABSENT the
+#     day upstream drops the fallback — retiring the patch while path A may
+#     still be unguarded.
+# Both are the "check that cannot tell" class. The real gate is FUNCTION-SCOPED
+# and lives in the tool: it slices backupMemoryDb's OWN body and exits 6
+# (SELF_RETIRED) only when UPSTREAM has put a source-integrity check inside that
+# function. The patch's own injected code deliberately keeps the pragma literal
+# out of the function body (it lives in the helper above it), so the gate can
+# never be fooled by our own work. The grep below is logged as drift INFO only —
+# never as a verdict.
+#
+# Fail-closed like Step 3c: the tool writes the file (and the sentinel) only
+# when all 4 anchors are accounted for. Idempotent (ALREADY_PATCHED), reversible
+# (.bsintegrity-bak), node --check-verified with restore-on-invalid, DRY_RUN-aware.
+header "3d/11" "memory.db backup source-integrity gate (BACKUP-SOURCE-INTEGRITY-V1)"
+BSI_TOOL="$KIT_TOOLS/backup-integrity-patch.cjs"
+BSI_DIST="$(npm root -g 2>/dev/null)/ruflo/node_modules/@claude-flow/cli/dist/src/services/memory-backup.js"
+if [[ ! -f "$BSI_TOOL" ]]; then
+  warn "tools/backup-integrity-patch.cjs missing from kit — backup source-integrity gate NOT applied"
+  ((ERRORS++)) || true
+elif [[ ! -f "$BSI_DIST" ]]; then
+  warn "global @claude-flow/cli memory-backup.js not found — cannot apply or verify BACKUP-SOURCE-INTEGRITY-V1"
+else
+  # Read-only drift notes. Informational by construction — see the block comment
+  # above for why neither of these may be promoted to the retirement verdict.
+  if [[ "$(dist_defect_present "$BSI_DIST" 'integrity_check')" == "PRESENT" ]]; then
+    info "whole-file grep sees integrity_check in memory-backup.js — that is the RESTORE path, not a verdict on the backup path; deferring to the function-scoped gate"
+  fi
+  if [[ "$(dist_defect_present "$BSI_DIST" 'fs\.copyFileSync\(dbPath, destPath\)')" != "PRESENT" ]]; then
+    info "byte-copy fallback (#2798) not found in memory-backup.js — upstream may have restructured; expect ANCHOR/PARTIAL below rather than a silent pass"
+  fi
+
+  BSI_DRY=""
+  [[ "$DRY_RUN" -eq 1 ]] && BSI_DRY="--dry-run"
+  [[ "$DRY_RUN" -eq 1 || -e "$BSI_DIST.bsintegrity-bak" ]] || cp "$BSI_DIST" "$BSI_DIST.bsintegrity-bak"
+  # shellcheck disable=SC2086  # BSI_DRY is intentionally word-split (empty or one flag)
+  BSI_OUT="$(node "$BSI_TOOL" "$BSI_DIST" $BSI_DRY 2>&1)"; BSI_RC=$?
+  case "$BSI_RC" in
+    0)
+      case "$BSI_OUT" in
+        ALREADY_PATCHED)
+          pass "backup source-integrity gate already installed (BACKUP-SOURCE-INTEGRITY-V1)" ;;
+        WOULD_APPLY:*)
+          info "[dry-run] Would: add PRAGMA integrity_check on the backup SOURCE + .CORRUPT.db tagging to memory-backup.js ($BSI_OUT)" ;;
+        *)
+          if node --check "$BSI_DIST" 2>/dev/null; then
+            fix "Patched memory.db backup source-integrity gate (BACKUP-SOURCE-INTEGRITY-V1): $BSI_DIST ($BSI_OUT)"
+            pass "backup now verifies the SOURCE on BOTH paths (online backup + #2798 byte-copy fallback)"
+          else
+            warn "BACKUP-SOURCE-INTEGRITY-V1 produced invalid $BSI_DIST — restoring backup"
+            cp "$BSI_DIST.bsintegrity-bak" "$BSI_DIST"
+            ((ERRORS++)) || true
+          fi ;;
+      esac ;;
+    2)
+      warn "BACKUP-SOURCE-INTEGRITY-V1 anchor not found in $BSI_DIST (dist drift) — re-anchor needed, NOT applied ($BSI_OUT)"
+      ((ERRORS++)) || true ;;
+    3)
+      warn "BACKUP-SOURCE-INTEGRITY-V1 PARTIAL match in $BSI_DIST — refusing to write or stamp an incomplete fix; file left untouched, will retry next run ($BSI_OUT)"
+      ((ERRORS++)) || true ;;
+    4)
+      warn "BACKUP-SOURCE-INTEGRITY-V1 could not write $BSI_DIST ($BSI_OUT) — check file/directory permissions; NOT applied"
+      ((ERRORS++)) || true ;;
+    5)
+      warn "BACKUP-SOURCE-INTEGRITY-V1 could not read $BSI_DIST ($BSI_OUT) — check file permissions; NOT applied" ;;
+    6)
+      pass "upstream backupMemoryDb() now checks source integrity itself — already fixed upstream, no kit patch needed (self-retired)" ;;
+    *)
+      warn "BACKUP-SOURCE-INTEGRITY-V1 patcher failed unexpectedly on $BSI_DIST (rc=$BSI_RC): $BSI_OUT"
+      ((ERRORS++)) || true ;;
+  esac
+fi
+
 # ── Step 4: Remove local ruflo dependency ────────────────────────────────────
 
 header "4/11" "Local ruflo dependency check"
