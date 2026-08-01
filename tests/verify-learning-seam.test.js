@@ -156,7 +156,10 @@ describe('verify-learning #11: sona-seam sentinels (SEAM-SENTINEL-V1)', () => {
     const j = parseJson(runVerify(target, dist, ['--json']).stdout);
     // 2 -> 3: probe #14 (CAPTURE-DIVERSITY-V1) emits one not-assessable note on
     // this fixture's empty pool (needs >=50 eligible rows to judge diversity).
-    expect(j.info).toBe(3);
+    // 3 -> 5: probes #15 (EMBED-OUTCOME-V1) and #16 (STORED-VECTOR-PROVENANCE-V1)
+    // each add one not-assessable note here too — too few graced rows, and no
+    // qe_pattern_embeddings table in this fixture.
+    expect(j.info).toBe(5);
     const human = runVerify(target, dist).stdout;
     expect(human).not.toMatch(/running for THIS target|running for a DIFFERENT workspace|no --workspace visible in argv/);
     fs.rmSync(dist, { recursive: true, force: true });

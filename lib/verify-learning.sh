@@ -337,6 +337,130 @@ probe_capture_diversity() {
   fi
 }
 
+# ── Probe #15: capture embed OUTCOME (EMBED-OUTCOME-V1) ──────────────────────
+# #13 asks "can the embedder work"; this asks "did the vector actually land".
+# They are NOT the same question, and today this repo proves it: #13 PASSes on a
+# healthy embedder while 100% of new rows land with embedding NULL. Mechanism is
+# in the installed dist (hooks-AGE3HCFI.js): the hook INSERTs the row, then fires
+# an UN-AWAITED async IIFE that embeds and UPDATEs, wrapped in a bare `catch{}`.
+# Nothing awaits it and nothing logs it, so under host contention the subprocess
+# exits before the ~135ms embed completes and the vector is lost silently.
+#
+# GRACE WINDOW is the whole design problem: that embed is async-after, so the
+# freshest rows legitimately have no vector yet. Measured longitudinally (diff
+# the NULL id-set over time, since the schema records no embed time): max
+# observed fill latency 33 min, and filling is BURSTY — one target read ~30%
+# NULL at 15-60min old, then 0% four minutes later. 60 min is 1.8x the max
+# latency and one stabilization interval past where the measurement stops
+# moving, so it tolerates the burst rather than crying wolf on it.
+#
+# THRESHOLDS from the worst rolling 200-row window across both targets: the
+# known-good regime is not "near zero", it is ZERO over 3362 rows / 2964
+# windows. The partial-loss regime peaks at 29%. FAIL at 50% therefore sits
+# 1.7x above the worst degraded window and at half the broken regime.
+#
+# NB: harvest opens the pool READ-ONLY and never writes back, so HARVEST-EMBED-V1's
+# derived vectors do not fill this column — it is a pure capture-path signal.
+probe_embed_outcome() {
+  local db="$AQE_DB" ok tbl col n nul pct age
+  local graced="completed_at <= datetime('now','-60 minutes')"
+  if [[ ! -f "$db" ]]; then
+    note "capture embed outcome not assessable — no AQE store at $db [not-assessable] (#15)"; return
+  fi
+  # Openability FIRST: without it a corrupt file makes the sqlite_master query
+  # come back empty and the probe blames a missing table — a wrong reason.
+  ok="$(sqlite_count_safe "$db" "SELECT 1;")"
+  if [[ "$ok" != "1" ]]; then
+    soft "capture embed outcome not assessable — store unreadable (locked, corrupt, or no sqlite instrument) [not-assessable] (#15)"; return
+  fi
+  tbl="$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='captured_experiences';")"
+  [[ "${tbl:-0}" -eq 0 ]] && { note "capture embed outcome not assessable — captured_experiences table absent (fresh AQE store) [not-assessable] (#15)"; return; }
+  col="$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM pragma_table_info('captured_experiences') WHERE name='embedding';")"
+  [[ "${col:-0}" -eq 0 ]] && { note "capture embed outcome not assessable — pre-embedding schema (no embedding column) [not-assessable] (#15)"; return; }
+
+  n="$(sqlite_count_safe "$db" "SELECT COUNT(*) FROM (SELECT 1 FROM captured_experiences WHERE $graced ORDER BY completed_at DESC LIMIT 200);")"
+  if [[ "${n:-0}" -lt 50 ]]; then
+    note "capture embed outcome not assessable — only ${n:-0} row(s) past the 60m grace window (need 50) [not-assessable] (#15)"; return
+  fi
+  # COALESCE is load-bearing: SUM() over an empty set is NULL, and a NULL here
+  # would render as an empty string — indistinguishable from a failed read.
+  nul="$(sqlite_count_safe "$db" "SELECT COALESCE(SUM(embedding IS NULL),0) FROM (SELECT embedding FROM captured_experiences WHERE $graced ORDER BY completed_at DESC LIMIT 200);")"
+  pct=$(( ${nul:-0} * 100 / n ))
+  # Surface the window's age so a verdict describing a long-dead regime is
+  # self-evident rather than silently stale.
+  age="$(sqlite_count_safe "$db" "SELECT CAST((julianday('now')-julianday(MAX(completed_at)))*1440 AS INTEGER) FROM (SELECT completed_at FROM captured_experiences WHERE $graced ORDER BY completed_at DESC LIMIT 200);")"
+  local when="newest graced row ${age:-?}m old"
+  if [[ "$pct" -ge 50 ]]; then
+    # Deliberately does NOT name sync/fix-aqe: the embedder is not the fault here
+    # and no kit verb repairs this. Naming one would be a false instruction.
+    bad "capture embed DEAD: ${nul} of ${n} graced rows (${pct}%) have NO vector — the capture hook's un-awaited embed loses its race with subprocess exit (bare catch{}, upstream), so these rows never carry a vector in the pool. Harvest can still derive at replay time; the pool column stays empty. ${when} (#15)"
+  elif [[ "$pct" -gt 2 ]]; then
+    soft "capture embed LEAKING: ${pct}% of the last ${n} graced rows have no vector (healthy is 0%) — partial vector loss, cause unresolved. ${when} (#15)"
+  else
+    ok "capture embeds land: ${pct}% of the last ${n} graced rows lack a vector. ${when} (#15)"
+  fi
+}
+
+# ── Probe #16: stored-vector provenance (STORED-VECTOR-PROVENANCE-V1) ────────
+# A repaired embedder does NOT repair vectors already written. Hash-proxy rows
+# are 384-dim, 1536 bytes and unit-norm, so dimension_guard passes them
+# byte-identically; and the `model` column records the WRITER, not the embedder
+# — measured here, one label covered 139 proxies AND 51 genuine rows.
+# Geometry is the discriminator: genuine MiniLM vectors are fully dense
+# (nzFrac exactly 1.000), hash proxies are sparse (0.63-0.78). Measured against
+# the definitive cosine-vs-hash test on 502 real rows across two targets: they
+# agreed on every single row, 0 disagreements. Geometry is preferred because the
+# cosine test needs the row's exact source text, and at least three writers with
+# three different text recipes populate this table (one of which accepts a
+# caller-supplied vector whose text is not recoverable from the DB at all).
+# Scans rather than samples: contamination is episodic, so the newest-64 sample
+# read 95% while the full table read 69%. Cost is process startup, not rows.
+probe_stored_vector_provenance() {
+  local db="$AQE_DB" out state detail
+  if [[ ! -f "$db" ]]; then
+    note "stored-vector provenance not assessable — no AQE store [not-assessable] (#16)"; return
+  fi
+  out="$(node -e '
+const fs=require("fs"),path=require("path"),cp=require("child_process");
+const DB=process.argv[1];
+let Database=null;
+for (const c of (()=>{try{const g=cp.execSync("npm root -g",{stdio:["ignore","pipe","ignore"],timeout:10000}).toString().trim();
+  return [path.join(g,"agentic-qe","node_modules","better-sqlite3"),path.join(g,"better-sqlite3"),path.join(g,"ruflo","node_modules","better-sqlite3")];}catch(e){return[]}})())
+  { try { Database=require(c); break; } catch(e){} }
+if(!Database){process.stdout.write("not-assessable no loadable better-sqlite3 (cannot read vector blobs)");process.exit(0)}
+if(!fs.existsSync(DB)){process.stdout.write("not-assessable no AQE store");process.exit(0)}
+let db; try{ db=new Database(DB,{readonly:true,fileMustExist:true}); }
+catch(e){ process.stdout.write("not-assessable store unreadable ("+String(e.message||e).replace(/\s+/g," ").slice(0,90)+")"); process.exit(0) }
+let rows=[];
+try{
+  const t=db.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type=\x27table\x27 AND name=\x27qe_pattern_embeddings\x27").get();
+  if(!t||!t.c){ process.stdout.write("not-assessable qe_pattern_embeddings table absent"); process.exit(0) }
+  rows=db.prepare("SELECT embedding FROM qe_pattern_embeddings LIMIT 5000").all();
+}catch(e){ process.stdout.write("not-assessable table read failed ("+String(e.message||e).replace(/\s+/g," ").slice(0,90)+")"); process.exit(0) }
+finally{ try{db.close()}catch(e){} }
+if(rows.length<20){ process.stdout.write("not-assessable only "+rows.length+" stored pattern vector(s) (need 20)"); process.exit(0) }
+let proxy=0,lo=1,hi=0;
+for(const r of rows){
+  const b=r.embedding; if(!b||!b.byteLength) continue;
+  const v=new Float32Array(b.buffer,b.byteOffset,b.byteLength/4);
+  let nz=0; for(let i=0;i<v.length;i++) if(v[i]!==0) nz++;
+  const f=nz/v.length;
+  if(f<0.95){ proxy++; if(f<lo)lo=f; if(f>hi)hi=f; }
+}
+const pct=Math.round(proxy*100/rows.length);
+if(proxy===0) process.stdout.write("healthy all "+rows.length+" stored pattern vectors are dense (genuine MiniLM)");
+else process.stdout.write((pct>=25?"broken":"warn")+" "+proxy+" of "+rows.length+" stored pattern vectors ("+pct+"%) are HASH PROXIES (nzFrac "+lo.toFixed(2)+"-"+hi.toFixed(2)+" vs 1.000 genuine)");
+' "$db" 2>/dev/null)"
+  out="$(printf '%s' "$out" | tail -1)"
+  state="${out%% *}"; detail="${out#* }"
+  case "$state" in
+    healthy) ok "stored vectors genuine — $detail (#16)" ;;
+    warn)    soft "stored vectors partially contaminated: $detail — the model column does NOT distinguish them; a repaired embedder does not repair these rows (#16)" ;;
+    broken)  bad "STORED VECTORS CONTAMINATED: $detail. All carry a MiniLM model label, so the column cannot tell them apart. They poison HNSW recall, and fixing the embedder does NOT repair them — they must be re-embedded or purged (#16)" ;;
+    *)       note "stored-vector provenance not assessable — ${detail:-no verdict} [not-assessable] (#16)" ;;
+  esac
+}
+
 probe_capture_inflow() {
   local pool wired=0 exp_ts gap_h
   pool="$(count_tbl "$AQE_DB" captured_experiences)"
@@ -564,6 +688,8 @@ elif [[ "$SQLITE_BACKEND" == "node" ]]; then
   note "store reads via node better-sqlite3 fallback (sqlite3 CLI not installed)"
 fi
 probe_embedder_liveness
+probe_embed_outcome
+probe_stored_vector_provenance
 probe_capture_diversity
 probe_reflexion_store
 probe_lora_backend

@@ -193,7 +193,10 @@ describe('probe #12 capture-arm inflow (INFLOW-LIVENESS-V1)', () => {
     const j = parseJson(runVerify(d, ['--json']).stdout);
     // 6 -> 7: probe #14 (CAPTURE-DIVERSITY-V1) emits one not-assessable note on
     // this fixture's empty pool (needs >=50 eligible rows to judge diversity).
-    expect(j.info).toBe(7);
+    // 7 -> 9: probes #15 (EMBED-OUTCOME-V1) and #16 (STORED-VECTOR-PROVENANCE-V1)
+    // each add one not-assessable note here too — too few graced rows, and no
+    // qe_pattern_embeddings table in this fixture.
+    expect(j.info).toBe(9);
     const human = runVerify(d).stdout;
     expect(human).not.toMatch(/running for THIS target|running for a DIFFERENT workspace|no --workspace visible in argv/);
   });
