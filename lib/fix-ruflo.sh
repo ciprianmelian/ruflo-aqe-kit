@@ -2762,18 +2762,83 @@ if [[ -d "$CF_DIR" ]]; then
     fi
   fi
 
-  # Ghost hive-mind workers
-  if [[ -f "$CF_DIR/hive-mind/state.json" ]]; then
-    HIVE_SIZE="$(wc -c < "$CF_DIR/hive-mind/state.json" 2>/dev/null || echo 0)"
-    WORKER_COUNT="$(node -e "try{const d=require('$CF_DIR/hive-mind/state.json');console.log(Object.keys(d.workers||{}).length)}catch{console.log(0)}" 2>/dev/null)"
-    if [[ "$WORKER_COUNT" -gt 20 ]]; then
-      info "hive-mind has $WORKER_COUNT ghost workers — resetting"
-      if [[ "$DRY_RUN" -eq 1 ]]; then
-        info "[dry-run] Would: reset hive-mind/state.json to empty state"
+  # ── Ghost / malformed hive-mind state ──────────────────────────────────────
+  # HIVE-STATE-RESET-V1 BEGIN  (issue #7)
+  #
+  # `.claude-flow/hive-mind/state.json` is owned exclusively by the MCP
+  # hive-mind_* handlers (@claude-flow/cli dist/src/mcp-tools/hive-mind-tools.js
+  # — the only module in the whole dist that names HIVE_DIR). Its loader merges
+  # NO defaults: if the file parses, it is used AS-IS.
+  #
+  #   function loadHiveState() {
+  #       try { ... if (existsSync(path)) return JSON.parse(readFileSync(path)); }
+  #       catch { }
+  #       return {
+  #           initialized: false,
+  #           topology: 'mesh',
+  #           workers: [],                                 // ARRAY
+  #           consensus: { pending: [], history: [] },     // ARRAYS
+  #           sharedMemory: {},                            // NOT "kvStore"
+  #           createdAt: new Date().toISOString(),
+  #           updatedAt: new Date().toISOString(),
+  #       };
+  #   }                          (verified verbatim against ruflo 3.34.0)
+  #
+  # This kit used to "reset" the file to
+  #   {"queen":null,"workers":{},"consensus":{},"kvStore":{}}
+  # — an OBJECT where `workers` must be an array, a `consensus` with neither
+  # `pending` nor `history`, no `sharedMemory` at all, and a `kvStore` key that
+  # appears nowhere in the dist. Every subsequent hive-mind_status call then
+  # died with `MCP error -32603 ... state.workers.map is not a function`, and
+  # the damage was PERMANENT: the old ghost-count probe read 0 workers off that
+  # shape, so the reset never re-fired to correct itself.
+  #
+  # We DELETE the file rather than write a hand-built default. loadHiveState()
+  # already synthesises the correct default when the file is ABSENT, and
+  # saveHiveState() mkdir -p's the directory on the next write, so removal is
+  # self-maintaining: it cannot drift from upstream's schema the way a literal
+  # can (a literal would need re-verifying against the dist on every ruflo
+  # bump — exactly the failure this bug is). It is also strictly equivalent in
+  # outcome: absent file => initialized:false / status "offline" / 0 workers,
+  # which is precisely what "reset to empty state" was trying to express.
+  HIVE_STATE="$CF_DIR/hive-mind/state.json"
+  if [[ -f "$HIVE_STATE" ]]; then
+    # Verdict: "ok <n>" (contract-shaped, n workers) | "bad 0" (parsed but off
+    # contract, or unparseable) | non-zero exit => NOT ASSESSABLE (no node).
+    # The third state matters: without it a missing `node` reads exactly like
+    # a corrupt file and this step would delete a perfectly good state file.
+    if HIVE_VERDICT="$(node -e '
+      const fs = require("fs");
+      const isPlainObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+      try {
+        const s = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));
+        const ok = isPlainObj(s)
+          && Array.isArray(s.workers)
+          && isPlainObj(s.consensus)
+          && Array.isArray(s.consensus.pending)
+          && Array.isArray(s.consensus.history)
+          && isPlainObj(s.sharedMemory);
+        console.log(ok ? "ok " + s.workers.length : "bad 0");
+      } catch { console.log("bad 0"); }
+    ' "$HIVE_STATE" 2>/dev/null)"; then :; else HIVE_VERDICT=""; fi
+
+    HIVE_SHAPE="${HIVE_VERDICT%% *}"
+    WORKER_COUNT="${HIVE_VERDICT##* }"
+
+    if [[ -z "$HIVE_VERDICT" ]]; then
+      warn "hive-mind state NOT ASSESSABLE (node unavailable) — left untouched"
+    elif [[ "$HIVE_SHAPE" == "bad" ]] || [[ "$WORKER_COUNT" -gt 20 ]]; then
+      if [[ "$HIVE_SHAPE" == "bad" ]]; then
+        info "hive-mind state.json is off the hive-mind_status contract — clearing"
       else
-        echo '{"queen":null,"workers":{},"consensus":{},"kvStore":{}}' > "$CF_DIR/hive-mind/state.json"
-        fix "Reset ghost hive-mind workers"
-        pass "hive-mind state reset"
+        info "hive-mind has $WORKER_COUNT ghost workers — clearing"
+      fi
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "[dry-run] Would: remove hive-mind/state.json (upstream re-seeds its own default)"
+      else
+        rm -f "$HIVE_STATE"
+        fix "Cleared hive-mind state (loadHiveState() re-seeds the upstream default)"
+        pass "hive-mind state cleared"
       fi
     else
       pass "hive-mind state OK ($WORKER_COUNT workers)"
@@ -2781,6 +2846,7 @@ if [[ -d "$CF_DIR" ]]; then
   else
     pass "No hive-mind state (clean)"
   fi
+  # HIVE-STATE-RESET-V1 END
 
   # Ghost swarm state (running with 0 agents)
   if [[ -f "$CF_DIR/swarm/swarm-state.json" ]]; then
