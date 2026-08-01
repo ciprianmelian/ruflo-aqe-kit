@@ -576,6 +576,7 @@ if [[ "$FORENSICS" -eq 1 ]]; then
 
   # ── 3. Stale npx caches (listed the way fix-ruflo Step 7 finds them —
   #      depth-1 dirs under ~/.npm/_npx — but NEVER removed here) ─────────────
+  # shellcheck disable=SC2088  # literal ~ in a human-readable message, not a path
   header "npx-caches" "~/.npm/_npx entries mentioning the stack (list-only)"
   _NPX_HITS=0
   if [[ -d "$HOME/.npm/_npx" ]]; then
