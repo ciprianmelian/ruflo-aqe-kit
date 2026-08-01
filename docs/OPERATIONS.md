@@ -299,6 +299,30 @@ bin/ruflo-kit proof <target>                   # the evidence check alone, any t
 
 ---
 
+### B-embed. "verify-learning says capture embed DEAD" (probe #15)
+
+This is real and it is upstream's bug, not a kit misconfiguration. The capture
+hook inserts the experience row, fires the embedding **without awaiting it**
+inside a bare `catch{}`, and the CLI then calls `process.exit(0)` roughly 8-10ms
+later — while the embed needs ~104-120ms cold, and every hook is a fresh process.
+The vector is lost on every invocation, deterministically. No kit verb fixes it;
+the fix is upstream (await the embed before exit).
+
+What you can do:
+
+- `bin/ruflo-kit embed-sweep <target> --dry-run`, then without the flag, to
+  backfill the rows already lost. It refuses to write unless this host's embedder
+  reproduces the store's existing vectors, and it never overwrites.
+- Expect probe #15 to keep FAILing afterwards. That is correct: the sweep repairs
+  damage, not the cause, and #15 drives a real hook rather than reading the pool.
+
+**Do not trust "pool vector coverage" as evidence that capture works.** It counts
+fills from any writer — capture, upstream's boot-triggered backfill, or the kit's
+sweep — and cannot attribute them, because a backfilled vector compares equal
+under `Buffer.equals()` to a captured one (both writers use the same recipe and
+the same model) and nothing records when an embedding was written. Both live
+targets read 96-98% coverage while losing 100% of new vectors.
+
 ## C. Architecture (plain English)
 
 ### C1. Three layers

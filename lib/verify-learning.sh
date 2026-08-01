@@ -20,7 +20,12 @@ set -uo pipefail
 #   #10 SONA table unpopulated (sona_patterns 0)                            WARN
 #   #11 sona-seam sentinels (SONA-TRAIN-V1 + RUFLO-LORA-ADAPT-V1 in dist)   FAIL
 #   #12 capture-arm inflow (INFLOW-LIVENESS-V1: hooks wired + pool fresh)   FAIL-if-unwired / WARN-stale
+#   #13 embedder liveness (EMBEDDER-LIVENESS-V1: drives it, reads the vector) FAIL
+#   #14 capture input diversity (CAPTURE-DIVERSITY-V1: mode-share of texts)  FAIL
+#   #15 capture embed landing (CAPTURE-EMBED-LANDING-V1: drives real hooks)  FAIL
+#   #16 stored-vector provenance (hash proxies vs genuine MiniLM)            FAIL
 #   #7 model router liveness (totalDecisions / routing_outcomes)            INFO
+#   pool vector coverage (repair history, NOT capture health)               INFO
 #
 # Usage:
 #   bin/ruflo-kit verify-learning <target>            # human report, exit 1 if hollow

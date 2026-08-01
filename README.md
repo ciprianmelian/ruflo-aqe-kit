@@ -70,6 +70,7 @@ Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` di
 | `dashboard <target>` | `tools/dashboard.cjs` | On-demand **local web dashboard** (DASHBOARD-V1): live status cards + health/bench history at `http://127.0.0.1:7431`. Foreground (Ctrl-C stops), read-only, localhost-only, $0 — never detaches. Flags: `--port N`. |
 | `bench <target>` | `tools/selfimprove-bench.cjs` | READ-ONLY routing-improvement instrument. Flags: `--json`, `--quiet`, `--aqe-confidence`. |
 | `harvest <target>` | `tools/aqe-harvest.cjs` | Batch-replay AQE experiences into the ruflo substrate (SONA LoRA + AgentDB). |
+| `embed-sweep <target>` | `tools/aqe-embed-sweep.cjs` | Backfill `captured_experiences.embedding` for rows the capture hook dropped (upstream fires the embed un-awaited, then `process.exit(0)`). Opt-in and explicitly NOT part of `sync` — sweeping right before `verify-learning` would launder its own verdict. Refuses to write unless this host's embedder reproduces the store's existing vectors. Flags: `--dry-run`, `--limit N`, `--json`. |
 | *(node)* `tools/improvement-eval.cjs` | — | Gate-#4 proof instrument: multi-seed held-out eval, permutation *p* + Cohen's *d* vs the no-train control, hard 2σ/3-run gate. `--selftest`, `--json`. |
 | `version` | `bin/ruflo-kit` | Print the kit git sha + detected global `ruflo` / `agentic-qe` versions. |
 | `self-update` | `bin/ruflo-kit` | Fast-forward `git pull` the kit clone (then re-run `fix-ruflo` per Patch 44). |
@@ -83,7 +84,7 @@ lib/      *.sh + common.sh   shell implementations (common.sh resolves KIT_DIR v
 assets/   claude-helpers/    hook helpers installed into the target's .claude/helpers/
           claude-commands/   kit-maintained .claude/commands docs
           builds/            prebuilt RuVector native (.node) binaries
-tools/    *.cjs              node tools (bench, harvest, improvement-eval)
+tools/    *.cjs              node tools (bench, harvest, embed-sweep, improvement-eval)
 docs/     narrative docs     deep rationale, cheatsheet, operations, R&D status
 tests/    *.test.js          vitest suite (npm test -- --run); guards helpers + patch invariants
 .github/  workflows/         CI: shellcheck + nightly upstream-drift probe (real-latest install + heal + health)

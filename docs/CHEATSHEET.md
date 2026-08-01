@@ -46,6 +46,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 | Disable Router-B exploration (regression-safe / control) | set env `RUFLO_ROUTE_EPSILON=0` |
 | Test the reward oracle | `node assets/claude-helpers/_derive-outcome.cjs --selftest` |
 | Harvest AQE patterns into ruflo | `bin/ruflo-kit harvest <target>` |
+| Backfill vectors the capture hook dropped | `bin/ruflo-kit embed-sweep <target>` (`--dry-run` first) |
 | Security scan (CLI/MCP — no kit script) | `ruflo security scan` |
 
 Flag support varies — see [OPERATIONS.md](./OPERATIONS.md) for the exact flags per command and the verify steps. (`fix-statusbar` and `session` take no flags; security scanning is a CLI/MCP capability, not a kit command.) The AQE upgrade row is a manual sequence — `upgrade` is ruflo-only and never touches AQE; see [A3b](./OPERATIONS.md#a3b-upgrade-aqe).
@@ -73,6 +74,7 @@ Each `bin/ruflo-kit <command>` dispatches to an implementation in `lib/` (shell)
 | `session` → `lib/session-init.sh` | Per-session init: applies patches, checks MCP + daemon, verifies storage and controllers. No flags. |
 | `upgrade` → `lib/upgrade.sh` | Upgrade global ruflo, wipe + rehydrate npx cache, re-run `fix-ruflo`, then `init --reactivate`. `--dry-run`. Run AFTER closing the session. |
 | `harvest` → `tools/aqe-harvest.cjs` | Batch-replay AQE's recorded experiences into the ruflo substrate (SONA LoRA + AgentDB). Wired to SessionEnd by `fix-aqe`; AQE DB opened read-only; idempotent via `.swarm/harvest-state.json`. Resolves globals via `npm root -g` (custom npm prefixes like `~/.npm-global` work — Patch 65). |
+| `embed-sweep` → `tools/aqe-embed-sweep.cjs` | Backfills `captured_experiences.embedding` for rows whose vector the capture hook lost. **Repairs damage, never the cause** — the fix is upstream (await the embed). Deliberately NOT in `sync`: it writes the very column `verify-learning` reads, so running it there would launder the verdict. Guards: identity gate (20 existing rows must re-derive at cosine >= 0.9999 before ANY write), never overwrites, never writes the all-zero vector `computeRealEmbedding` returns for non-semantic text, backs the store up first. Ledger `.swarm/embed-sweep-state.json` is the rollback record. |
 | `bench` → `tools/selfimprove-bench.cjs` | READ-ONLY longitudinal instrument for "is routing measurably improving?". `--json`, `--quiet`, `--aqe-confidence`. Run a TRAINED arm and a no-train CONTROL arm (`RUFLO_ROUTE_EPSILON=0 RUFLO_DISABLE_TRAINING=1`) under the same `scorerVersion=norm-v1`, into separate histories — proof needs cross-session runs (R&D gate 3). |
 | `assets/claude-helpers/_derive-outcome.cjs` | The objective reward oracle (`DERIVE-OUTCOME-V2`, Patch 36) — graded two-regime reward consumed by the route/train hooks. `--selftest` runs 11 cases. Installed to `.claude/helpers/` by `fix-aqe`. |
 | `tools/improvement-eval.cjs` | Gate-#4 instrument (Patch 54) — multi-seed runs, permutation-test *p*-value, Cohen's *d*, hard **2σ / 3-run** pass gate. `--selftest` validates the instrument. The gate stays **OPEN** until ≥3 cross-session runs. |
