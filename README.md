@@ -84,7 +84,8 @@ lib/      *.sh + common.sh   shell implementations (common.sh resolves KIT_DIR v
 assets/   claude-helpers/    hook helpers installed into the target's .claude/helpers/
           claude-commands/   kit-maintained .claude/commands docs
           builds/            prebuilt RuVector native (.node) binaries
-tools/    *.cjs              node tools (bench, harvest, embed-sweep, improvement-eval)
+tools/    *.cjs              node tools (bench, harvest, embed-sweep, improvement-eval,
+                              dist patchers: backup-integrity, plugin-manifest)
 docs/     narrative docs     deep rationale, cheatsheet, operations, R&D status
 tests/    *.test.js          vitest suite (npm test -- --run); guards helpers + patch invariants
 .github/  workflows/         CI: shellcheck + nightly upstream-drift probe (real-latest install + heal + health)
