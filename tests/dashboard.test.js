@@ -289,29 +289,37 @@ describe('DASHBOARD-ORPHAN-GUARD-V1: the server does not outlive its parent', ()
   }, 90000);
 
   it('takes its in-flight evidence subprocess down with it on shutdown', async () => {
-    // `proof` runs for minutes. Ctrl-C during one must not leave a detached
-    // probe run chewing CPU — the same contract, one level down.
+    // Ctrl-C during an evidence run must not leave a detached probe behind —
+    // the orphan contract, one level down.
+    //
+    // Driven with verify-learning rather than proof ON PURPOSE. `proof` spawns
+    // 16 probes plus MCP handshakes, and running one here competed with
+    // tests/proof-truth-hardening.test.js, whose own handshake timeouts then
+    // fired under the load and reported an escalation that was pure
+    // contention. verify-learning takes seconds and is still comfortably long
+    // enough to observe the child and kill it — the property is "the child
+    // dies with the server", not "the child was expensive".
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'osam-dash-child-'));
     const started = await startServer(fixture);
-    const r = await req(started.port, '/api/evidence/proof', { token: started.token, method: 'POST' });
+    const r = await req(started.port, '/api/evidence/verify-learning', { token: started.token, method: 'POST' });
     expect(r.status).toBe(202);
 
     // Positive control: wait until the subprocess genuinely exists. Without
-    // it, "no proof.sh running" after the kill would prove nothing at all.
+    // it, "no child running" after the kill would prove nothing at all.
     // The dashboard passes its RESOLVED cwd to the verb, and on macOS
     // os.tmpdir() hands back /var/folders/... which is a symlink to
     // /private/var/folders/... — matching on the unresolved path finds nothing.
     const real = fs.realpathSync(fixture);
     const findChild = () => {
       try {
-        return execFileSync('pgrep', ['-f', `proof.sh ${real}`], { encoding: 'utf8' })
+        return execFileSync('pgrep', ['-f', `verify-learning.sh ${real}`], { encoding: 'utf8' })
           .trim().split('\n').filter(Boolean).map(Number);
       } catch { return []; }
     };
     const upBy = Date.now() + 20000;
     let kids = [];
     while (Date.now() < upBy && !kids.length) { kids = findChild(); if (!kids.length) await sleep(300); }
-    expect(kids.length, 'proof subprocess never started — nothing was proved').toBeGreaterThan(0);
+    expect(kids.length, 'evidence subprocess never started — nothing was proved').toBeGreaterThan(0);
 
     started.child.kill('SIGTERM');
 

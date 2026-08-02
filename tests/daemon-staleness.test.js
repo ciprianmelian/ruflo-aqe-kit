@@ -164,8 +164,24 @@ function mkDist(patchEpoch) {
   return dist;
 }
 
+// The script is fed on STDIN, not via `bash -c`, and that is load-bearing.
+//
+// With `-c` the entire script text becomes argv[2] of the bash process. These
+// fixtures deliberately contain the string `bin/cli.js daemon start`, which is
+// EXACTLY one of the two patterns the kit greps for a live daemon
+// (`kit_daemon_ps_lines`, lib/common.sh). Any suite running in parallel that
+// does a global `pgrep -f 'bin/cli.js daemon start'` — tests/status.test.js
+// asserts status.sh's daemon field against live pgrep truth, and
+// tests/verify-learning-dryrun.test.js compares warn counts across two runs —
+// would see these fixtures as a REAL running daemon for the moment they exist,
+// and fail intermittently. Observed twice on full-suite runs.
+//
+// A script on stdin never appears in argv, so the fixtures stay invisible to
+// pgrep. Behaviour is otherwise identical here: none of these scripts reads
+// stdin itself or depends on $0/positional parameters.
 function runBash(script, env = {}) {
-  const r = spawnSync('bash', ['-c', script], {
+  const r = spawnSync('bash', [], {
+    input: script,
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
