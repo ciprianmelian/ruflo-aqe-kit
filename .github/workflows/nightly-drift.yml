@@ -23,6 +23,16 @@ jobs:
         node: [22]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # FULL history is required, not an optimisation. Four teeth suites
+          # reconstruct a PRE-FIX script with `git show <sha>:lib/<name>` to
+          # prove the fixture still fails without the fix — they pin explicit
+          # SHAs (0561b7c, 61f6c92) precisely so the baseline cannot drift.
+          # checkout's default depth of 1 has none of that history, so those
+          # tests die with `fatal: invalid object name '0561b7c'` and the whole
+          # nightly goes red. First hit the night after the SHA-pinned suites
+          # landed; the local suite never saw it because a dev clone is deep.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
