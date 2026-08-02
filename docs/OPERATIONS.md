@@ -13,6 +13,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
   - [A3b. Upgrade AQE](#a3b-upgrade-aqe)
   - [A4. Fix config drift](#a4-fix-config-drift)
   - [A5. Health check](#a5-health-check)
+  - [A5b. Operator console (browser triage)](#a5b-operator-console-browser-triage)
   - [A6. Self-improvement bench](#a6-self-improvement-bench)
   - [A7. Security scan](#a7-security-scan)
   - [A8. Daemon & token cost](#a8-daemon--token-cost)
@@ -168,6 +169,31 @@ Or run only the one that drifted:
 
 **Verify:** healthy = growth or steady across runs (exits 0). The script **exits non-zero if anything regressed**, so it doubles as a CI gate — a degraded run = repeated regressions; investigate via A4, then [./_INSTRUCTIONS.md](./_INSTRUCTIONS.md).
 
+### A5b. Operator console (browser triage)
+
+*Use when:* you want the whole stack's state on one screen — and, for anything wrong, the exact command that fixes it — instead of reading `status --json` by eye.
+
+1. Run: `bin/ruflo-kit dashboard <target>` — starts a **foreground**, **read-only**, loopback-only HTTP server. It never detaches, never installs launchd/cron, never makes a billed call, and exits by itself if the shell that launched it dies. Ctrl-C stops it.
+2. Open the URL it prints. It carries a one-time session token in the `#` fragment (never a query param, never logged). Any other process on this machine that reaches `127.0.0.1` without that token is refused, as is any request carrying a foreign `Host` or `Origin` — this page reports absolute paths, versions and store contents. Add `#tab=evidence` to deep-link a panel.
+3. Pick a port: `--port N` (`0` = ephemeral, printed on start).
+
+**Reading the Triage tab** — three conventions, each load-bearing:
+
+| Level | Means | Act? |
+|---|---|---|
+| `fail` | broken now | yes — the row carries the command |
+| `warn` | degraded, or **costing money** (a running daemon is the only row that can spend) | usually |
+| `unknown` | **could not be measured** — not "fine" | investigate; the verdict reads `partial`, never `healthy` |
+| `ok` | verified healthy | no |
+
+- **`by design` rows are intentional** and never raise the verdict — the AgentDB shadow pin, an opt-in brain KB, a stopped daemon. They are the same states CLAUDE.md's kit-managed block lists as "do NOT fix these". A console that flagged them would train you to ignore it.
+- **Every non-ok row carries a literal command** with the concrete target path substituted, click-to-copy. If a row cannot name a command, it is reporting a reading, not asking for an action.
+- Cards sort worst-first; cost sorts first among equals.
+
+**Evidence tab:** runs `verify-learning` (~3s) or `proof` (minutes, spawns MCP handshakes, still no billed calls) on demand, single-flight. Results are **never auto-refreshed** and always show when they were produced — a stale `PROVED` must not read as current.
+
+**Verify:** the printed URL loads, the verdict chip matches what `bin/ruflo-kit status <target>` reports, and Ctrl-C leaves no listening process behind (`pgrep -f dashboard.cjs` → empty).
+
 ### A6. Self-improvement bench
 
 *Use when:* settling "are routing decisions measurably improving?" with data, not assertion.
@@ -295,6 +321,9 @@ bin/ruflo-kit proof <target>                   # the evidence check alone, any t
 | AQE pattern distillation / promoted pattern gone after an `agentic-qe` reinstall or DB re-init | Reinstall overwrote the AQE-PROMOTE-V1 dist patch and/or dropped the minted `qe_patterns` row | `bin/ruflo-kit fix-aqe <target> && aqe learning extract` |
 | Session feels "cold" / no memory recall | `ruflo-session-init.sh` not run this session | Run [A2](#a2-session-start) |
 | Tests hang / never exit | `npm test` started in watch mode | Use `npm test -- --run` |
+| Dashboard shows `401` / a blank page, or every card reads `unknown` | The page was opened without the `#t=…` fragment (a bookmark keeps the path but drops the token), so every data route is refused | Re-open the URL the command printed. The token is per-run: restarting the dashboard mints a new one |
+| Dashboard verdict is `partial` with no `fail`/`warn` | Something could not be **measured** — `unknown` is a third state, never "fine" | Open the `unknown` rows; each names the fact that was unreadable. Cross-check with `bin/ruflo-kit status <target> --json` |
+| A dashboard is still listening after the terminal closed | Should not happen — the console exits when its launcher dies | `pgrep -f dashboard.cjs`; if any survive, report it (the orphan guard failed) |
 | `*.db` corruption or accidental wipe | Destructive op on a database file | Restore from backup; **never** `rm -f` on `.agentic-qe/` or `*.db` |
 
 ---

@@ -14,7 +14,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 | **Prove the stack works, from disk evidence** (16 probes, run twice, exit 0 only on PROVED) | `ruflo-kit proof <target>` (`--single` for one pass, `--json` for machines) |
 | **See the current state at a glance** (versions, sentinels, daemon, learning) | bare `ruflo-kit` — or `ruflo-kit status <target>` (`--json` for machines) |
 | **Heal everything with one verb** (fix-ruflo → fix-aqe → fix-statusbar → fix-brain → verify) | `ruflo-kit sync <target>` (`--dry-run` first if unsure) |
-| **Watch the stack in a browser** (live status + health/bench history) | `ruflo-kit dashboard <target>` → http://127.0.0.1:7431 (foreground, read-only, Ctrl-C stops) |
+| **Triage the stack in a browser** (what's wrong + the command that fixes it) | `ruflo-kit dashboard <target>` → open the printed URL (it carries a one-time token in the `#` fragment). Foreground, read-only, Ctrl-C stops. `#tab=evidence` deep-links the on-demand `verify-learning` / `proof` runs. |
 | Install the kit on a new machine (clone + PATH symlink) | `curl -fsSL https://raw.githubusercontent.com/ciprianmelian/ruflo-aqe-kit/main/install.sh \| bash` |
 | Update the kit clone | `ruflo-kit self-update` (or re-run the installer) |
 | Show kit + ruflo + aqe versions | `ruflo-kit version` |

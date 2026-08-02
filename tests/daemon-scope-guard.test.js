@@ -153,7 +153,14 @@ const UNSCOPED_DETECTION_RE = /kit_daemon_ps_lines|pgrep\s+-f\s+['"](bin\/cli\.j
 const SCOPE_SPLIT_RE = /(?<![A-Za-z0-9_])kit_daemon_scope_split(?![A-Za-z0-9_])/;
 
 function libShFiles() {
-  return fs.readdirSync(LIB).filter((f) => f.endsWith('.sh'));
+  // Dotfiles are excluded because tests/dryrun-mutation-guard.test.js writes
+  // `lib/.pretest-b11-<name>.sh` — a copy of a script as it was BEFORE a fix —
+  // into the real lib/ so that KIT_DIR resolves correctly, then removes it in
+  // a finally. While it exists, this guard (running in parallel) would scan a
+  // deliberately pre-fix script and fail against a defect that was already
+  // fixed. No real kit script is a dotfile, so skipping them is exact, not a
+  // workaround: it narrows the scan to the files the guard is actually about.
+  return fs.readdirSync(LIB).filter((f) => f.endsWith('.sh') && !f.startsWith('.'));
 }
 
 describe('DAEMON-HINT-SCOPE-V1 guard: unscoped daemon detection must route remediation through kit_daemon_scope_split', () => {

@@ -87,7 +87,8 @@ Commands:
   fix-ruflo      Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup
   fix-aqe        Codify AQE-side hardening + install .claude helpers/commands
   fix-brain      Register the vendored ruvnet-brain search_ruvnet MCP server (MCP-only; --download to fetch the KB)
-  dashboard      On-demand local web dashboard (foreground, read-only, 127.0.0.1; --port N; Ctrl-C stops)
+  dashboard      On-demand local operator console: triage cards with fix commands, on-demand
+                 evidence runs, history (foreground, read-only, token-gated 127.0.0.1; --port N)
   fix-statusbar  Restore the rich ruflo + Agentic QE v3 statusline
   upgrade        Major-version ruflo migration (stop daemon, bump, re-activate)
   verify-learning Read-only learning-loop liveness probes (CI-friendly exit code)
@@ -464,13 +465,30 @@ EOF
     dashboard) cat <<'EOF'
 Usage: ruflo-kit dashboard <target> [--port N]
 
-  On-demand LOCAL web dashboard: foreground only, dies on Ctrl-C, binds
+  On-demand LOCAL operator console: foreground only, dies on Ctrl-C, binds
   127.0.0.1 only, serves disk-derived truth. Never detaches, never installs
-  launchd/cron.
-  Mutates target:   NO (read-only; serves `status --json` + history files)
+  launchd/cron, and exits by itself if the process that launched it goes away.
+
+  Triage tab   subsystem cards, worst-first, each non-ok row carrying the
+               literal command that fixes it. States this kit documents as
+               deliberate (the AgentDB shadow pin, an opt-in brain KB) are
+               marked "by design" and never raise the verdict; anything that
+               could not be measured reads "unknown", never "ok".
+  Evidence tab run verify-learning (~3s) or proof (minutes) on demand; results
+               always carry the time they were produced.
+  History tab  health-snapshot growth trend + bench/eval counts.
+
+  It prints a URL carrying a one-time session token in the # fragment (never a
+  query param, never logged). Any other process on this machine that reaches
+  127.0.0.1 without that token is turned away, and requests carrying a foreign
+  Host or Origin are refused outright — this page reports absolute paths and
+  store contents. Append '#tab=evidence' to deep-link a panel.
+
+  Mutates target:   NO (read-only; serves `status --json`, history files, and
+                    the read-only verify-learning / proof verbs)
   Starts daemon:    NO — but DOES start a foreground local HTTP server for as
                     long as it runs (stopped by Ctrl-C, never backgrounded)
-  Billed / network: NO (localhost only)
+  Billed / network: NO (localhost only; no LLM calls, no internet)
 EOF
     ;;
     session|session-init) cat <<'EOF'

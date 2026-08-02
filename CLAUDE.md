@@ -359,8 +359,8 @@ Task({ prompt: "Security audit", subagent_type: "qe-security-scanner", run_in_ba
 
 This project is adopted by the ruflo-aqe-kit at `/Users/cm/THE_AI/osam-fullstack-codebase`. This block is kit-managed — edits between the markers are re-asserted by `fix-ruflo`.
 
-- Heal/check (run from the kit clone): `bin/ruflo-kit sync <target>` (one-verb heal) · `bin/ruflo-kit status <target>` (disk-derived truth) · `bin/ruflo-kit proof <target>` (evidence-probe verdict).
-- Deliberate states — do NOT "fix" these:
+- Heal/check (run from the kit clone): `bin/ruflo-kit sync <target>` (one-verb heal) · `bin/ruflo-kit status <target>` (disk-derived truth) · `bin/ruflo-kit proof <target>` (evidence-probe verdict) · `bin/ruflo-kit dashboard <target>` (browser triage: what is wrong + the command that fixes it).
+- Deliberate states — do NOT "fix" these (the dashboard marks each of these "by design"):
   - **AgentDB shadow pin**: the hoisted `ruflo/node_modules/agentdb` floor and the nested `@claude-flow/memory/node_modules/agentdb` pin (`3.0.0-alpha.10`) are MEANT to differ (nearest-first resolution gives the memory layer the full controller surface).
   - **MCP launch**: the claude-flow MCP server launches from the GLOBAL `ruflo` binary (`.mcp.json` -> `command: "ruflo"`), never `npx` — npx cache reconciliation would revert the AgentDB pin.
   - **Daemon autostart is pinned OFF in 3 channels** (`RUFLO_DAEMON_MODE` default off; `.agentic-qe/config.yaml daemonAutoStart: false`; `claude-flow.config.json {"daemon":{"autostart":false}}`). An explicit `ruflo daemon start` is the opt-in — and then you own `ruflo daemon stop`.

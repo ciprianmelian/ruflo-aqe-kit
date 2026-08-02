@@ -67,7 +67,7 @@ Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` di
 | `upgrade <target>` | `lib/upgrade.sh` | Upgrade global ruflo, wipe + rehydrate the npx cache, re-run fix-ruflo, then `init --reactivate`. Flags: `--dry-run`. Run AFTER closing the session. |
 | `verify-learning <target>` | `lib/verify-learning.sh` | READ-ONLY learning-loop liveness probes (committed rows only, never MCP self-reports); verdict live/partial/hollow, CI exit 1 on hollow. |
 | `fix-learning <target>` | `lib/fix-learning.sh` | Populate/unlock the learning loop (extract → consolidate → dream → train → harvest) with lock-retry + persist-assertions. Never starts the daemon. Flags: `--cleanup --confirm`. |
-| `dashboard <target>` | `tools/dashboard.cjs` | On-demand **local web dashboard** (DASHBOARD-V1): live status cards + health/bench history at `http://127.0.0.1:7431`. Foreground (Ctrl-C stops), read-only, localhost-only, $0 — never detaches. Flags: `--port N`. |
+| `dashboard <target>` | `tools/dashboard.cjs` | On-demand **local operator console** (DASHBOARD-V2) at `http://127.0.0.1:7431`. **Triage** cards worst-first, every non-ok row carrying the literal fix command; deliberate states (AgentDB shadow pin, opt-in brain KB) marked *by design*; anything unmeasurable reads *unknown*, never *ok*. **Evidence** runs `verify-learning`/`proof` on demand, always stamped with when they were produced. **History** plots health growth. Foreground (Ctrl-C stops), read-only, $0 — never detaches, and exits by itself if its launcher dies. Token-gated: the URL carries a one-time session token in the `#` fragment; foreign `Host`/`Origin` are refused (DNS-rebinding defence). Flags: `--port N`. |
 | `bench <target>` | `tools/selfimprove-bench.cjs` | READ-ONLY routing-improvement instrument. Flags: `--json`, `--quiet`, `--aqe-confidence`. |
 | `harvest <target>` | `tools/aqe-harvest.cjs` | Batch-replay AQE experiences into the ruflo substrate (SONA LoRA + AgentDB). |
 | `embed-sweep <target>` | `tools/aqe-embed-sweep.cjs` | Backfill `captured_experiences.embedding` for rows the capture hook dropped (upstream fires the embed un-awaited, then `process.exit(0)`). Opt-in and explicitly NOT part of `sync` — sweeping right before `verify-learning` would launder its own verdict. Refuses to write unless this host's embedder reproduces the store's existing vectors. Flags: `--dry-run`, `--limit N`, `--json`. |
@@ -86,6 +86,8 @@ assets/   claude-helpers/    hook helpers installed into the target's .claude/he
           builds/            prebuilt RuVector native (.node) binaries
 tools/    *.cjs              node tools (bench, harvest, embed-sweep, improvement-eval,
                               dist patchers: backup-integrity, plugin-manifest)
+          dashboard/         operator console: triage (pure status→rows derivation),
+                              security (loopback request gate), page (self-contained UI)
 docs/     narrative docs     deep rationale, cheatsheet, operations, R&D status
 tests/    *.test.js          vitest suite (npm test -- --run); guards helpers + patch invariants
 .github/  workflows/         CI: shellcheck + nightly upstream-drift probe (real-latest install + heal + health)
