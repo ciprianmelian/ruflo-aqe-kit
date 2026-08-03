@@ -82,9 +82,9 @@ install.sh                   one-line installer (clone + PATH symlink); also --u
 bin/      ruflo-kit          single entrypoint dispatcher
 lib/      *.sh + common.sh   shell implementations (common.sh resolves KIT_DIR vs TARGET_DIR)
 assets/   claude-helpers/    hook helpers seeded into a target's .claude/helpers/ when missing.
-                              The four kit-authored ones are canonical here; the ruflo-owned
-                              ones seed from the INSTALLED ruflo (HELPER-SEED-UPSTREAM-V1) and
-                              these copies are only an offline fallback.
+                              Canonical for all but intelligence.cjs, which seeds from the
+                              INSTALLED ruflo (HELPER-SEED-UPSTREAM-V1) because its tests need
+                              a function only upstream defines; this copy is then a fallback.
           claude-commands/   kit-maintained .claude/commands docs
           builds/            prebuilt RuVector native (.node) binaries
 tools/    *.cjs              node tools (bench, harvest, embed-sweep, improvement-eval,

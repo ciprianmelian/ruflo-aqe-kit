@@ -144,16 +144,26 @@ else
   # vendored copy when ruflo cannot be resolved (offline, or upstream moved
   # the path), so this never makes a working target worse.
   RUFLO_HELPERS="$(kit_ruflo_helper_dir 2>/dev/null || true)"
-  # hook-handler.cjs is DELIBERATELY NOT in this set even though ruflo ships one:
-  # the kit's vendored copy carries HOOK-BLOCK-EXIT2-V1 (the dangerous-command
-  # block) and upstream's copy does not. Seeding upstream's would hand a fresh
-  # target an unpatched hook and leave the security property depending on Step 8's
-  # anchor still matching a newer upstream shape. Keeping the healed copy means
-  # the block is present by construction, not by successful re-patching.
+  # ONLY intelligence.cjs. This set was briefly wider and that was a mistake,
+  # caught by nightly-drift: EVERY seeded helper is pinned by a kit test that
+  # asserts the behaviour of the kit's VENDORED copy (router.js → router.test.js,
+  # session.js → session{,-memory}.test.js, statusline.js → statusline-js.test.js,
+  # and so on). Seeding those from upstream fixed nothing and broke four suites.
+  #
+  # intelligence.cjs is the one genuine case, and it is the reverse: its three
+  # test files require `resolveProjectRoot`, which ONLY upstream's copy defines
+  # — the vendored fossil predated it, which is what broke CI in the first place.
+  # So upstream is authoritative for this file and the kit must not freeze it.
+  #
+  # hook-handler.cjs is excluded for a third, stronger reason even though ruflo
+  # ships one: the kit's vendored copy carries HOOK-BLOCK-EXIT2-V1 (the
+  # dangerous-command block) and upstream's does not. Seeding upstream's would
+  # hand a fresh target an unpatched hook and leave that security property
+  # depending on Step 8's anchor still matching a newer upstream shape, instead
+  # of being present by construction.
   _helper_is_upstream_owned() {
     case "$1" in
-      auto-memory-hook.mjs|intelligence.cjs|learning-service.mjs|memory.js) return 0 ;;
-      metrics-db.mjs|router.js|session.js|statusline.js) return 0 ;;
+      intelligence.cjs) return 0 ;;
       *) return 1 ;;
     esac
   }

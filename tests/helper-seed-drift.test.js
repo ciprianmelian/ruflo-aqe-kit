@@ -60,17 +60,41 @@ function isUpstreamOwned(helper) {
 }
 
 describe('the classifier decides seed provenance', () => {
-  it('routes ruflo-owned helpers to the upstream source', () => {
-    for (const h of ['intelligence.cjs', 'router.js', 'session.js', 'metrics-db.mjs',
-      'statusline.js', 'learning-service.mjs', 'memory.js', 'auto-memory-hook.mjs']) {
-      expect(isUpstreamOwned(h), `${h} should seed from upstream`).toBe('YES');
+  it('seeds intelligence.cjs from upstream — the one file whose tests require it', () => {
+    // Its three suites call `resolveProjectRoot`, which ONLY upstream's copy
+    // defines. The vendored fossil predated it; that is what broke CI.
+    expect(isUpstreamOwned('intelligence.cjs')).toBe('YES');
+  });
+
+  it('keeps every OTHER helper vendored, because a kit test pins each one', () => {
+    // This set was briefly wider and nightly-drift caught it: seeding these
+    // from upstream broke router.test.js, session.test.js,
+    // session-memory.test.js and statusline-js.test.js in one go. Each of
+    // these files is asserted against the KIT's curated copy, so upstream is
+    // NOT authoritative for them — the opposite of intelligence.cjs.
+    for (const h of ['router.js', 'session.js', 'statusline.js', 'memory.js',
+      'metrics-db.mjs', 'auto-memory-hook.mjs', 'learning-service.mjs',
+      'brain-checkpoint.cjs', 'github-safe.mjs', 'ruflo-hook.cjs',
+      'statusline-v3.cjs', 'statusline.cjs']) {
+      expect(isUpstreamOwned(h), `${h} must stay vendored — a kit test pins it`).toBe('NO');
     }
   });
 
-  it('keeps kit-authored helpers vendored (they have no upstream counterpart)', () => {
-    for (const h of ['brain-checkpoint.cjs', 'github-safe.mjs', 'ruflo-hook.cjs',
-      'statusline-v3.cjs', 'statusline.cjs']) {
-      expect(isUpstreamOwned(h), `${h} has no upstream copy`).toBe('NO');
+  it('pins the pairing, so widening the set again fails here first', () => {
+    // The rule in one assertion: a helper may seed from upstream ONLY if no
+    // kit test reads the kit's own copy of it. Derived from the test corpus,
+    // not a second hardcoded list that could rot independently.
+    const pinnedByTests = new Set();
+    for (const f of fs.readdirSync(path.join(REPO, 'tests'))) {
+      if (!f.endsWith('.test.js')) continue;
+      const src = fs.readFileSync(path.join(REPO, 'tests', f), 'utf8');
+      for (const m of src.matchAll(/helpers\/([a-z0-9._-]+\.(?:cjs|mjs|js))/g)) pinnedByTests.add(m[1]);
+    }
+    expect(pinnedByTests.size, 'no helper references found — the scan is broken').toBeGreaterThan(4);
+
+    for (const h of pinnedByTests) {
+      if (h === 'intelligence.cjs') continue; // documented exception, asserted above
+      expect(isUpstreamOwned(h), `${h} is pinned by a kit test but seeds from upstream`).toBe('NO');
     }
   });
 
