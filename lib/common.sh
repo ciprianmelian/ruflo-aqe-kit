@@ -167,6 +167,32 @@ kit_npm_global_install() {
   return 1
 }
 
+# ── HELPER-SEED-UPSTREAM-V1 ────────────────────────────────────────────────
+# Echo the directory ruflo ships its .claude/helpers from, or nothing when it
+# cannot be resolved (ruflo absent, or upstream moved the path).
+#
+# WHY THIS EXISTS. The kit used to vendor a frozen COPY of every helper under
+# assets/claude-helpers/ and seed a fresh target from it. Most of those files
+# are ruflo's, not the kit's, so each vendored copy is a fossil that drifts the
+# moment ruflo ships a new one. Measured 2026-08-03 against ruflo 3.34.0:
+# SEVEN of thirteen seeds had drifted, and the one that mattered
+# (intelligence.cjs) predated `resolveProjectRoot` entirely — so a clean
+# checkout got a helper missing a function three test files require, while a
+# developer machine (where ruflo's session hooks write the real helper) passed.
+# That is the same stale-vendored-artifact class docs/DOC-SURFACE-GUARD was
+# built for after the brain launcher drifted.
+#
+# The global `ruflo` binary is a thin wrapper; the real tree — helpers included
+# — lives in the nested @claude-flow/cli package.
+kit_ruflo_helper_dir() {
+  local groot d
+  groot="$(npm root -g 2>/dev/null || echo '')"
+  [[ -n "$groot" ]] || return 1
+  d="$groot/ruflo/node_modules/@claude-flow/cli/.claude/helpers"
+  [[ -d "$d" ]] || return 1
+  printf '%s' "$d"
+}
+
 # ── SQLite access shims (seed of the sqlite shim — snapshot/adopt use these;
 # a later task extends them). Primary: the sqlite3 CLI when `command -v sqlite3`
 # hits. Fallback: node + better-sqlite3 resolved from the GLOBAL ruflo install

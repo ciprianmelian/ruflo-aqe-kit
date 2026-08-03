@@ -81,7 +81,10 @@ Everything runs through the single `bin/ruflo-kit <command> <target> [flags]` di
 install.sh                   one-line installer (clone + PATH symlink); also --uninstall
 bin/      ruflo-kit          single entrypoint dispatcher
 lib/      *.sh + common.sh   shell implementations (common.sh resolves KIT_DIR vs TARGET_DIR)
-assets/   claude-helpers/    hook helpers installed into the target's .claude/helpers/
+assets/   claude-helpers/    hook helpers seeded into a target's .claude/helpers/ when missing.
+                              The four kit-authored ones are canonical here; the ruflo-owned
+                              ones seed from the INSTALLED ruflo (HELPER-SEED-UPSTREAM-V1) and
+                              these copies are only an offline fallback.
           claude-commands/   kit-maintained .claude/commands docs
           builds/            prebuilt RuVector native (.node) binaries
 tools/    *.cjs              node tools (bench, harvest, embed-sweep, improvement-eval,

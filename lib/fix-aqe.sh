@@ -125,23 +125,63 @@ else
   # MISSING (a fresh target / CI checkout), never overwriting an existing
   # upstream-generated file. This is what lets the kit's vitest suite run on a
   # clean clone (nightly-drift "Kit unit tests" step).
+  # HELPER-SEED-UPSTREAM-V1: prefer the copy the INSTALLED ruflo ships over the
+  # kit's vendored fossil, for the helpers ruflo owns.
+  #
+  # Most files below are ruflo's, not the kit's; a vendored copy of someone
+  # else's file drifts the moment they ship a new one. Measured against ruflo
+  # 3.34.0: 7 of 13 vendored seeds had drifted, and intelligence.cjs predated
+  # `resolveProjectRoot` — so a clean checkout got a helper missing a function
+  # three test files require, while a dev machine passed because ruflo's own
+  # session hooks had written the real file. Seeding from the installed package
+  # makes a CI checkout match a real machine and retires the drift class
+  # instead of resetting its clock.
+  #
+  # The four KIT-AUTHORED helpers (brain-checkpoint.cjs, github-safe.mjs,
+  # ruflo-hook.cjs, statusline-v3.cjs) have no upstream counterpart and MUST
+  # keep seeding from assets/. statusline.cjs has its own canonical source
+  # (see CANONICAL-STATUSLINE below). Everything else falls back to the
+  # vendored copy when ruflo cannot be resolved (offline, or upstream moved
+  # the path), so this never makes a working target worse.
+  RUFLO_HELPERS="$(kit_ruflo_helper_dir 2>/dev/null || true)"
+  # hook-handler.cjs is DELIBERATELY NOT in this set even though ruflo ships one:
+  # the kit's vendored copy carries HOOK-BLOCK-EXIT2-V1 (the dangerous-command
+  # block) and upstream's copy does not. Seeding upstream's would hand a fresh
+  # target an unpatched hook and leave the security property depending on Step 8's
+  # anchor still matching a newer upstream shape. Keeping the healed copy means
+  # the block is present by construction, not by successful re-patching.
+  _helper_is_upstream_owned() {
+    case "$1" in
+      auto-memory-hook.mjs|intelligence.cjs|learning-service.mjs|memory.js) return 0 ;;
+      metrics-db.mjs|router.js|session.js|statusline.js) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
   for h in auto-memory-hook.mjs brain-checkpoint.cjs github-safe.mjs \
            hook-handler.cjs intelligence.cjs learning-service.mjs memory.js \
            metrics-db.mjs router.js ruflo-hook.cjs session.js \
            statusline-v3.cjs statusline.cjs statusline.js v3/advisor-call.cjs; do
-    src="$HELPER_SRC/$h"; dst="$CLAUDE_HELPERS/$h"
+    src="$HELPER_SRC/$h"; dst="$CLAUDE_HELPERS/$h"; src_origin="vendored"
     # CANONICAL-STATUSLINE: statusline.cjs seeds from the canonical asset
     # (assets/statusline.cjs — the single source of truth fix-statusbar installs
     # + TRUTH-STATUSLINE-V1 targets), never the claude-helpers/ copy (removed in
     # the canonical consolidation). Redirecting the seed source here means the
     # loop tolerates that copy's absence silently.
-    [[ "$h" == "statusline.cjs" ]] && src="$KIT_ASSETS/statusline.cjs"
+    if [[ "$h" == "statusline.cjs" ]]; then
+      src="$KIT_ASSETS/statusline.cjs"; src_origin="canonical"
+    elif [[ -n "$RUFLO_HELPERS" ]] && _helper_is_upstream_owned "$h" && [[ -f "$RUFLO_HELPERS/$h" ]]; then
+      src="$RUFLO_HELPERS/$h"; src_origin="upstream"
+    fi
     [[ -f "$src" ]] || { warn "missing seed source $h"; continue; }
     [[ -f "$dst" ]] && { pass "$h present (seed skipped — upstream/healed copy kept)"; continue; }
     if [[ "$DRY_RUN" -eq 1 ]]; then info "[dry-run] would seed $h"; continue; fi
     mkdir -p "$(dirname "$dst")"
-    cp "$src" "$dst" && { node --check "$dst" 2>/dev/null && { fix "Seeded .claude/helpers/$h (HELPER-SEED-V1)"; pass "seeded $h"; } || { warn "$h failed node --check"; }; }
+    cp "$src" "$dst" && { node --check "$dst" 2>/dev/null && { fix "Seeded .claude/helpers/$h from $src_origin source (HELPER-SEED-V1)"; pass "seeded $h ($src_origin)"; } || { warn "$h failed node --check"; }; }
   done
+  if [[ -z "$RUFLO_HELPERS" ]]; then
+    warn "ruflo helper dir unresolvable — upstream-owned helpers seeded from the kit's VENDORED copies, which may be stale (HELPER-SEED-UPSTREAM-V1)"
+  fi
 
   # HELPER-MODULE-PIN-V1: in a "type":"module" project, the CJS helpers load as ES
   # modules and the PreCompact/SessionEnd hooks crash with "require is not defined".
@@ -1202,7 +1242,7 @@ fs.writeFileSync(F, s);
 PJS
     node "$patcher" "$INTEL"; rc=$?; rm -f "$patcher"
     if [[ $rc -ne 0 ]]; then
-      warn "INTEL-ROOTWALK-V1 anchor not found in intelligence.cjs (dist drift) — re-anchor needed, NOT applied"
+      warn "INTEL-ROOTWALK-V1 anchor not found in intelligence.cjs — the file HAS resolveProjectRoot but none of the six recognized pre-patch forms matched, so the boundary-exclusion fix was NOT applied and this target is unprotected. Upstream changed the function: re-anchor the patcher (dist drift, not a stale seed)"
     elif node --check "$INTEL" 2>/dev/null && grep -q "_rootwalkDegraded" "$INTEL"; then
       fix "resolveProjectRoot .claude-flow/.git walk-up now uses (dev,ino) filesystem identity for boundary exclusion with degraded-boundary handling (unknown stat failures no longer silently treated as absent) (INTEL-ROOTWALK-V1)"
       pass "root-walk identity-based boundary exclusion with degraded-boundary handling applied"
@@ -1211,6 +1251,16 @@ PJS
       cp "$INTEL.rootwalk-bak" "$INTEL"
     fi
   fi
+elif ! grep -q "resolveProjectRoot" "$INTEL" 2>/dev/null; then
+  # SUBJECT-ABSENT, and emphatically NOT "self-retired" (INTEL-ROOTWALK-ABSENT-V1).
+  #
+  # This branch used to fall through to the pass below, reporting green for a
+  # file that does not contain the function the whole step is about — the kit's
+  # dominant defect class: a check that cannot tell "upstream fixed it" from
+  # "the subject was never here". It hid a stale vendored seed for a month:
+  # fix-aqe printed a clean bill twice in CI while three test files failed
+  # immediately afterwards on `intel.resolveProjectRoot is not a function`.
+  warn "intelligence.cjs defines NO resolveProjectRoot — nothing was assessed (NOT 'self-retired'). This helper is ruflo-generated and is expected to define it; the usual cause is a stale vendored seed. Re-run after \`npm i -g ruflo\` so HELPER-SEED-UPSTREAM-V1 can seed from the installed package (INTEL-ROOTWALK-ABSENT-V1)"
 else
   pass "bare .claude-flow walk-up defect not found — nothing to heal (self-retired)"
 fi
