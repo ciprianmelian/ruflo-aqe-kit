@@ -385,7 +385,21 @@ function isPlausibleDate(y, mo, d) {
   if (Number.isNaN(date.getTime())) return false;
   if (date.getTime() > Date.now()) return false;
   const floor = repoFirstCommitDate();
-  if (floor && date.getTime() < floor.getTime()) return false;
+  if (floor) {
+    // Compare at DAY granularity. A date token carries no time component, so
+    // it parses to midnight UTC, while the floor is a real commit timestamp —
+    // comparing them directly rejects every date falling ON the repo's
+    // first-commit day (here 2026-05-29T14:26Z, so any "2026-05-29" token
+    // looked 14 hours "too early"). That is the whole day the repo was
+    // founded, which is exactly when the oldest docs are dated.
+    //
+    // It stayed invisible locally because the only doc relying on it also
+    // cited a commit hash, and hasRealAnchor() returns on the first hit — the
+    // hash resolved here and the date branch was never reached. In a fresh
+    // clone the hash is unreachable, the date is tried, and this rejected it.
+    const floorDay = Date.UTC(floor.getUTCFullYear(), floor.getUTCMonth(), floor.getUTCDate());
+    if (date.getTime() < floorDay) return false;
+  }
   return true;
 }
 
@@ -738,13 +752,25 @@ describe('doc-surface guard — Rule 1: retired verbs and sentinels', () => {
       // pattern matches "vendor" at any depth, so docs/vendor/** is untracked too — confirmed
       // both ways below, against the REAL repo (docs/gauntlet-2026-07-31/ exists on disk
       // right now from concurrent wave-2 work, so this is not a hypothetical).
-      const real = path.join(ROOT, 'docs', 'vendor');
-      expect(fs.existsSync(real)).toBe(true); // it's really there on disk
-      const ignored = spawnSync('git', ['check-ignore', '--', 'docs/vendor'], {
+      // NOT asserted: that docs/vendor exists. It is GITIGNORED, so it is
+      // present on a dev machine and absent from every fresh clone and CI
+      // checkout — asserting its existence made this test encode "what happens
+      // to be on the author's disk", and it failed in CI for that reason
+      // alone. The property being proved ("nothing under docs/vendor can ever
+      // reach the corpus") holds either way, and is proved below from git.
+      // Ask about a FILE under the directory, not the bare directory path.
+      // `.gitignore:13` is `vendor/` — a trailing slash means "directories
+      // only", and `git check-ignore docs/vendor` can only apply that pattern
+      // if it can SEE that the path is a directory. On a machine where
+      // docs/vendor exists it matches (exit 0); in a fresh clone, where the
+      // gitignored directory was never created, git cannot tell and reports
+      // NOT ignored (exit 1). Querying a path underneath sidesteps that
+      // entirely and holds in both, which is what the claim below needs.
+      const ignored = spawnSync('git', ['check-ignore', '--', 'docs/vendor/anything.md'], {
         cwd: ROOT,
         encoding: 'utf8',
       });
-      expect(ignored.status).toBe(0); // git confirms it's ignored
+      expect(ignored.status).toBe(0); // git confirms anything under it is ignored
       const tracked = spawnSync('git', ['ls-files', '--', 'docs/vendor/**'], {
         cwd: ROOT,
         encoding: 'utf8',
@@ -753,7 +779,12 @@ describe('doc-surface guard — Rule 1: retired verbs and sentinels', () => {
       // Consequence: corpusFiles() (git-ls-files-backed) never returns anything under
       // docs/vendor/, so a retired sentinel planted there is invisible to this guard by
       // construction — not because of a directory-tier exemption (there is no such tier anymore).
-      for (const f of corpusFiles()) {
+      // Positive control: without it, a corpusFiles() that returned nothing
+      // (broken git invocation, wrong cwd) would satisfy the loop below
+      // perfectly and this test would prove nothing at all.
+      const corpus = corpusFiles();
+      expect(corpus.length, 'empty corpus — the exclusion below would be vacuous').toBeGreaterThan(5);
+      for (const f of corpus) {
         expect(path.relative(ROOT, f).startsWith(`docs${path.sep}vendor${path.sep}`)).toBe(false);
       }
     }
@@ -952,6 +983,26 @@ describe('doc-surface guard — round-3 bypass hardening (critic-reported, real-
       expect(isPlausibleDate('2020', '01', '01')).toBe(false); // before this repo's first commit
       expect(checkIdentityClaims([backwardsDate]).length).toBe(1);
 
+      // Regression: a date ON the repo's first-commit DAY is plausible.
+      // The floor is a real commit timestamp while a date token parses to
+      // midnight UTC, so a naive `<` comparison rejected the entire founding
+      // day — the day the oldest docs carry. It hid locally because the one
+      // doc relying on it also cited a hash, and hasRealAnchor() returns on
+      // the first hit; only a fresh clone (where that hash is unreachable)
+      // exposed it. Derived from git, so it cannot drift with the repo.
+      const first = repoFirstCommitDate();
+      expect(first, 'no first-commit date — this assertion would be vacuous').toBeTruthy();
+      const pad = (n) => String(n).padStart(2, '0');
+      expect(isPlausibleDate(
+        String(first.getUTCFullYear()), pad(first.getUTCMonth() + 1), pad(first.getUTCDate()),
+      ), 'a date on the repo founding day must be a valid anchor').toBe(true);
+
+      // ...and the day BEFORE it is still rejected, so the floor still bites.
+      const dayBefore = new Date(first.getTime() - 24 * 3600 * 1000);
+      expect(isPlausibleDate(
+        String(dayBefore.getUTCFullYear()), pad(dayBefore.getUTCMonth() + 1), pad(dayBefore.getUTCDate()),
+      ), 'the floor must still reject dates before the repo existed').toBe(false);
+
       // Round-1/2 regression: zero anchor at all (the original bypass) must still fail too.
       const noAnchor = writeTempCopy(
         'NO-ANCHOR.md',
@@ -985,10 +1036,19 @@ describe('doc-surface guard — round-3 bypass hardening (critic-reported, real-
   it(
     'a REAL correction with a REAL, resolvable anchor still passes on each accepted anchor form',
     () => {
-      // Hash: resolves in THIS repo's own history (9d5bffe is the real anchor
-      // self-improvement-next-steps.md uses; verified it resolves via `git cat-file -e`).
-      expect(resolveHashAnywhere('9d5bffe')).toBe(true);
-      const byHash = 'The brain launcher claim was corrected, see commit `9d5bffe`: no longer byte-identical to upstream.\n';
+      // Hash: derived from git at RUNTIME, the same way the "Patch N" case
+      // below already is. This used to hardcode `9d5bffe`, which resolved only
+      // on the machine the test was written on: that object was rewritten out
+      // of history and survives locally as a DANGLING commit. `git clone`
+      // transfers reachable objects only, so it resolved here and nowhere
+      // else — the assertion passed locally and failed in every CI run.
+      // HEAD is reachable by construction, in any checkout.
+      const realHash = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+        cwd: ROOT, encoding: 'utf8',
+      }).stdout.trim();
+      expect(realHash, 'could not derive a real commit hash from git').toMatch(/^[0-9a-f]{7,}$/);
+      expect(resolveHashAnywhere(realHash)).toBe(true);
+      const byHash = `The brain launcher claim was corrected, see commit \`${realHash}\`: no longer byte-identical to upstream.\n`;
       expect(hasAnchoredHistoricalMarker(byHash)).toBe(true);
       expect(checkIdentityClaims([writeTempCopy('BY-HASH.md', byHash)]).join('\n')).toBe('');
 

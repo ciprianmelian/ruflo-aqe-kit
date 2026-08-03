@@ -134,7 +134,7 @@ describe('snapshot: backup + manifest + baseline pointer', () => {
   // loop just silently ran zero iterations, emitting "{}" as if the store had
   // no tables. This is the single most important regression guard in this
   // file — it fails loudly against the pre-fix code.
-  it('a WAL-mode source store still backs up with REAL per-table counts (not vacuous "{}")', () => {
+  it('a WAL-mode source store still backs up with REAL per-table counts (not vacuous "{}")', (ctx) => {
     const { target, home, run } = mkWorld();
     sql(path.join(target, '.swarm', 'memory.db'), 'PRAGMA journal_mode=WAL;');
     // Confirm the fixture actually reproduces the CANTOPEN precondition this
@@ -144,7 +144,18 @@ describe('snapshot: backup + manifest + baseline pointer', () => {
     const probeCopy = path.join(home, 'probe-copy.db');
     execSync(`sqlite3 "${path.join(target, '.swarm', 'memory.db')}" ".backup '${probeCopy}'"`);
     const probe = spawnSync('sqlite3', ['-readonly', probeCopy, 'SELECT 1;'], { encoding: 'utf8' });
-    expect(probe.status).not.toBe(0); // preconditions: CANTOPEN reproduced on this host
+    // SKIP, do not FAIL, when the host cannot stage the scenario. Whether a
+    // `.backup` copy of a WAL db is readable `-readonly` without its sidecar
+    // depends on the sqlite3 build: it reproduces on this Mac and does NOT on
+    // the CI runners, where the probe exits 0. Failing there asserted a fact
+    // about the host's SQLite, not about the kit, and reported a broken kit
+    // on every nightly. An unreproducible precondition is "not assessable" —
+    // the same third state the kit's own probes use.
+    if (probe.status === 0) {
+      ctx.skip(`sqlite3 on this host opens a WAL .backup copy -readonly (rc 0), `
+        + `so the CANTOPEN precondition cannot be staged — nothing to assert`);
+      return;
+    }
 
     const { code, out } = run(SNAPSHOT);
     expect(code).toBe(0);
@@ -250,7 +261,7 @@ describe('adopt --verify-only: the preservation receipt diff', () => {
   // leaving a valid, present, non-empty file that still fails -readonly) —
   // the same CANTOPEN precondition as the snapshot-side fix, but hitting the
   // LIVE recount path in adopt.sh instead of the backup path in snapshot.sh.
-  it('a live store unreadable at recount time (present, valid, but -readonly fails) → NOT ASSESSABLE, not VIOLATED', () => {
+  it('a live store unreadable at recount time (present, valid, but -readonly fails) → NOT ASSESSABLE, not VIOLATED', (ctx) => {
     const { target, home, run } = mkWorld();
     expect(run(SNAPSHOT).code).toBe(0); // baseline: notes=3, patterns=1
 
@@ -264,7 +275,13 @@ describe('adopt --verify-only: the preservation receipt diff', () => {
     const cantopenCopy = path.join(home, 'cantopen.db');
     execSync(`sqlite3 "${walCopy}" ".backup '${cantopenCopy}'"`);
     const probe = spawnSync('sqlite3', ['-readonly', cantopenCopy, 'SELECT 1;'], { encoding: 'utf8' });
-    expect(probe.status).not.toBe(0); // precondition: CANTOPEN reproduced
+    // Same host-dependent precondition as the snapshot-side test above: skip
+    // rather than fail where sqlite3 can open a WAL .backup copy -readonly.
+    if (probe.status === 0) {
+      ctx.skip(`sqlite3 on this host opens a WAL .backup copy -readonly (rc 0), `
+        + `so the CANTOPEN precondition cannot be staged — nothing to assert`);
+      return;
+    }
     fs.copyFileSync(cantopenCopy, liveDb);
 
     const { code, out } = run(ADOPT, ['--verify-only']);

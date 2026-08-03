@@ -1,9 +1,12 @@
 # Self-Improvement — findings & next-step plan (handoff)
 
 > **SUPERSEDED — see [`whats-genuinely-left-rnd.md`](./whats-genuinely-left-rnd.md) for the current state.**
-> This is a dated snapshot at commit `9d5bffe`: it *proposed* the work, which has since been *done* (objective oracle `DERIVE-OUTCOME-V1`; Router B loop closed via `RUFLO-SEMRANK-V1` + `RUFLO-ROUTE-CAPTURE-V1`). Labels like `RUFLO-TRAIN-REWARD-V1` and the prose-sentiment `deriveReward` described below are historical and are no longer in the code — do not treat this file as current implementation state.
+> This is a dated snapshot from **2026-05-29**, originally anchored to commit `9d5bffe`
+> — that object was later rewritten out of history and no longer resolves in a fresh
+> clone (it survives only as a dangling object on the machine it was written on), so the
+> DATE is the anchor to trust here, not the hash. The snapshot: it *proposed* the work, which has since been *done* (objective oracle `DERIVE-OUTCOME-V1`; Router B loop closed via `RUFLO-SEMRANK-V1` + `RUFLO-ROUTE-CAPTURE-V1`). Labels like `RUFLO-TRAIN-REWARD-V1` and the prose-sentiment `deriveReward` described below are historical and are no longer in the code — do not treat this file as current implementation state.
 
-**Status as of commit `9d5bffe` (2026-05-29).** Question being settled with data, not assertion:
+**Status as of 2026-05-29** (originally commit `9d5bffe`, since rewritten out of history). Question being settled with data, not assertion:
 *is the kit self-LEARNING and self-IMPROVING?*
 
 - **Self-LEARNING: PROVEN.** LoRA `B.sumAbs` 1.27→2.06 (updates 239→444), `agentdb.db` episodes 236→315, AQE `captured_experiences` 463, `dream_insights` 750 — all grow + persist.
