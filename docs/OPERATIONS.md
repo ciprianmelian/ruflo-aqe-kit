@@ -337,6 +337,15 @@ later — while the embed needs ~104-120ms cold, and every hook is a fresh proce
 The vector is lost on every invocation, deterministically. No kit verb fixes it;
 the fix is upstream (await the embed before exit).
 
+Tracked as **[agentic-qe#581](https://github.com/proffesor-for-testing/agentic-qe/issues/581)**
+— **still open as of 2026-08-03 (agentic-qe 3.13.5)**, and it is the single
+reason `bin/ruflo-kit proof` reports FAILED on a target whose stack is otherwise
+healthy. Check that issue before spending time on a "broken" proof here. Two
+sibling reports from the same investigation are already fixed in 3.13.5
+([#585](https://github.com/proffesor-for-testing/agentic-qe/issues/585),
+[#586](https://github.com/proffesor-for-testing/agentic-qe/issues/586)); neither
+affects this symptom.
+
 What you can do:
 
 - `bin/ruflo-kit embed-sweep <target> --dry-run`, then without the flag, to
