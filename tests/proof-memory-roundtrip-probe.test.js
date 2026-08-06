@@ -498,7 +498,7 @@ describe('probe_memory_roundtrip (P16) — B19 teeth: the pre-fix helper genuine
     // against it end-to-end — not a shortcut unit call — to prove the false
     // PASS was real.
     //
-    // Pinned to a specific SHA (`0561b7c`, Patch 71 — the last commit before
+    // Pinned to a specific SHA (`fbcff73`, Patch 71 — the last commit before
     // this session's B17/B19 fixes), NOT `HEAD`: an earlier version of this
     // test pinned to HEAD, and the moment the fix was committed (Patch 72,
     // ac124a8) HEAD moved past the bug, silently turning "proves the false
@@ -516,7 +516,7 @@ describe('probe_memory_roundtrip (P16) — B19 teeth: the pre-fix helper genuine
     // lib/common.sh (proof.sh sources the whole file, not just one
     // function), which is ~1000 lines — hand-embedding that is disproportionate
     // duplication for one test versus a single pinned SHA with this comment.
-    const preFix = execSync('git show 0561b7c:lib/common.sh', { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+    const preFix = execSync('git show fbcff73:lib/common.sh', { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
     const { json } = buildNoInstrument({ commonShOverride: preFix });
     expect(json).not.toBeNull();
     const p = probe(json, 'memory-roundtrip');

@@ -33,7 +33,7 @@ const TOOL = path.join(REPO, 'tools', 'aqe-harvest.cjs');
 const DIM = 8;
 
 /** Pre-fix baseline. MUST stay reachable: `git show <SHA>:tools/aqe-harvest.cjs`. */
-const PRE_V2_REF = '61f6c92';
+const PRE_V2_REF = 'becbeb2';
 
 function findBetterSqlite3() {
   const candidates = [];

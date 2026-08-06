@@ -11,7 +11,7 @@
  *   - probe_daemon_advisory (~:330 pre-fix)     `ruflo daemon status`
  *     creates .claude-flow/logs/daemon.log
  *
- * Corrected attribution (see docs/gauntlet-2026-07-31/MASTER-LEDGER.md, B21):
+ * Corrected attribution (see the gauntlet 2026-07-31 master ledger, B21):
  * this is NOT daemon auto-spawn and NOT a billing risk — no daemon is ever
  * started by either call, confirmed by pgrep before/after in the ground-truth
  * investigation for this suite. It is a truthfulness gap: a read-only stage
@@ -172,11 +172,11 @@ function runScript(scriptPath, target, args, extraEnv) {
 // PRE_FIX_REF: pinned to a specific commit, not HEAD — see this file's header
 // docstring for why (HEAD moves past the fix the moment it's committed,
 // silently turning every TEETH assertion below into a fixed-vs-fixed
-// tautology). 0561b7c is Patch 71, the commit immediately before this fix
+// tautology). fbcff73 is Patch 71, the commit immediately before this fix
 // landed as part of ac124a8 — confirmed it still has the unconditional `aqe
 // ruvector status` call with no $DRY_RUN gate. Do not "modernise" this back
 // to HEAD.
-const PRE_FIX_REF = '0561b7c';
+const PRE_FIX_REF = 'fbcff73';
 
 // Writes `git show <PRE_FIX_REF>:lib/verify-learning.sh` into a dotfile temp
 // script INSIDE the real lib/ directory (so KIT_DIR/KIT_ASSETS resolve

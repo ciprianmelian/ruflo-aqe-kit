@@ -9,7 +9,7 @@
  * timeout/outage alarm, and two extra CLI-execution tools via managed-cli-interface.mjs). The
  * comment kept asserting identity for who knows how long after that stopped being true.
  *
- * The kit's decision (see docs/gauntlet-2026-07-31/brain-ledger.md entry E1) is to KEEP
+ * The kit's decision (see the gauntlet 2026-07-31 brain ledger entry E1) is to KEEP
  * the v1 proxy deliberately: v2's extra tools + outbound alarm widen the surface past the
  * "one MCP tool" design fix-brain.sh states for itself. This suite is the tripwire against
  * that decision silently rotting again:

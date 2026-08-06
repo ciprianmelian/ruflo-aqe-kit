@@ -2,7 +2,7 @@
  * Tests for the B8 fix: the RUFLO-INTEL cascade's stale sentinel gate in
  * lib/fix-statusbar.sh, plus the sibling sweep it prompted.
  *
- * Background (see docs/gauntlet-2026-07-31/MASTER-LEDGER.md, B8, and
+ * Background (see the gauntlet 2026-07-31 master ledger, B8, and
  * kit-self-audit F4): step (f)'s outer gate used to read
  *
  *   grep -q "AQE310-REALIGN-V1" "$STATUSLINE_FILE" && ! grep -q "RUFLO-INTEL-V2" "$STATUSLINE_FILE"

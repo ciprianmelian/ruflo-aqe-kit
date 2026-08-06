@@ -42,7 +42,7 @@ const CWD = process.cwd();
 if (process.env.RUFLO_DAEMON_AUTOSTART === undefined) process.env.RUFLO_DAEMON_AUTOSTART = '0';
 
 // TRUTH-SL-V1: every displayed value is re-derivable from disk ("never assume,
-// always prove"). The audit (docs/STATUSLINE-AUDIT-2026-07-18.md) graded ~40 chips
+// always prove"). The 2026-07-18 statusline evidence audit graded ~40 chips
 // and found 8 cosmetic / 2 free-running-counter / 4 stale values sourced from
 // upstream `ruflo hooks statusline --json` and kit bucket-labels. This file now
 // overlays those chips with measured store liveness, a real swarm registry

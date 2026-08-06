@@ -21,7 +21,7 @@
 // byte-identity. What it does NOT give you vs upstream v2: hot-swap-without-restart, the
 // timeout/outage alarm, and the two ruvnet_cli_* tools.
 //
-// Full analysis: docs/gauntlet-2026-07-31/brain-ledger.md entry E1.
+// Full analysis: the gauntlet 2026-07-31 brain ledger entry E1.
 // BRAIN-FALLBACK-DEGRADED-V1 — documented against upstream v4.0.2 (commit 453ae58).
 // Drift tripwire: tests/brain-fallback-drift.test.js (fails if upstream moves past this
 // reference point without the decision above being re-reviewed).

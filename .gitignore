@@ -51,3 +51,12 @@ docs/INTELLIGENCE-EXEC-SUMMARY.jsx
 docs/INTELLIGENCE-EXEC-SUMMARY.html
 # memory-grounded project two-pager — local memory-proof snapshot, not kit source
 docs/KIT-MEMORY-GROUNDED-2PAGER.md
+# ── Local session artifacts: kept on disk, never published ───────────────────
+# Background research, per-session audit ledgers and dated session changelogs.
+# They are working notes for a specific session, not kit source or operator
+# documentation — purged from history 2026-08-06 and ignored from here on.
+# Anything referencing them must stand on its own without the link.
+docs/reference/
+docs/gauntlet*/
+docs/CHANGELOG-2026-07-17.md
+docs/STATUSLINE-AUDIT-2026-07-18.md

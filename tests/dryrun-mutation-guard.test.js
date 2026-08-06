@@ -168,7 +168,7 @@ function runScript(scriptPath, args, extraEnv) {
 // because the test's own premise (HEAD = old code) silently stopped being
 // true. This is not hypothetical: it happened for real when Waves 4+5 landed
 // as commit ac124a8 — this exact suite went from 19/19 to 12/19, all 7
-// failures in this one helper, nowhere else. `0561b7c` is Patch 71, the
+// failures in this one helper, nowhere else. `fbcff73` is Patch 71, the
 // commit immediately BEFORE ac124a8 (and therefore before every fix this
 // file's B11 suite exercises) — a fixed point in history that stays the
 // correct "before" baseline no matter how many further commits land on top.
@@ -188,7 +188,7 @@ function runScript(scriptPath, args, extraEnv) {
 // advance change to today's file; use a pinned SHA (this constant) when
 // reconstructing the pre-fix body requires the historical FILE, not just a
 // known snippet reversed.
-const PRE_FIX_REF = '0561b7c';
+const PRE_FIX_REF = 'fbcff73';
 
 // Writes `git show <PRE_FIX_REF>:lib/<name>` into a dotfile temp script
 // INSIDE the real lib/ directory (so KIT_DIR/KIT_ASSETS resolve against the

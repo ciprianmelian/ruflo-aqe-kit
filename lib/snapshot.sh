@@ -50,7 +50,7 @@ json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 # deterministically, not just under "transient lock" conditions. Root-caused
 # 2026-07-31 by reproducing the empirical defect (all 3 stores manifesting
 # empty "{}") against this host's live WAL-mode stores directly — see
-# docs/gauntlet-2026-07-31 B7 report. Fix: flip the DISPOSABLE backup
+# the gauntlet 2026-07-31 ledger B7 report. Fix: flip the DISPOSABLE backup
 # copy (never the live source) to journal_mode=DELETE with one writable
 # connection, so every subsequent -readonly read against it succeeds. Best-
 # effort: if this fails (no sqlite3 CLI and no working better-sqlite3 arm),
@@ -171,7 +171,7 @@ for rel in $PRESENT_SQLITE; do
       pass "backed up $rel ($cj)"
       COUNTS_JSON="$COUNTS_JSON\"$(json_escape "$rel")\":$cj"
     else
-      fail "backed up $rel but per-table counts UNREADABLE (enumeration query failed or found zero tables on a store that backed up successfully — F8; see docs/gauntlet-2026-07-31) — treating snapshot as INCOMPLETE"
+      fail "backed up $rel but per-table counts UNREADABLE (enumeration query failed or found zero tables on a store that backed up successfully — F8; see the gauntlet 2026-07-31 ledger) — treating snapshot as INCOMPLETE"
       UNREADABLE_STORES+=("$rel")
       COUNTS_JSON="$COUNTS_JSON\"$(json_escape "$rel")\":\"UNREADABLE\""
       SNAP_FAIL=1

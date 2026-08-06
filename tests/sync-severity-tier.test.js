@@ -154,10 +154,10 @@ function runSync(kit, target) {
 // array elements — `['show', 'HEAD:lib/sync.sh']`. A grep is only as good as
 // the spelling it asks for.
 //
-// 0561b7c = Patch 71, the last commit before the SEVERE-FIX-V1 work. Verified
+// fbcff73 = Patch 71, the last commit before the SEVERE-FIX-V1 work. Verified
 // to still contain the pre-round-1 `'Log:'` completion-regex mechanism; do not
 // "modernise" this back to HEAD.
-const PRE_ROUND1_REF = '0561b7c';
+const PRE_ROUND1_REF = 'fbcff73';
 
 function preRound1SyncSh() {
   return execFileSync('git', ['show', `${PRE_ROUND1_REF}:lib/sync.sh`], { cwd: REPO, encoding: 'utf8' });

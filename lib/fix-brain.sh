@@ -71,7 +71,7 @@ SERVER_MJS="$KIT_DIR/vendor/ruvnet-brain/plugin/mcp/server.mjs"   # vendored thi
 # RPC (only v2's hot-swap shell calls it) plus small answer-path tweaks this v1 proxy never
 # triggers and simply forwards along. The compatibility is protocol-level, not byte-identity.
 # The fallback loses hot-swap-without-restart, the outage alarm, and the two ruvnet_cli_*
-# tools. See docs/gauntlet-2026-07-31/brain-ledger.md entry E1 for the full analysis.
+# tools. See the gauntlet 2026-07-31 brain ledger entry E1 for the full analysis.
 # BRAIN-FALLBACK-DEGRADED-V1 — documented against upstream v4.0.2 (commit 453ae58).
 # Drift tripwire: tests/brain-fallback-drift.test.js.
 [[ -f "$SERVER_MJS" ]] || SERVER_MJS="$KIT_ASSETS/brain/server.mjs"

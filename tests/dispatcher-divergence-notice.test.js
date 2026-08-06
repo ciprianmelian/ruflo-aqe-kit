@@ -74,12 +74,12 @@ let OLD_KIT;
 // — which assert the OLD dispatcher produces NO notice and NO refusal — began
 // failing against a dispatcher that now correctly produces both.
 //
-// 0561b7c = Patch 71, the last commit before B20. Verified to contain ZERO
+// fbcff73 = Patch 71, the last commit before B20. Verified to contain ZERO
 // occurrences of `_kit_dispatcher_divergent_path` (HEAD has 4), so it is a
 // genuine pre-change baseline. Do not "modernise" this back to HEAD: a teeth
 // test pointed at post-fix code either fails loudly or, worse, passes while
 // proving nothing.
-const PRE_CHANGE_REF = '0561b7c';
+const PRE_CHANGE_REF = 'fbcff73';
 
 beforeAll(() => {
   const oldSrc = execFileSync('git', ['show', `${PRE_CHANGE_REF}:bin/ruflo-kit`], { cwd: REPO_ROOT, encoding: 'utf8' });

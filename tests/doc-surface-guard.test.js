@@ -1086,36 +1086,86 @@ describe('doc-surface guard — round-3 bypass hardening (critic-reported, real-
   });
 });
 
+// Tier E was written against a REAL tracked ledger directory
+// (`docs/gauntlet-2026-07-31/`). On 2026-08-06 that directory — along with
+// docs/reference/, the dated session CHANGELOG and the statusline audit — was
+// purged from git history and gitignored: they are per-session working notes,
+// not kit source. So **no dated ledger directory is tracked today**, and the
+// three tests below used to assert one by name. Two failed outright; the third
+// (`.filter(v => v.includes('gauntlet-2026-07-31'))`) went vacuously green —
+// the kit's own dominant defect class, a check that cannot tell "verified
+// fine" from "nothing to verify". They now assert the PROPERTY over whatever
+// git actually tracks, and state the dormant case explicitly instead of
+// passing through it silently. Tier E's exemption stays armed for the next
+// ledger directory; its teeth are the falsification tests below, which are
+// path-predicate-based and do not need a tracked ledger to bite.
+function trackedDocsSubdirs() {
+  return new Set(
+    spawnSync('git', ['ls-files', '--', 'docs/**'], { cwd: ROOT, encoding: 'utf8' }).stdout
+      .trim()
+      .split('\n')
+      .map((f) => f.split('/')[1])
+      .filter((d) => d && !d.endsWith('.md'))
+  );
+}
+function trackedLedgerDirs() {
+  return [...trackedDocsSubdirs()].filter((d) => DATED_LEDGER_DIR_RE.test(d));
+}
+
 describe('doc-surface guard — round-4: dated session-ledger directory (Tier E)', () => {
-  it('the real docs/gauntlet-2026-07-31/ ledgers ARE tracked and reach the corpus (the old tier A never did)', () => {
-    const tracked = spawnSync('git', ['ls-files', '--', 'docs/gauntlet-2026-07-31/**'], {
-      cwd: ROOT,
-      encoding: 'utf8',
-    }).stdout.trim();
-    expect(tracked).not.toBe('');
-    const inCorpus = corpusFiles().some((f) =>
-      path.relative(ROOT, f).startsWith(`docs${path.sep}gauntlet-2026-07-31${path.sep}`)
-    );
-    expect(inCorpus).toBe(true);
+  it('every tracked dated session-ledger directory reaches the corpus — or Tier E is provably dormant', () => {
+    const ledgers = trackedLedgerDirs();
+    if (ledgers.length === 0) {
+      // Not-assessable, stated out loud: assert the dormancy is REAL (git
+      // tracks no such directory) and that the recognizer is still live, so
+      // this branch can never be mistaken for a passing corpus check.
+      expect(ledgers).toEqual([]);
+      expect(DATED_LEDGER_DIR_RE.test('gauntlet-2026-07-31')).toBe(true);
+      expect(isDatedLedgerPath(path.join(ROOT, 'docs', 'gauntlet-2026-07-31', 'x.md'))).toBe(true);
+      return;
+    }
+    for (const dir of ledgers) {
+      const tracked = spawnSync('git', ['ls-files', '--', `docs/${dir}/**`], {
+        cwd: ROOT,
+        encoding: 'utf8',
+      }).stdout.trim();
+      expect(tracked, `docs/${dir} matched the ledger convention but tracks no files`).not.toBe('');
+      const inCorpus = corpusFiles().some((f) =>
+        path.relative(ROOT, f).startsWith(`docs${path.sep}${dir}${path.sep}`)
+      );
+      expect(inCorpus, `docs/${dir} is tracked but never reaches the corpus`).toBe(true);
+    }
   });
 
-  it('the dated-directory naming convention is unique among tracked docs/ subdirectories', () => {
-    const subdirs = new Set(
-      spawnSync('git', ['ls-files', '--', 'docs/**'], { cwd: ROOT, encoding: 'utf8' }).stdout
-        .trim()
-        .split('\n')
-        .map((f) => f.split('/')[1])
-        .filter((d) => d && !d.endsWith('.md'))
-    );
-    const matching = [...subdirs].filter((d) => DATED_LEDGER_DIR_RE.test(d));
-    expect(matching).toEqual(['gauntlet-2026-07-31']);
+  it('the dated-directory convention never matches an ordinary tracked docs/ subdirectory by accident', () => {
+    // The load-bearing property is exclusivity, not the presence of any one
+    // ledger: no ordinary subdirectory name may drift into the exemption.
+    const subdirs = [...trackedDocsSubdirs()];
+    const ledgers = trackedLedgerDirs();
+    const ordinary = subdirs.filter((d) => !ledgers.includes(d));
+    for (const d of ordinary) {
+      expect(DATED_LEDGER_DIR_RE.test(d), `ordinary docs/${d} must not match the ledger convention`)
+        .toBe(false);
+    }
+    // Positive control: with no tracked ledger the loop above can go empty, so
+    // prove the regex still discriminates rather than rejecting everything.
+    expect(DATED_LEDGER_DIR_RE.test('gauntlet-2026-07-31')).toBe(true);
+    expect(DATED_LEDGER_DIR_RE.test('reference')).toBe(false);
   });
 
-  it('a quoted retired sentinel and the exact "byte-identical" claim inside the real ledger are exempt (documenting history, not asserting it)', () => {
+  it('a quoted retired sentinel and the exact "byte-identical" claim inside a real tracked ledger are exempt (documenting history, not asserting it)', (ctx) => {
+    const ledgers = trackedLedgerDirs();
+    if (ledgers.length === 0) {
+      // Cannot be assessed without a tracked ledger — skip loudly. Filtering
+      // the violation list by a directory name that no longer exists would
+      // return [] and read as a pass.
+      ctx.skip();
+      return;
+    }
     const violations = [
       ...checkRetiredSurfaces(corpusFiles(), liveVerbs(), liveSentinels(runtimeSourceText())),
       ...checkIdentityClaims(corpusFiles()),
-    ].filter((v) => v.includes('gauntlet-2026-07-31'));
+    ].filter((v) => ledgers.some((d) => v.includes(d)));
     expect(violations.join('\n')).toBe('');
   });
 

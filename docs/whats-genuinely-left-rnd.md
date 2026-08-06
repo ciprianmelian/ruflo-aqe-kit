@@ -2,7 +2,7 @@
 
 **Handoff doc — self-improvement loop, post-Tier-10.** Companion to `self-improvement-next-steps.md` (the prior plan, commit `9d5bffe`) — that doc proposed the work; this doc records what got DONE and isolates what genuinely remains as **research**, not plumbing.
 
-**Location note:** lives in the kit's `docs/` directory alongside the other narrative docs (`self-improvement-next-steps.md` is a sibling here; `self-improving-tier-research-for-reference.md` is under `docs/reference/`).
+**Location note:** lives in the kit's `docs/` directory alongside the other narrative docs (`self-improvement-next-steps.md` is a sibling here). The background research it draws on (`self-improving-tier-research-for-reference.md`) is a local session artifact — gitignored and purged from history on 2026-08-06, so it is not part of a clone; this doc stands on its own without it.
 
 ---
 

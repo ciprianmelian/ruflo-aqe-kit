@@ -66,11 +66,11 @@ const REPO = path.resolve(__dirname, '..');
 const FIX_RUFLO = path.join(REPO, 'lib', 'fix-ruflo.sh');
 
 // ── the pre-fix baseline ────────────────────────────────────────────────────
-// 0561b7c is Patch 71 — a fixed point in history that predates this fix and
+// fbcff73 is Patch 71 — a fixed point in history that predates this fix and
 // stays the correct "before" no matter what lands on top. HEAD would silently
 // become the FIXED code the instant this commit exists, turning every TEETH
 // assertion below into a tautology.
-const PRE_FIX_REF = '0561b7c';
+const PRE_FIX_REF = 'fbcff73';
 
 // Literal fallback for environments without the git history (shallow clone,
 // exported tarball). Byte-identical to what PRE_FIX_REF's fix-ruflo.sh echoes.

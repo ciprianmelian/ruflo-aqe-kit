@@ -1,6 +1,6 @@
 /**
  * Regression tests for `kit_sqlite_backup` (lib/common.sh) — B17
- * "sqlite-backup-rc-conflation" (docs/gauntlet-2026-07-31/MASTER-LEDGER.md,
+ * "sqlite-backup-rc-conflation" (the gauntlet 2026-07-31 master ledger,
  * flagged by B13, confirmed by its critic).
  *
  * THE DEFECT: before this fix, `kit_sqlite_backup` returned the same bare
@@ -206,7 +206,7 @@ function runBackup(driver, db, dest, env) {
 // ac124a8) HEAD moved past the bug these teeth tests exist to reproduce,
 // silently turning "proves the bug was real" into "reconstructs the fixed
 // code and asserts it's still fixed" — a tautology that still happened to
-// pass, for the wrong reason. Pinning to a specific SHA (e.g. `0561b7c`, the
+// pass, for the wrong reason. Pinning to a specific SHA (e.g. `fbcff73`, the
 // last commit before any of this session's fixes) would dodge that one
 // failure mode but introduces an equivalent one under a history rewrite
 // (rebase/squash/force-push), and this file already has a strictly more
@@ -242,10 +242,10 @@ function mkOriginalLib(base) {
   fs.writeFileSync(libPath, originalLib);
   return libPath;
 }
-// recordedFromSha: '0561b7c' (Patch 71, the last commit before this
+// recordedFromSha: 'fbcff73' (Patch 71, the last commit before this
 // session's B17/B19 work) — informational only; this fixture does not read
 // git at test-run time.
-mkOriginalLib.recordedFromSha = '0561b7c';
+mkOriginalLib.recordedFromSha = 'fbcff73';
 
 // Reconstructs the literal ROUND-2 `kit_sqlite_backup` (cmd_rc gate + the
 // SELECT-1 readback, but no `|| return 1` clamp on the CLI arm, and writing

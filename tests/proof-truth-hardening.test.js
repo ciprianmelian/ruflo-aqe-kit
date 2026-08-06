@@ -1,7 +1,7 @@
 /**
  * Falsification + absent-subject fixtures for the Wave-2 B1+B2 ("proof truth")
  * hardening of lib/proof.sh (marker PROOF-V1), per the gauntlet self-audit
- * (docs/gauntlet-2026-07-31/kit-self-audit.md, findings F3/F5/F6).
+ * (the gauntlet 2026-07-31 kit self-audit, findings F3/F5/F6).
  *
  * This file is deliberately self-contained (its own harness, not shared with
  * tests/proof.test.js) so it can be added without touching any existing test
