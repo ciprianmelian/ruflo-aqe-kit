@@ -91,7 +91,10 @@ function enabledPlugins() {
 function marketplaceSha(marketplace) {
   const dir = path.join(HOME, '.claude', 'plugins', 'marketplaces', marketplace);
   try {
-    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 3000 }).trim();
+    // stderr ignored: a non-git marketplace dir is an already-handled case
+    // (the catch returns 'unknown') — without this, git's raw "fatal: not a
+    // git repository" leaks unprefixed into fix-ruflo's Step 5n output.
+    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch { return 'unknown'; }
 }
 
@@ -199,6 +202,26 @@ function hasProvenanceMarker(destFile) {
   try { return fs.readFileSync(destFile, 'utf8').includes(PROVENANCE_MARKER); } catch { return false; }
 }
 
+// Insert the provenance header WITHOUT breaking position-sensitive first
+// lines. Two cases matter (both found in review, not hypothetical):
+//  - YAML frontmatter: Claude Code skill/command/agent .md files require the
+//    opening `---` on line 1 — a header above it makes name/description/
+//    allowed-tools silently unparseable, so a rewritten allowed-tools line
+//    would have no effect at all.
+//  - Shebangs: `#!` must be byte 0 of a script for the kernel to honor it.
+// In both cases the header goes immediately AFTER the sensitive block;
+// everywhere else it is a plain prepend. hasProvenanceMarker() searches the
+// whole file, so re-vendor detection is unaffected by the position.
+function insertHeader(content, header) {
+  const fm = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
+  if (fm) return content.slice(0, fm[0].length) + header + content.slice(fm[0].length);
+  if (content.startsWith('#!')) {
+    const nl = content.indexOf('\n');
+    if (nl !== -1) return content.slice(0, nl + 1) + header + content.slice(nl + 1);
+  }
+  return header + content;
+}
+
 function main() {
   const claudeDir = path.join(TARGET, '.claude');
   const marketplacesRoot = path.join(HOME, '.claude', 'plugins', 'marketplaces');
@@ -293,7 +316,7 @@ function main() {
       const { content, rewritten, flags } = rewriteToolRefs(raw);
       for (const fl of flags) pluginFlags.push({ file: destRel, ref: fl.ref, reason: fl.reason });
       const header = `${style.open} ${PROVENANCE_MARKER}: vendored from ${pluginKey} v${version} (marketplace sha ${sha}) on ${NOW_ISO} by ruflo-kit fix-ruflo Step 5n. Substitutions: ${rewritten} tool refs rewritten to mcp__claude-flow__*, ${flags.length} flagged. Do not edit the upstream plugin cache; re-run with --vendor-plugins to refresh.${style.close}\n`;
-      fs.writeFileSync(dest, header + content, 'utf8');
+      fs.writeFileSync(dest, insertHeader(content, header), 'utf8');
       pluginFiles.push(destRel);
       pluginRewritten += rewritten;
     }

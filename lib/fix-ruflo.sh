@@ -3018,13 +3018,22 @@ if [[ -n "$PNS_ENABLED" && -d "$PLUGIN_MARKETPLACES_ROOT" ]]; then
     marketplace_name="${entry#*@}"
     plugin_dir="$PLUGIN_MARKETPLACES_ROOT/$marketplace_name/plugins/$plugin_name"
     [[ -d "$plugin_dir" ]] || continue
+    # The namespace's <plugin> segment is NOT necessarily this plugin's own
+    # name: real marketplace plugins (ruflo-sparc, ruflo-adr, ...) call tools
+    # under the SERVER-PROVIDING plugin's namespace (mcp__plugin_ruflo-core_
+    # ruflo__*), not their own — scoping the grep to ${plugin_name} matched
+    # nothing in the refs that actually exist in the wild (same blind spot
+    # fixed in tools/plugin-vendor.cjs's rewriteToolRefs; see Patch 80).
+    # Match generically and parse the plugin/server segments out of the ref.
     while IFS= read -r tool_match; do
       [[ -z "$tool_match" ]] && continue
-      rest="${tool_match#mcp__plugin_${plugin_name}_}"
-      server="${rest%%__*}"
+      rest="${tool_match#mcp__plugin_}"
       tool="${rest#*__}"
-      PNS_FINDINGS+=("$plugin_name|$server|$tool")
-    done < <(grep -rhoE "mcp__plugin_${plugin_name}_[A-Za-z0-9_-]+__[A-Za-z0-9_]+" "$plugin_dir" 2>/dev/null | sort -u)
+      head="${rest%%__*}"
+      server="${head##*_}"
+      ns_plugin="${head%_*}"
+      PNS_FINDINGS+=("$ns_plugin|$server|$tool")
+    done < <(grep -rhoE "mcp__plugin_[A-Za-z0-9-]+_[A-Za-z0-9-]+__[A-Za-z0-9_-]+" "$plugin_dir" 2>/dev/null | sort -u)
   done < <(printf '%s\n' "$PNS_ENABLED")
 fi
 
