@@ -53,6 +53,9 @@ echo " target: $TARGET_DIR"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo -e " mode:    ${YELLOW}DRY RUN${NC} (no changes)"
 fi
+if [[ "$VENDOR_PLUGINS" -eq 1 ]]; then
+  echo -e " vendor:  ${YELLOW}--vendor-plugins${NC} enabled (Step 5n will vendor)"
+fi
 echo " log:     $LOG_FILE"
 echo "============================================"
 
@@ -3070,6 +3073,120 @@ else
       echo "the dead \`mcp__plugin_*__\` references to the \`mcp__claude-flow__*\` substitutions above."
     } > "$PLUGIN_NS_REPORT"
     fix "Wrote plugin-namespace mismatch advisory report (${#PNS_DEDUPED[@]} tool ref(s)) → .claude/commands/plugin-namespace-report.md"
+  fi
+fi
+
+# ── Step 5n: Marketplace-plugin vendoring, opt-in (Tier 7) ──────────────────
+# Step 5m (above) is advisory-only: it detects the mcp__plugin_<plugin>_
+# <server>__* / mcp__claude-flow__* namespace mismatch and writes a report, but
+# never touches a file, because ~/.claude/plugins/marketplaces/ is a
+# HOST-GLOBAL cache shared by every other project on the machine. Step 5n turns
+# that advisory into ACTION — strictly opt-in via --vendor-plugins, off by
+# default — by vendoring a namespace-corrected COPY of the affected plugin's
+# skills/commands/agents into THIS project's own .claude/, so the fix is
+# project-scoped and reproducible instead of a report someone has to act on by
+# hand. See docs/_INSTRUCTIONS.md Patch 80 and docs/upstream-contribution-plan.md
+# ("If upstream declines or stalls: proceed with the drafted Step 5n").
+#
+# Only VERIFIED-live mcp__claude-flow__* substitutions are rewritten (the
+# same allowlist dataset style as Step 5l's DRC arrays — hardcoded, audited,
+# never inferred); everything else is left untouched and FLAGged in the
+# generated report — "surface, don't guess" (Patch 78) applied to tool names.
+# The heavy lifting (per-plugin scope detection, file vendoring, tool-ref
+# rewrite + provenance header, manifest bookkeeping) lives in
+# tools/plugin-vendor.cjs — the JSON/filesystem work this needs is a poor fit
+# for bash string manipulation, and the kit already relies on `node -e` for
+# JSON reads elsewhere in this same step family (Step 5m's PNS_ENABLED).
+header "5n/11" "Marketplace-plugin vendoring, opt-in (PLUGIN-VENDOR-V1)"
+
+if [[ "$VENDOR_PLUGINS" -ne 1 ]]; then
+  pass "Plugin vendoring not requested (--vendor-plugins to enable)"
+else
+  PV_TOOL="$KIT_TOOLS/plugin-vendor.cjs"
+  if [[ ! -f "$PV_TOOL" ]]; then
+    warn "tools/plugin-vendor.cjs missing from kit install — cannot vendor"
+    ((ERRORS++)) || true
+  else
+    PV_ARGS=("$TARGET_DIR")
+    [[ "$DRY_RUN" -eq 1 ]] && PV_ARGS+=(--dry-run)
+    PV_OUT="$(node "$PV_TOOL" "${PV_ARGS[@]}" 2>&1)"
+    PV_RC=$?
+    while IFS= read -r pv_line; do
+      [[ -z "$pv_line" ]] && continue
+      case "$pv_line" in
+        PASS:*) pass "${pv_line#PASS:}" ;;
+        INFO:*) info "${pv_line#INFO:}" ;;
+        FIX:*)  fix "${pv_line#FIX:}" ;;
+        WARN:*) warn "${pv_line#WARN:}"; ((ERRORS++)) || true ;;
+        *)      echo "  $pv_line" ;;
+      esac
+    done <<< "$PV_OUT"
+    if [[ "$PV_RC" -ne 0 ]]; then
+      warn "tools/plugin-vendor.cjs exited $PV_RC"
+      ((ERRORS++)) || true
+    fi
+
+    # SessionStart drift sentinel + helper: only wired on a real (non-dry) run
+    # of --vendor-plugins. Deliberately unconditional on whether THIS run
+    # actually vendored anything — a manifest from an earlier run may already
+    # exist, and seeding the sentinel is cheap, idempotent, and harmless when
+    # there is nothing to watch yet (it prints nothing until a manifest exists,
+    # see assets/plugin-vendor-drift-sentinel.cjs).
+    if [[ "$DRY_RUN" -ne 1 ]]; then
+      PV_HELPER_SRC="$KIT_ASSETS/plugin-vendor-drift-sentinel.cjs"
+      PV_HELPER_DEST="$TARGET_DIR/.claude/helpers/plugin-vendor-drift-sentinel.cjs"
+      if [[ ! -f "$PV_HELPER_SRC" ]]; then
+        warn "assets/plugin-vendor-drift-sentinel.cjs missing from kit install — cannot seed sentinel"
+        ((ERRORS++)) || true
+      else
+        mkdir -p "$(dirname "$PV_HELPER_DEST")"
+        _pv_src_sha="$(shasum -a 256 "$PV_HELPER_SRC" 2>/dev/null | awk '{print $1}')"
+        _pv_dst_sha="$([[ -f "$PV_HELPER_DEST" ]] && shasum -a 256 "$PV_HELPER_DEST" 2>/dev/null | awk '{print $1}')"
+        if [[ -n "$_pv_src_sha" && "$_pv_src_sha" == "$_pv_dst_sha" ]]; then
+          pass ".claude/helpers/plugin-vendor-drift-sentinel.cjs already up to date"
+        else
+          cp "$PV_HELPER_SRC" "$PV_HELPER_DEST"
+          if node --check "$PV_HELPER_DEST" 2>/dev/null; then
+            fix "Seeded .claude/helpers/plugin-vendor-drift-sentinel.cjs (SessionStart drift check)"
+          else
+            warn "plugin-vendor-drift-sentinel.cjs failed node --check after copy — leaving as-is for inspection"
+            ((ERRORS++)) || true
+          fi
+        fi
+      fi
+
+      SETTINGS_JSON_5N="$TARGET_DIR/.claude/settings.json"
+      if ! command -v jq >/dev/null 2>&1; then
+        warn "jq not on PATH — skipping SessionStart drift-sentinel hook wiring (install: brew install jq)"
+        ((ERRORS++)) || true
+      elif [[ ! -f "$SETTINGS_JSON_5N" ]]; then
+        warn "no .claude/settings.json to wire the SessionStart drift-sentinel hook into"
+      elif grep -q 'plugin-vendor-drift-sentinel' "$SETTINGS_JSON_5N" 2>/dev/null; then
+        pass "SessionStart drift-sentinel hook already wired"
+      else
+        # Command string built in bash (not inline in the jq program) so no
+        # nested-quote escaping is needed inside the jq filter itself — jq
+        # --arg handles all JSON-string escaping for us. Same shape as a real
+        # `ruflo init`-generated SessionStart entry (see CLAUDE.md's helpers
+        # using the CLAUDE_PROJECT_DIR-fallback `sh -c 'exec node "..."'` form).
+        PV_HOOK_CMD="sh -c 'exec node \"\${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/plugin-vendor-drift-sentinel.cjs\"'"
+        JQ_5N='.hooks.SessionStart = ((.hooks.SessionStart // []) + [{"hooks":[{"type":"command","command":$cmd,"timeout":5000,"continueOnError":true}]}])'
+        tmp_5n="$(mktemp)"
+        if ! jq --arg cmd "$PV_HOOK_CMD" "$JQ_5N" "$SETTINGS_JSON_5N" > "$tmp_5n" 2>/dev/null; then
+          rm -f "$tmp_5n"; warn "jq transform for SessionStart hook wiring failed — leaving settings.json untouched"; ((ERRORS++)) || true
+        else
+          cp "$SETTINGS_JSON_5N" "$SETTINGS_JSON_5N.fixruflo.bak"
+          mv "$tmp_5n" "$SETTINGS_JSON_5N"
+          if python3 -c "import json; json.load(open('$SETTINGS_JSON_5N'))" 2>/dev/null; then
+            rm -f "$SETTINGS_JSON_5N.fixruflo.bak"
+            fix "Wired SessionStart plugin-vendor-drift-sentinel hook into settings.json"
+          else
+            warn "settings.json failed JSON validation after SessionStart hook merge — restoring"
+            mv "$SETTINGS_JSON_5N.fixruflo.bak" "$SETTINGS_JSON_5N"; ((ERRORS++)) || true
+          fi
+        fi
+      fi
+    fi
   fi
 fi
 
