@@ -420,11 +420,17 @@ Usage: ruflo-kit init <target> [--force] [--reactivate] [--dry-run] [--new-targe
 EOF
     ;;
     fix-ruflo) cat <<'EOF'
-Usage: ruflo-kit fix-ruflo <target> [--dry-run]
+Usage: ruflo-kit fix-ruflo <target> [--dry-run] [--vendor-plugins]
 
   Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup in <target>
   (version pins, sentinels, dist patches).
-  Mutates target:   YES (config + dist patches)
+  --vendor-plugins  opt-in: Step 5n (PLUGIN-VENDOR-V1) vendors namespace-
+                    corrected copies of enabled marketplace plugin content
+                    (skills/commands/agents) into <target>/.claude/, plus a
+                    SessionStart drift sentinel. Off by default; without the
+                    flag Step 5n only reports that it was not requested.
+  Mutates target:   YES (config + dist patches; + .claude/{skills,commands,
+                    agents} when --vendor-plugins is passed)
   Starts daemon:    NO
   Billed / network: no billed LLM calls
 EOF
