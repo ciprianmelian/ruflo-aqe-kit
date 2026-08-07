@@ -75,8 +75,6 @@ function readJsonSafe(p) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
-function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
-
 // enabledPlugins: settings.local.json is primary; settings.json is the
 // fallback ONLY when the primary is absent or carries no enabled entries
 // (spec-specified precedence — deliberately not a union, unlike Step 5m).
@@ -150,14 +148,22 @@ function flagReasonFor(suffix) {
   return 'no verified mcp__claude-flow__ equivalent — do not assume one exists';
 }
 
-// Rewrite/flag the mcp__plugin_<plugin>_<server>__<suffix> refs for ONE known
-// plugin name (server is captured dynamically — a plugin may bundle more than
-// one server). Returns { content, rewritten, flags: [{ref, reason}] }.
-function rewriteToolRefs(content, plugin) {
+// Rewrite/flag mcp__plugin_<any-plugin>_<any-server>__<suffix> refs. The
+// namespace's <plugin> segment is NOT necessarily the plugin being vendored:
+// real marketplace plugins (ruflo-sparc, ruflo-adr, ...) call tools under the
+// SERVER-PROVIDING plugin's namespace (mcp__plugin_ruflo-core_ruflo__*), per
+// this branch's own docs/audit-ruflo-init-scaffold-drift.md F4 — not their
+// own. Scoping the regex to the vendored plugin's own name therefore matches
+// nothing in the refs that actually exist in the wild. Match the same
+// generic scope pattern pluginHasNamespaceRefs uses instead (NAMESPACE_SCOPE_RE,
+// above), and gate purely on the suffix allowlist — the part that is
+// actually verified against the live server.
+// Returns { content, rewritten, flags: [{ref, reason}] }.
+function rewriteToolRefs(content) {
   let rewritten = 0;
   const flags = [];
-  const re = new RegExp(`mcp__plugin_${escapeRegExp(plugin)}_([A-Za-z0-9-]+)__([A-Za-z0-9_-]+)`, 'g');
-  const out = content.replace(re, (full, _server, suffix) => {
+  const re = new RegExp(`${NAMESPACE_SCOPE_RE.source}([A-Za-z0-9_-]+)`, 'g');
+  const out = content.replace(re, (full, suffix) => {
     if (ALLOWLIST.includes(suffix)) { rewritten++; return `mcp__claude-flow__${suffix}`; }
     flags.push({ ref: full, reason: flagReasonFor(suffix) });
     return full;
@@ -284,7 +290,7 @@ function main() {
       }
 
       const raw = fs.readFileSync(src, 'utf8');
-      const { content, rewritten, flags } = rewriteToolRefs(raw, plugin);
+      const { content, rewritten, flags } = rewriteToolRefs(raw);
       for (const fl of flags) pluginFlags.push({ file: destRel, ref: fl.ref, reason: fl.reason });
       const header = `${style.open} ${PROVENANCE_MARKER}: vendored from ${pluginKey} v${version} (marketplace sha ${sha}) on ${NOW_ISO} by ruflo-kit fix-ruflo Step 5n. Substitutions: ${rewritten} tool refs rewritten to mcp__claude-flow__*, ${flags.length} flagged. Do not edit the upstream plugin cache; re-run with --vendor-plugins to refresh.${style.close}\n`;
       fs.writeFileSync(dest, header + content, 'utf8');
