@@ -2917,7 +2917,11 @@ if [[ -d "$CMD_ROOT/github" ]]; then
   done < <(find "$CMD_ROOT/github" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort)
 fi
 
-DRC_FLAG_TOTAL=$(( ${#DRC_FLAG[@]} + ${#DRC_FLAG_GITHUB[@]} ))
+DRC_FLAG_EXISTING=()
+for rel in ${DRC_FLAG[@]+"${DRC_FLAG[@]}"} ${DRC_FLAG_GITHUB[@]+"${DRC_FLAG_GITHUB[@]}"}; do
+  [[ -f "$CMD_ROOT/$rel" ]] && DRC_FLAG_EXISTING+=("$rel")
+done
+DRC_FLAG_TOTAL=${#DRC_FLAG_EXISTING[@]}
 DRC_REPORT="$TARGET_DIR/.claude/DEAD-REMAP-CLASSIFICATION-REPORT.md"
 if [[ "$DRY_RUN" -eq 1 ]]; then
   info "[dry-run] Would: write classification report (${DRC_FLAG_TOTAL} flagged file(s)) → .claude/DEAD-REMAP-CLASSIFICATION-REPORT.md"
@@ -2930,9 +2934,9 @@ else
     echo
     echo "## FLAGGED — genuine auditor disagreement or editorial judgment call (untouched; needs a human decision)"
     echo
-    for rel in ${DRC_FLAG[@]+"${DRC_FLAG[@]}"} ${DRC_FLAG_GITHUB[@]+"${DRC_FLAG_GITHUB[@]}"}; do
-      [[ -f "$CMD_ROOT/$rel" ]] && echo "- commands/$rel"
-    done
+    if [[ ${#DRC_FLAG_EXISTING[@]} -eq 0 ]]; then echo "- (none)"; else
+      for rel in "${DRC_FLAG_EXISTING[@]}"; do echo "- commands/$rel"; done
+    fi
     echo
     echo "## DELETED this run"
     echo
