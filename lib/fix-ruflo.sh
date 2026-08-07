@@ -2734,6 +2734,341 @@ else
   esac
 fi
 
+# ── Step 5l: Dead/remap/flag command classification sweep (Tier 7 follow-up) ─
+# Step 5g/5h's Tier-7 triage only ever touched agents/ hive-mind/ coordination/
+# (safe-rename) and memory/ swarm/ workflows/ hooks/ (needs-mapping) — the five
+# command dirs named below were explicitly left for human triage (Patch 19). A
+# double-Fable-audited pass has now classified every file in
+# commands/{automation,github,analysis,optimization,monitoring}/ as DELETE
+# (both auditors agreed: no live successor, confirmed via `ruflo <cmd> --help`),
+# REMAP (both auditors agreed on the exact new invocation), or FLAG (genuine
+# auditor disagreement or an editorial keep-vs-delete call this script cannot
+# resolve). This step acts ONLY on the agreed DELETE/REMAP sets — idempotent
+# (a DELETE target that is already gone is a silent no-op; a REMAP is skipped
+# once the live invocation is already present), .bak-guarded exactly like Step
+# 5g/5h, DRY_RUN-gated. Every FLAG file is left byte-for-byte untouched and is
+# instead named in a generated report — mirroring Step 5h's philosophy ("an
+# honest legacy marker beats a fabricated command"), extended here from a
+# dead-verb-vs-live-verb binary to a three-way DELETE/REMAP/FLAG split: when
+# classification is genuinely disputed, the step's job is to SURFACE it, never
+# guess. See docs/_INSTRUCTIONS.md Patch 78.
+header "5l/11" "Dead/remap/flag command classification sweep (DEAD-REMAP-CLASSIFICATION-V1)"
+
+CMD_ROOT="$TARGET_DIR/.claude/commands"
+
+# DELETE — both auditors agreed: confirmed dead, no live successor. Three of
+# these (analysis/README.md, analysis/COMMAND_COMPLIANCE_REPORT.md,
+# optimization/README.md) were already removed from the live project this
+# dataset was audited against; kept in the list as confirmed-dead reference —
+# their absence is a normal, healthy idempotent no-op, not a miss.
+DRC_DELETE=(
+  "automation/README.md"
+  "automation/self-healing.md"
+  "automation/smart-spawn.md"
+  "automation/workflow-select.md"
+  "analysis/README.md"
+  "analysis/COMMAND_COMPLIANCE_REPORT.md"
+  "optimization/README.md"
+)
+DRC_DELETED=()
+for rel in "${DRC_DELETE[@]}"; do
+  f="$CMD_ROOT/$rel"
+  [[ -f "$f" ]] || continue
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would: delete confirmed-dead command doc commands/$rel"
+  else
+    rm -f "$f"
+    DRC_DELETED+=("$rel")
+  fi
+done
+
+# REMAP — both auditors agreed on the exact new invocation. Detection regexes
+# and rewrites are intentionally scoped to the literal patterns the audit
+# verified; content the regex doesn't recognize is left as-is (an unmatched
+# legacy line is an honest miss, not silently mangled).
+DRC_SM_PREFIX='(npx( -y)? |\./)claude-flow(@alpha)? '
+DRC_REMAP_FILES=(
+  "automation/session-memory.md"
+  "automation/smart-agents.md"
+  "github/repo-analyze.md"
+  "github/issue-triage.md"
+  "github/code-review.md"
+  "analysis/token-usage.md"
+  "analysis/token-efficiency.md"
+  "optimization/parallel-execution.md"
+  "monitoring/agent-metrics.md"
+)
+
+# Returns (via echo) the detection regex for a given REMAP file's legacy
+# invocation form(s). A case statement (not an associative array) so this
+# stays bash-3.2-compatible (macOS's shipped bash).
+drc_detect_re() {
+  case "$1" in
+    automation/session-memory.md)
+      echo "${DRC_SM_PREFIX}hook session-restore|mcp__claude-flow__memory_usage|mcp__claude-flow__context_restore|mcp__claude-flow__memory_backup" ;;
+    automation/smart-agents.md)
+      echo "${DRC_SM_PREFIX}hook pre-task --auto-spawn-agents|mcp__claude-flow__agent_metrics" ;;
+    github/repo-analyze.md)
+      echo "${DRC_SM_PREFIX}github repo-analyze" ;;
+    github/issue-triage.md)
+      echo "${DRC_SM_PREFIX}github issue-triage" ;;
+    github/code-review.md)
+      echo "${DRC_SM_PREFIX}github code-review" ;;
+    analysis/token-usage.md|analysis/token-efficiency.md)
+      echo "${DRC_SM_PREFIX}(analysis )?token-usage|mcp__claude-flow__token_usage" ;;
+    optimization/parallel-execution.md)
+      echo "${DRC_SM_PREFIX}parallel|mcp__claude-flow__task_orchestrate|mcp__claude-flow__swarm_monitor" ;;
+    monitoring/agent-metrics.md)
+      echo "${DRC_SM_PREFIX}agent metrics" ;;
+  esac
+}
+
+# Applies the verified rewrite(s) for a given REMAP file. Note: token-usage /
+# token-efficiency and monitoring/agent-metrics deliberately do NOT fabricate
+# flag support the live replacement lacks (no period/by-agent/export
+# breakdown; no --agent-id/--format) — that honesty caveat is documented in
+# the generated report, not invented as a fake flag in the rewritten doc.
+apply_drc_remap() {
+  local rel="$1" f="$CMD_ROOT/$1"
+  case "$rel" in
+    automation/session-memory.md)
+      _cf_sedE "s#${DRC_SM_PREFIX}hook session-restore#ruflo hooks session-restore#g" "$f"
+      _cf_sedE 's#mcp__claude-flow__memory_usage(.*action.*retrieve)#mcp__claude-flow__memory_retrieve\1#g' "$f"
+      _cf_sedE 's#mcp__claude-flow__memory_usage(.*action.*list)#mcp__claude-flow__memory_list\1#g' "$f"
+      _cf_sedE 's#mcp__claude-flow__memory_usage(.*action.*delete)#mcp__claude-flow__memory_delete\1#g' "$f"
+      _cf_sed 's|mcp__claude-flow__context_restore|mcp__claude-flow__session_restore|g' "$f"
+      _cf_sed 's|mcp__claude-flow__memory_backup|mcp__claude-flow__memory_export|g' "$f"
+      ;;
+    automation/smart-agents.md)
+      _cf_sedE "s#${DRC_SM_PREFIX}hook pre-task --auto-spawn-agents#ruflo hooks pre-task -d \"<task description>\" --auto-spawn#g" "$f"
+      _cf_sed 's|mcp__claude-flow__agent_metrics|mcp__claude-flow__agent_status|g' "$f"
+      ;;
+    github/repo-analyze.md)
+      _cf_sedE "s#${DRC_SM_PREFIX}github repo-analyze.*#mcp__claude-flow__github_repo_analyze({ owner, repo, deep })#g" "$f"
+      ;;
+    github/issue-triage.md)
+      _cf_sedE "s#${DRC_SM_PREFIX}github issue-triage.*#mcp__claude-flow__github_issue_track({ owner, repo, action, labels, assignees })#g" "$f"
+      ;;
+    github/code-review.md)
+      _cf_sedE "s#${DRC_SM_PREFIX}github code-review.*#mcp__claude-flow__github_pr_manage({ owner, repo, action: \"review\", prNumber })#g" "$f"
+      ;;
+    analysis/token-usage.md|analysis/token-efficiency.md)
+      _cf_sedE "s#${DRC_SM_PREFIX}(analysis )?token-usage[^\$]*#ruflo hooks token-optimize --stats#g" "$f"
+      _cf_sed 's|mcp__claude-flow__token_usage|ruflo hooks token-optimize --stats|g' "$f"
+      ;;
+    optimization/parallel-execution.md)
+      _cf_sedE "s#${DRC_SM_PREFIX}parallel[^\$]*#ruflo swarm start -o \"<objective>\" --parallel#g" "$f"
+      _cf_sed 's|mcp__claude-flow__task_orchestrate|mcp__claude-flow__swarm_init + mcp__claude-flow__agent_spawn|g' "$f"
+      _cf_sed 's|mcp__claude-flow__swarm_monitor|mcp__claude-flow__swarm_status|g' "$f"
+      ;;
+    monitoring/agent-metrics.md)
+      _cf_sedE "s#${DRC_SM_PREFIX}agent metrics[^\$]*#ruflo agent metrics --period <1h\|24h\|7d\|30d>#g" "$f"
+      ;;
+  esac
+}
+
+DRC_REMAPPED=()
+for rel in "${DRC_REMAP_FILES[@]}"; do
+  f="$CMD_ROOT/$rel"
+  [[ -f "$f" ]] || continue
+  re="$(drc_detect_re "$rel")"
+  if [[ -n "$re" ]] && grep -qE "$re" "$f" 2>/dev/null; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      info "[dry-run] Would: remap verified legacy invocation(s) → ruflo/mcp__claude-flow__ in commands/$rel"
+    else
+      cp "$f" "$f.fixruflo.bak"
+      apply_drc_remap "$rel"
+      rm -f "$f.fixruflo.bak"
+      DRC_REMAPPED+=("$rel")
+    fi
+  fi
+done
+
+# FLAG — genuine auditor disagreement or an editorial keep-vs-delete judgment
+# call. NEVER auto-resolved; never touched. Surfaced in the report only.
+DRC_FLAG=(
+  "automation/auto-agent.md"
+  "analysis/bottleneck-detect.md"
+  "analysis/performance-bottlenecks.md"
+  "analysis/performance-report.md"
+  "optimization/auto-topology.md"
+  "optimization/cache-manage.md"
+  "optimization/parallel-execute.md"
+  "optimization/topology-optimize.md"
+  "monitoring/real-time-view.md"
+  "monitoring/swarm-monitor.md"
+  "monitoring/agents.md"
+  "monitoring/status.md"
+  "monitoring/root-cause.md"
+)
+# commands/github/* — 15 remaining files split on "keep, still functional" vs
+# "redundant with an existing skill elsewhere, delete" — discovered dynamically
+# (minus the 3 files REMAP already handles) since the exact 15 names vary by
+# what a target's `ruflo init` actually installed.
+DRC_FLAG_GITHUB=()
+if [[ -d "$CMD_ROOT/github" ]]; then
+  while IFS= read -r gf; do
+    [[ -z "$gf" ]] && continue
+    grel="github/$(basename "$gf")"
+    case "$grel" in
+      github/repo-analyze.md|github/issue-triage.md|github/code-review.md) continue ;;
+      *) DRC_FLAG_GITHUB+=("$grel") ;;
+    esac
+  done < <(find "$CMD_ROOT/github" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort)
+fi
+
+DRC_FLAG_TOTAL=$(( ${#DRC_FLAG[@]} + ${#DRC_FLAG_GITHUB[@]} ))
+DRC_REPORT="$TARGET_DIR/.claude/DEAD-REMAP-CLASSIFICATION-REPORT.md"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  info "[dry-run] Would: write classification report (${DRC_FLAG_TOTAL} flagged file(s)) → .claude/DEAD-REMAP-CLASSIFICATION-REPORT.md"
+else
+  mkdir -p "$TARGET_DIR/.claude"
+  {
+    echo "# Dead/Remap/Flag command classification report (DEAD-REMAP-CLASSIFICATION-V1)"
+    echo
+    echo "Generated by fix-ruflo.sh Step 5l — see docs/_INSTRUCTIONS.md Patch 78 for the audit this codifies."
+    echo
+    echo "## FLAGGED — genuine auditor disagreement or editorial judgment call (untouched; needs a human decision)"
+    echo
+    for rel in ${DRC_FLAG[@]+"${DRC_FLAG[@]}"} ${DRC_FLAG_GITHUB[@]+"${DRC_FLAG_GITHUB[@]}"}; do
+      [[ -f "$CMD_ROOT/$rel" ]] && echo "- commands/$rel"
+    done
+    echo
+    echo "## DELETED this run"
+    echo
+    if [[ ${#DRC_DELETED[@]} -eq 0 ]]; then echo "- (none)"; else
+      for rel in "${DRC_DELETED[@]}"; do echo "- commands/$rel"; done
+    fi
+    echo
+    echo "## REMAPPED this run"
+    echo
+    if [[ ${#DRC_REMAPPED[@]} -eq 0 ]]; then echo "- (none)"; else
+      for rel in "${DRC_REMAPPED[@]}"; do echo "- commands/$rel"; done
+    fi
+    echo
+    echo "## Honesty caveats"
+    echo
+    echo "- \`ruflo hooks token-optimize --stats\` (analysis/token-usage.md, token-efficiency.md) has no period/by-agent/export breakdown — the old docs' finer-grained flags have no live equivalent."
+    echo "- \`ruflo agent metrics --period <1h|24h|7d|30d>\` (monitoring/agent-metrics.md) has no \`--agent-id\`/\`--format\` — those flags do not exist on the live command."
+  } > "$DRC_REPORT"
+  fix "Wrote dead/remap/flag classification report (.claude/DEAD-REMAP-CLASSIFICATION-REPORT.md)"
+fi
+
+if [[ "$DRY_RUN" -ne 1 ]]; then
+  if [[ ${#DRC_DELETED[@]} -eq 0 && ${#DRC_REMAPPED[@]} -eq 0 ]]; then
+    pass "No confirmed-dead or verified-remappable command docs found (already clean)"
+  else
+    pass "Dead/remap classification sweep complete (${#DRC_DELETED[@]} deleted, ${#DRC_REMAPPED[@]} remapped, ${DRC_FLAG_TOTAL} flagged for human review)"
+  fi
+fi
+
+# ── Step 5m: Marketplace-plugin MCP-namespace mismatch advisory (Tier 7) ────
+# Claude Code plugins installed from a marketplace (e.g. ruflo-sparc,
+# ruflo-adr) declare/call tools under mcp__plugin_<plugin>_<server>__* — that
+# namespace only exists if the plugin ALSO bundles the separate "ruflo-core"
+# plugin's own .mcp.json server (unpinned "npx -y @claude-flow/cli@latest" —
+# exactly the anti-pattern Tier 7's .mcp.json claude-flow fix (Step 5) exists
+# to prevent, see Patch 18). This project's real, pinned, working server is
+# instead registered under the key "claude-flow" (mcp__claude-flow__*), via
+# the global ruflo binary — see .mcp.json and the Runtime note Step 5i
+# restores. Because the plugin's install directory
+# (~/.claude/plugins/marketplaces/<marketplace>/plugins/<plugin>/) is a
+# HOST-GLOBAL shared cache, not project-scoped, this step NEVER writes there —
+# patching it would silently affect every other project on the host using the
+# same plugin. Unlike Step 5l (which directly edits project-local .claude/
+# files), this step is READ-ONLY with respect to that cache and inherently
+# advisory: it cannot call MCP tools itself to confirm a suggested
+# mcp__claude-flow__<tool> substitution actually exists, so it only detects
+# the mismatch and emits an actionable report for a human/agent to verify and
+# apply — recommending the fix be VENDORED into this project's own
+# .claude/{agents,commands,skills} if project-scoped reproducibility is
+# wanted. See docs/_INSTRUCTIONS.md Patch 79.
+header "5m/11" "Marketplace-plugin MCP-namespace mismatch advisory (PLUGIN-NS-ADVISORY-V1)"
+
+PLUGIN_NS_REPORT="$TARGET_DIR/.claude/commands/plugin-namespace-report.md"
+PLUGIN_MARKETPLACES_ROOT="$HOME_DIR/.claude/plugins/marketplaces"
+
+# Union of settings.local.json's enabledPlugins (primary) and settings.json's
+# (fallback) — keys look like "<plugin>@<marketplace>".
+PNS_ENABLED="$(node -e "
+  const fs = require('fs');
+  const keys = new Set();
+  for (const p of ['$TARGET_DIR/.claude/settings.local.json', '$TARGET_DIR/.claude/settings.json']) {
+    try {
+      const s = JSON.parse(fs.readFileSync(p, 'utf8'));
+      const ep = (s && s.enabledPlugins) || {};
+      Object.keys(ep).forEach(k => keys.add(k));
+    } catch (e) { /* absent or unparseable — contributes nothing */ }
+  }
+  console.log([...keys].join('\n'));
+" 2>/dev/null)"
+
+PNS_FINDINGS=()   # "plugin|server|tool" rows, deduped below
+if [[ -n "$PNS_ENABLED" && -d "$PLUGIN_MARKETPLACES_ROOT" ]]; then
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    plugin_name="${entry%@*}"
+    marketplace_name="${entry#*@}"
+    plugin_dir="$PLUGIN_MARKETPLACES_ROOT/$marketplace_name/plugins/$plugin_name"
+    [[ -d "$plugin_dir" ]] || continue
+    while IFS= read -r tool_match; do
+      [[ -z "$tool_match" ]] && continue
+      rest="${tool_match#mcp__plugin_${plugin_name}_}"
+      server="${rest%%__*}"
+      tool="${rest#*__}"
+      PNS_FINDINGS+=("$plugin_name|$server|$tool")
+    done < <(grep -rhoE "mcp__plugin_${plugin_name}_[A-Za-z0-9_-]+__[A-Za-z0-9_]+" "$plugin_dir" 2>/dev/null | sort -u)
+  done < <(printf '%s\n' "$PNS_ENABLED")
+fi
+
+if [[ ${#PNS_FINDINGS[@]} -eq 0 ]]; then
+  if [[ "$DRY_RUN" -ne 1 ]]; then
+    if [[ -z "$PNS_ENABLED" ]]; then
+      pass "No marketplace plugins enabled for this project (enabledPlugins empty/absent) — nothing to check"
+    elif [[ ! -d "$PLUGIN_MARKETPLACES_ROOT" ]]; then
+      pass "No marketplace plugin cache found at ~/.claude/plugins/marketplaces — nothing to check"
+    else
+      pass "Enabled plugin(s) found but no mcp__plugin_*__ namespace references detected — no mismatch"
+    fi
+  fi
+else
+  PNS_DEDUPED=()
+  while IFS= read -r row; do [[ -n "$row" ]] && PNS_DEDUPED+=("$row"); done < <(printf '%s\n' "${PNS_FINDINGS[@]}" | sort -u)
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would: write plugin-namespace advisory report (${#PNS_DEDUPED[@]} mismatched tool ref(s)) → .claude/commands/plugin-namespace-report.md"
+  else
+    mkdir -p "$(dirname "$PLUGIN_NS_REPORT")"
+    {
+      echo "# Marketplace-plugin MCP-namespace mismatch advisory (PLUGIN-NS-ADVISORY-V1)"
+      echo
+      echo "Generated by fix-ruflo.sh Step 5m — READ-ONLY advisory, see docs/_INSTRUCTIONS.md Patch 79."
+      echo
+      echo "This project's real, pinned MCP server is registered as \`claude-flow\` (\`mcp__claude-flow__*\`),"
+      echo "launched from the global \`ruflo\` binary (see .mcp.json + CLAUDE.md's Runtime note). The plugin(s)"
+      echo "below instead call tools under a dead \`mcp__plugin_<plugin>_<server>__*\` namespace that only"
+      echo "resolves if the separate, unpinned \"ruflo-core\" plugin is also installed."
+      echo
+      echo "## Suggested substitutions (VERIFY each — this step cannot call MCP tools to confirm)"
+      echo
+      echo "| Plugin | Dead tool | Suggested substitution |"
+      echo "|---|---|---|"
+      for row in "${PNS_DEDUPED[@]}"; do
+        IFS='|' read -r p s t <<< "$row"
+        echo "| $p | \`mcp__plugin_${p}_${s}__${t}\` | \`mcp__claude-flow__${t}\` |"
+      done
+      echo
+      echo "## Recommended fix (project-scoped, reproducible)"
+      echo
+      echo "\`~/.claude/plugins/marketplaces/\` is a HOST-GLOBAL shared cache — this step never writes there,"
+      echo "since doing so would silently affect every other project on this host using the same plugin. If"
+      echo "you want the fix to be project-scoped and reproducible, VENDOR a patched copy of the affected"
+      echo "agent/command/skill file(s) into this project's own \`.claude/{agents,commands,skills}\`, rewriting"
+      echo "the dead \`mcp__plugin_*__\` references to the \`mcp__claude-flow__*\` substitutions above."
+    } > "$PLUGIN_NS_REPORT"
+    fix "Wrote plugin-namespace mismatch advisory report (${#PNS_DEDUPED[@]} tool ref(s)) → .claude/commands/plugin-namespace-report.md"
+  fi
+fi
+
 # ── Step 6: Claude MCP registration ─────────────────────────────────────────
 
 header "6/11" "Claude MCP registration"
