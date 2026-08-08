@@ -248,7 +248,17 @@ function collectVendorCandidates(pluginDir, plugin) {
   const scriptsDir = path.join(pluginDir, 'scripts');
   if (fs.existsSync(scriptsDir)) {
     for (const f of findFilesRecursive(scriptsDir)) {
-      files.push({ src: f, destRel: path.join('scripts', plugin, path.relative(scriptsDir, f)) });
+      const rel = path.relative(scriptsDir, f);
+      // Patch 82 addendum: plugin SELF-TEST assets are excluded — they assert
+      // plugin-root structure (`smoke.sh` checks .claude-plugin/plugin.json;
+      // `__tests__/*.mjs` resolve ../../skills relative to themselves) and are
+      // therefore broken-by-construction at the vendored location, while
+      // having no skill-runtime role (verified: no vendored skill/command/
+      // agent references them). Runtime scripts are location-independent
+      // (node: builtins + relative imports only — proven by a live vendored
+      // score.mjs run) and vendor as-is, unmodified.
+      if (rel.split(path.sep).includes('__tests__') || path.basename(rel) === 'smoke.sh') continue;
+      files.push({ src: f, destRel: path.join('scripts', plugin, rel) });
     }
   }
   return files;

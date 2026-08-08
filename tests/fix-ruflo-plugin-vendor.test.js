@@ -234,6 +234,11 @@ describe('plugin-vendor.cjs real run — scripts vendoring + auto-disable (fixtu
       'Run `node plugins/testplug/scripts/tool.mjs` or see [tool](../../scripts/tool.mjs).\n'
     );
     fs.writeFileSync(path.join(pluginRoot, 'scripts', 'tool.mjs'), '#!/usr/bin/env node\nconsole.log("ok");\n');
+    // Self-test assets — must be EXCLUDED from vendoring (broken-by-
+    // construction at the vendored location; no skill-runtime role).
+    fs.mkdirSync(path.join(pluginRoot, 'scripts', '__tests__'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'scripts', '__tests__', 'x.test.mjs'), 'export {};\n');
+    fs.writeFileSync(path.join(pluginRoot, 'scripts', 'smoke.sh'), '#!/usr/bin/env bash\nexit 0\n');
     fs.writeFileSync(
       path.join(target, '.claude', 'settings.local.json'),
       JSON.stringify({ enabledPlugins: { 'testplug@testmp': enabled }, otherKey: 42 }, null, 2)
@@ -273,6 +278,9 @@ describe('plugin-vendor.cjs real run — scripts vendoring + auto-disable (fixtu
     expect(user.enabledPlugins['testplug@testmp']).toBe(true); // host-wide scope NEVER edited
     expect(out).toMatch(/original plugin disabled via \.claude\/settings\.local\.json override/);
     expect(out).toMatch(/user .*host-wide.*NOT edited/);
+    // self-test assets excluded from vendoring
+    expect(fs.existsSync(path.join(fx.target, '.claude', 'scripts', 'testplug', '__tests__'))).toBe(false);
+    expect(fs.existsSync(path.join(fx.target, '.claude', 'scripts', 'testplug', 'smoke.sh'))).toBe(false);
   });
 
   it('--keep-enabled leaves enablement untouched and says so', () => {
