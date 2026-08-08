@@ -59,7 +59,13 @@ function currentSha(marketplace, home) {
 }
 
 function currentVersion(marketplace, plugin, home) {
-  const pj = readJsonSafe(path.join(home, '.claude', 'plugins', 'marketplaces', marketplace, 'plugins', plugin, '.claude-plugin', 'plugin.json'));
+  let pj = readJsonSafe(path.join(home, '.claude', 'plugins', 'marketplaces', marketplace, 'plugins', plugin, '.claude-plugin', 'plugin.json'));
+  if (!pj) {
+    // Single-plugin marketplace layout: marketplace root IS the plugin
+    // (same fallback as tools/plugin-vendor.cjs — name must match).
+    const rootPj = readJsonSafe(path.join(home, '.claude', 'plugins', 'marketplaces', marketplace, '.claude-plugin', 'plugin.json'));
+    if (rootPj && rootPj.name === plugin) pj = rootPj;
+  }
   return (pj && pj.version) || null;
 }
 

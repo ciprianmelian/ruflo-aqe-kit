@@ -46,12 +46,12 @@ function mkPluginFixture() {
   fs.mkdirSync(path.join(target, '.claude'), { recursive: true });
   fs.writeFileSync(
     path.join(target, '.claude', 'settings.local.json'),
-    JSON.stringify({ enabledPlugins: { 'ruflo-sparc@ruflo-marketplace': true } }, null, 2) + '\n'
+    JSON.stringify({ enabledPlugins: { 'ruflo-sparc@ruflo': true } }, null, 2) + '\n'
   );
 
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pv-fakehome-'));
   const pluginRoot = path.join(
-    fakeHome, '.claude', 'plugins', 'marketplaces', 'ruflo-marketplace', 'plugins', 'ruflo-sparc'
+    fakeHome, '.claude', 'plugins', 'marketplaces', 'ruflo', 'plugins', 'ruflo-sparc'
   );
   const skillDir = path.join(pluginRoot, 'skills', 'sparc-init');
   fs.mkdirSync(skillDir, { recursive: true });
@@ -132,7 +132,7 @@ describe('fix-ruflo PLUGIN-VENDOR-V1 (--dry-run only)', () => {
   });
 
   it('announces per-plugin dry-run intent for a fixture plugin needing vendoring', () => {
-    expect(/\[dry-run\] Would: vendor \d+ file\(s\) from ruflo-sparc@ruflo-marketplace/.test(fixtureOut)).toBe(true);
+    expect(/\[dry-run\] Would: vendor \d+ file\(s\) from ruflo-sparc@ruflo/.test(fixtureOut)).toBe(true);
     expect(/\[dry-run\] Would: write \.claude\/skills\/sparc-init\/SKILL\.md/.test(fixtureOut)).toBe(true);
   });
 
@@ -168,14 +168,14 @@ describe('plugin-vendor.cjs manifest-refresh (disabled plugin, --dry-run only)',
     // Flip the plugin to DISABLED (the post-vendor recommended state) …
     fs.writeFileSync(
       path.join(fixture.target, '.claude', 'settings.local.json'),
-      JSON.stringify({ enabledPlugins: { 'ruflo-sparc@ruflo-marketplace': false } }, null, 2) + '\n'
+      JSON.stringify({ enabledPlugins: { 'ruflo-sparc@ruflo': false } }, null, 2) + '\n'
     );
     // … but record it as previously vendored, at a STALE version+sha so the
     // idempotency check cannot short-circuit the refresh.
     fs.writeFileSync(
       path.join(fixture.target, '.claude', '.plugin-vendor-manifest.json'),
       JSON.stringify({
-        'ruflo-sparc@ruflo-marketplace': {
+        'ruflo-sparc@ruflo': {
           version: '0.0.0-stale', marketplaceSha: 'stale', vendoredAt: '2020-01-01T00:00:00Z',
           files: [], rewritten: 0, flagged: [],
         },
@@ -196,14 +196,14 @@ describe('plugin-vendor.cjs manifest-refresh (disabled plugin, --dry-run only)',
   });
 
   it('still announces vendoring intent for a manifest-listed plugin whose enablement is false', () => {
-    expect(/Would: vendor \d+ file\(s\) from ruflo-sparc@ruflo-marketplace/.test(out)).toBe(true);
+    expect(/Would: vendor \d+ file\(s\) from ruflo-sparc@ruflo/.test(out)).toBe(true);
   });
 
   it('does not write anything in dry-run (manifest byte-identical, no vendored files)', () => {
     const manifest = JSON.parse(
       fs.readFileSync(path.join(fixture.target, '.claude', '.plugin-vendor-manifest.json'), 'utf8')
     );
-    expect(manifest['ruflo-sparc@ruflo-marketplace'].version).toBe('0.0.0-stale');
+    expect(manifest['ruflo-sparc@ruflo'].version).toBe('0.0.0-stale');
     expect(fs.existsSync(path.join(fixture.target, '.claude', 'skills', 'sparc-init', 'SKILL.md'))).toBe(false);
   });
 });
@@ -222,16 +222,16 @@ describe('plugin-vendor.cjs real run — scripts vendoring + auto-disable (fixtu
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pv82-'));
     const home = path.join(base, 'home');
     const target = path.join(base, 'target');
-    const pluginRoot = path.join(home, '.claude', 'plugins', 'marketplaces', 'testmp', 'plugins', 'testplug');
+    const pluginRoot = path.join(home, '.claude', 'plugins', 'marketplaces', 'ruflo', 'plugins', 'ruflo-testplug');
     fs.mkdirSync(path.join(pluginRoot, 'skills', 'tskill'), { recursive: true });
     fs.mkdirSync(path.join(pluginRoot, 'scripts'), { recursive: true });
     fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
     fs.mkdirSync(path.join(target, '.claude'), { recursive: true });
-    fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'testplug', version: '1.0.0' }));
+    fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'ruflo-testplug', version: '1.0.0' }));
     fs.writeFileSync(
       path.join(pluginRoot, 'skills', 'tskill', 'SKILL.md'),
       '---\nname: tskill\nallowed-tools: Bash mcp__plugin_ruflo-core_ruflo__memory_store\n---\n' +
-      'Run `node plugins/testplug/scripts/tool.mjs` or see [tool](../../scripts/tool.mjs).\n'
+      'Run `node plugins/ruflo-testplug/scripts/tool.mjs` or see [tool](../../scripts/tool.mjs).\n'
     );
     fs.writeFileSync(path.join(pluginRoot, 'scripts', 'tool.mjs'), '#!/usr/bin/env node\nconsole.log("ok");\n');
     // Self-test assets — must be EXCLUDED from vendoring (broken-by-
@@ -241,12 +241,12 @@ describe('plugin-vendor.cjs real run — scripts vendoring + auto-disable (fixtu
     fs.writeFileSync(path.join(pluginRoot, 'scripts', 'smoke.sh'), '#!/usr/bin/env bash\nexit 0\n');
     fs.writeFileSync(
       path.join(target, '.claude', 'settings.local.json'),
-      JSON.stringify({ enabledPlugins: { 'testplug@testmp': enabled }, otherKey: 42 }, null, 2)
+      JSON.stringify({ enabledPlugins: { 'ruflo-testplug@ruflo': enabled }, otherKey: 42 }, null, 2)
     );
     fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
     fs.writeFileSync(
       path.join(home, '.claude', 'settings.json'),
-      JSON.stringify({ enabledPlugins: { 'testplug@testmp': userEnabled } })
+      JSON.stringify({ enabledPlugins: { 'ruflo-testplug@ruflo': userEnabled } })
     );
     return { base, home, target, pluginRoot };
   }
@@ -265,29 +265,29 @@ describe('plugin-vendor.cjs real run — scripts vendoring + auto-disable (fixtu
   it('vendors plugin-root scripts under scripts/<plugin>/ with a shebang-safe header, rewrites both asset-path forms, and auto-disables locally while leaving the user-scope file untouched', () => {
     fx = mkScriptedFixture();
     const out = runWorker(fx.target, fx.home);
-    const script = fs.readFileSync(path.join(fx.target, '.claude', 'scripts', 'testplug', 'tool.mjs'), 'utf8');
+    const script = fs.readFileSync(path.join(fx.target, '.claude', 'scripts', 'ruflo-testplug', 'tool.mjs'), 'utf8');
     expect(script.startsWith('#!/usr/bin/env node\n// PLUGIN-VENDOR-V1')).toBe(true);
     const skill = fs.readFileSync(path.join(fx.target, '.claude', 'skills', 'tskill', 'SKILL.md'), 'utf8');
-    expect(skill).toContain('node .claude/scripts/testplug/tool.mjs');
-    expect(skill).toContain('(.claude/scripts/testplug/tool.mjs)');
-    expect(skill).not.toContain('plugins/testplug/scripts/');
+    expect(skill).toContain('node .claude/scripts/ruflo-testplug/tool.mjs');
+    expect(skill).toContain('(.claude/scripts/ruflo-testplug/tool.mjs)');
+    expect(skill).not.toContain('plugins/ruflo-testplug/scripts/');
     const local = JSON.parse(fs.readFileSync(path.join(fx.target, '.claude', 'settings.local.json'), 'utf8'));
-    expect(local.enabledPlugins['testplug@testmp']).toBe(false);
+    expect(local.enabledPlugins['ruflo-testplug@ruflo']).toBe(false);
     expect(local.otherKey).toBe(42); // unrelated keys preserved
     const user = JSON.parse(fs.readFileSync(path.join(fx.home, '.claude', 'settings.json'), 'utf8'));
-    expect(user.enabledPlugins['testplug@testmp']).toBe(true); // host-wide scope NEVER edited
+    expect(user.enabledPlugins['ruflo-testplug@ruflo']).toBe(true); // host-wide scope NEVER edited
     expect(out).toMatch(/original plugin disabled via \.claude\/settings\.local\.json override/);
     expect(out).toMatch(/user .*host-wide.*NOT edited/);
     // self-test assets excluded from vendoring
-    expect(fs.existsSync(path.join(fx.target, '.claude', 'scripts', 'testplug', '__tests__'))).toBe(false);
-    expect(fs.existsSync(path.join(fx.target, '.claude', 'scripts', 'testplug', 'smoke.sh'))).toBe(false);
+    expect(fs.existsSync(path.join(fx.target, '.claude', 'scripts', 'ruflo-testplug', '__tests__'))).toBe(false);
+    expect(fs.existsSync(path.join(fx.target, '.claude', 'scripts', 'ruflo-testplug', 'smoke.sh'))).toBe(false);
   });
 
   it('--keep-enabled leaves enablement untouched and says so', () => {
     fx = mkScriptedFixture();
     const out = runWorker(fx.target, fx.home, ['--keep-enabled']);
     const local = JSON.parse(fs.readFileSync(path.join(fx.target, '.claude', 'settings.local.json'), 'utf8'));
-    expect(local.enabledPlugins['testplug@testmp']).toBe(true);
+    expect(local.enabledPlugins['ruflo-testplug@ruflo']).toBe(true);
     expect(out).toMatch(/left as-is per --no-disable-originals/);
   });
 
@@ -296,6 +296,55 @@ describe('plugin-vendor.cjs real run — scripts vendoring + auto-disable (fixtu
     const before = JSON.stringify(snapshotTree(fx.pluginRoot));
     runWorker(fx.target, fx.home);
     expect(JSON.stringify(snapshotTree(fx.pluginRoot))).toBe(before);
+  });
+
+  it('resolves a single-plugin marketplace (plugin at marketplace ROOT, name-matched) instead of warning not-found', () => {
+    // Patch 83: `/plugin marketplace add <owner>/<repo>` of a plugin repo has
+    // no plugins/ subdir — the marketplace root IS the plugin.
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pv83-'));
+    fx = { base };
+    const home = path.join(base, 'home');
+    const target = path.join(base, 'target');
+    const mpRoot = path.join(home, '.claude', 'plugins', 'marketplaces', 'ruflo');
+    fs.mkdirSync(path.join(mpRoot, 'skills', 'sskill'), { recursive: true });
+    fs.mkdirSync(path.join(mpRoot, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(target, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(mpRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'ruflo-solo', version: '2.0.0' }));
+    fs.writeFileSync(
+      path.join(mpRoot, 'skills', 'sskill', 'SKILL.md'),
+      '---\nname: sskill\n---\nCall mcp__plugin_ruflo-core_ruflo__memory_store here.\n'
+    );
+    fs.writeFileSync(
+      path.join(target, '.claude', 'settings.local.json'),
+      JSON.stringify({ enabledPlugins: { 'ruflo-solo@ruflo': true } })
+    );
+    const out = runWorker(target, home);
+    expect(out).not.toMatch(/not found under/);
+    const skill = fs.readFileSync(path.join(target, '.claude', 'skills', 'sskill', 'SKILL.md'), 'utf8');
+    expect(skill).toContain('mcp__claude-flow__memory_store');
+  });
+
+  it('never vendors or auto-disables a non-ruflo-family plugin, even one carrying the dead namespace (Patch 83 scope)', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pv83scope-'));
+    fx = { base };
+    const home = path.join(base, 'home');
+    const target = path.join(base, 'target');
+    const otherRoot = path.join(home, '.claude', 'plugins', 'marketplaces', 'other-mp', 'plugins', 'cool-plugin');
+    fs.mkdirSync(path.join(otherRoot, 'skills', 'cskill'), { recursive: true });
+    fs.mkdirSync(path.join(target, '.claude'), { recursive: true });
+    fs.writeFileSync(
+      path.join(otherRoot, 'skills', 'cskill', 'SKILL.md'),
+      '---\nname: cskill\n---\nCall mcp__plugin_ruflo-core_ruflo__memory_store here.\n'
+    );
+    fs.writeFileSync(
+      path.join(target, '.claude', 'settings.local.json'),
+      JSON.stringify({ enabledPlugins: { 'cool-plugin@other-mp': true } })
+    );
+    const out = runWorker(target, home);
+    expect(out).toMatch(/outside vendoring scope/);
+    expect(fs.existsSync(path.join(target, '.claude', 'skills', 'cskill'))).toBe(false);
+    const local = JSON.parse(fs.readFileSync(path.join(target, '.claude', 'settings.local.json'), 'utf8'));
+    expect(local.enabledPlugins['cool-plugin@other-mp']).toBe(true); // never auto-disabled
   });
 });
 
