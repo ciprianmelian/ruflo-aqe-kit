@@ -153,3 +153,98 @@ describe('fix-ruflo PLUGIN-VENDOR-V1 (--dry-run only)', () => {
     expect(fs.existsSync(path.join(fixture.target, '.claude', 'helpers', 'plugin-vendor-drift-sentinel.cjs'))).toBe(false);
   });
 });
+
+// Patch 81 (B): previously-vendored plugins stay refreshable even when their
+// enablement is false — the step's own report recommends disabling the
+// originals after vendoring, so refresh-on-drift must not require re-enabling
+// them. Tested against the worker directly (node tools/plugin-vendor.cjs) —
+// no fix-ruflo run needed, the union logic lives entirely in the worker.
+describe('plugin-vendor.cjs manifest-refresh (disabled plugin, --dry-run only)', () => {
+  const WORKER = path.resolve(__dirname, '..', 'tools', 'plugin-vendor.cjs');
+  let fixture, out;
+
+  beforeAll(() => {
+    fixture = mkPluginFixture();
+    // Flip the plugin to DISABLED (the post-vendor recommended state) …
+    fs.writeFileSync(
+      path.join(fixture.target, '.claude', 'settings.local.json'),
+      JSON.stringify({ enabledPlugins: { 'ruflo-sparc@ruflo-marketplace': false } }, null, 2) + '\n'
+    );
+    // … but record it as previously vendored, at a STALE version+sha so the
+    // idempotency check cannot short-circuit the refresh.
+    fs.writeFileSync(
+      path.join(fixture.target, '.claude', '.plugin-vendor-manifest.json'),
+      JSON.stringify({
+        'ruflo-sparc@ruflo-marketplace': {
+          version: '0.0.0-stale', marketplaceSha: 'stale', vendoredAt: '2020-01-01T00:00:00Z',
+          files: [], rewritten: 0, flagged: [],
+        },
+      }, null, 2) + '\n'
+    );
+    const r = require('child_process').spawnSync(
+      'node', [WORKER, fixture.target, '--dry-run'],
+      { encoding: 'utf8', timeout: 60000, env: { ...process.env, HOME: fixture.fakeHome } }
+    );
+    out = `${r.stdout || ''}${r.stderr || ''}`;
+  }, 120000);
+
+  afterAll(() => {
+    for (const d of [fixture && fixture.target, fixture && fixture.fakeHome]) {
+      if (!d) continue;
+      try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  it('still announces vendoring intent for a manifest-listed plugin whose enablement is false', () => {
+    expect(/Would: vendor \d+ file\(s\) from ruflo-sparc@ruflo-marketplace/.test(out)).toBe(true);
+  });
+
+  it('does not write anything in dry-run (manifest byte-identical, no vendored files)', () => {
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(fixture.target, '.claude', '.plugin-vendor-manifest.json'), 'utf8')
+    );
+    expect(manifest['ruflo-sparc@ruflo-marketplace'].version).toBe('0.0.0-stale');
+    expect(fs.existsSync(path.join(fixture.target, '.claude', 'skills', 'sparc-init', 'SKILL.md'))).toBe(false);
+  });
+});
+
+// Patch 81 (A): a scaffolded agent that collides BY NAME with a vendored
+// plugin agent shadows it — the curated supersedence table retires the
+// scaffolded copy (rename, recoverable). Dry-run announces without touching.
+describe('fix-ruflo Step 5n scaffold-supersedence sweep (--dry-run only)', () => {
+  let target, fakeHome, out;
+  const MARKER = 'PLUGIN-VENDOR-V1';
+
+  beforeAll(() => {
+    target = mkPlainTarget();
+    // Vendored agent (carries the provenance marker) + colliding scaffolded one.
+    fs.mkdirSync(path.join(target, '.claude', 'agents', 'v3'), { recursive: true });
+    fs.writeFileSync(
+      path.join(target, '.claude', 'agents', 'adr-architect.md'),
+      `---\nname: adr-architect\n---\n<!-- ${MARKER}: vendored from ruflo-adr@x v0 (marketplace sha 0) on 2020-01-01 by test -->\nbody\n`
+    );
+    fs.writeFileSync(
+      path.join(target, '.claude', 'agents', 'v3', 'adr-architect.md'),
+      '---\nname: adr-architect\n---\nold scaffolded agent with dead memory_usage refs\n'
+    );
+    fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pv-supersede-home-'));
+    out = run(target, ['--vendor-plugins', '--dry-run'], fakeHome);
+  }, 300000);
+
+  afterAll(() => {
+    for (const d of [target, fakeHome]) {
+      if (!d) continue;
+      try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  it('announces the retirement of the colliding scaffolded agent in dry-run', () => {
+    expect(/Would: retire scaffolded \.claude\/agents\/v3\/adr-architect\.md/.test(out)).toBe(true);
+  });
+
+  it('touches neither file in dry-run', () => {
+    expect(fs.existsSync(path.join(target, '.claude', 'agents', 'v3', 'adr-architect.md'))).toBe(true);
+    expect(fs.existsSync(path.join(target, '.claude', 'agents', 'adr-architect.md'))).toBe(true);
+    expect(fs.existsSync(path.join(target, '.claude', 'agents', 'v3', 'adr-architect.md.superseded-by-ruflo-adr-vendored'))).toBe(false);
+  });
+});

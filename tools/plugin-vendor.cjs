@@ -228,9 +228,16 @@ function main() {
   const manifestPath = path.join(claudeDir, '.plugin-vendor-manifest.json');
   const reportPath = path.join(claudeDir, 'PLUGIN-VENDOR-REPORT.md');
 
-  const plugins = enabledPlugins();
+  const existingManifest = readJsonSafe(manifestPath) || {};
+  // Union of currently-enabled plugins and previously-vendored ones (manifest
+  // keys): the step's own report recommends DISABLING the originals after
+  // vendoring (duplicate skill/command surfaces), so refresh-on-drift must
+  // not require re-enabling them — a field lesson from the first real
+  // deployment. To STOP vendoring a plugin entirely, remove its manifest
+  // entry (and delete its vendored files); disabling alone never orphans it.
+  const plugins = [...new Set([...enabledPlugins(), ...Object.keys(existingManifest)])];
   if (plugins.length === 0) {
-    say('PASS', 'No marketplace plugins enabled for this project (enabledPlugins empty/absent) — nothing to vendor');
+    say('PASS', 'No marketplace plugins enabled for this project (and none previously vendored) — nothing to vendor');
     return;
   }
   if (!fs.existsSync(marketplacesRoot)) {
@@ -238,7 +245,6 @@ function main() {
     return;
   }
 
-  const existingManifest = readJsonSafe(manifestPath) || {};
   const manifest = DRY ? existingManifest : { ...existingManifest };
 
   const reportVendored = [];      // { pluginKey, files, rewritten, flaggedCount }

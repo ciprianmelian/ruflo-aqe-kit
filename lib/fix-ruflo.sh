@@ -2992,7 +2992,13 @@ fi
 # wanted. See docs/_INSTRUCTIONS.md Patch 79.
 header "5m/11" "Marketplace-plugin MCP-namespace mismatch advisory (PLUGIN-NS-ADVISORY-V1)"
 
-PLUGIN_NS_REPORT="$TARGET_DIR/.claude/commands/plugin-namespace-report.md"
+# Report lives at .claude/ top level, NOT under .claude/commands/ — a .md
+# there surfaces as a slash command (/plugin-namespace-report), observed live
+# on the first real deployment (Patch 81; Step 5n's report already made this
+# choice at birth, see Patch 80). PLUGIN_NS_REPORT_LEGACY is the pre-Patch-81
+# location, migrated (removed) whenever the new report is written.
+PLUGIN_NS_REPORT="$TARGET_DIR/.claude/PLUGIN-NS-ADVISORY-REPORT.md"
+PLUGIN_NS_REPORT_LEGACY="$TARGET_DIR/.claude/commands/plugin-namespace-report.md"
 PLUGIN_MARKETPLACES_ROOT="$HOME_DIR/.claude/plugins/marketplaces"
 
 # Union of settings.local.json's enabledPlugins (primary) and settings.json's
@@ -3051,7 +3057,7 @@ else
   PNS_DEDUPED=()
   while IFS= read -r row; do [[ -n "$row" ]] && PNS_DEDUPED+=("$row"); done < <(printf '%s\n' "${PNS_FINDINGS[@]}" | sort -u)
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    info "[dry-run] Would: write plugin-namespace advisory report (${#PNS_DEDUPED[@]} mismatched tool ref(s)) → .claude/commands/plugin-namespace-report.md"
+    info "[dry-run] Would: write plugin-namespace advisory report (${#PNS_DEDUPED[@]} mismatched tool ref(s)) → .claude/PLUGIN-NS-ADVISORY-REPORT.md"
   else
     mkdir -p "$(dirname "$PLUGIN_NS_REPORT")"
     {
@@ -3081,7 +3087,20 @@ else
       echo "agent/command/skill file(s) into this project's own \`.claude/{agents,commands,skills}\`, rewriting"
       echo "the dead \`mcp__plugin_*__\` references to the \`mcp__claude-flow__*\` substitutions above."
     } > "$PLUGIN_NS_REPORT"
-    fix "Wrote plugin-namespace mismatch advisory report (${#PNS_DEDUPED[@]} tool ref(s)) → .claude/commands/plugin-namespace-report.md"
+    fix "Wrote plugin-namespace mismatch advisory report (${#PNS_DEDUPED[@]} tool ref(s)) → .claude/PLUGIN-NS-ADVISORY-REPORT.md"
+  fi
+fi
+
+# Legacy-location migration, unconditional (Patch 81): the pre-Patch-81 report
+# path under .claude/commands/ surfaces as a slash command; remove it even
+# when this run found zero mismatches (e.g. plugins since disabled), or the
+# stale command lingers forever. Kit-generated file — safe to delete.
+if [[ -f "$PLUGIN_NS_REPORT_LEGACY" ]]; then
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would: remove legacy advisory report at .claude/commands/plugin-namespace-report.md (surfaces as a slash command)"
+  else
+    rm -f "$PLUGIN_NS_REPORT_LEGACY"
+    fix "Removed legacy advisory report from .claude/commands/ (it surfaced as a slash command)"
   fi
 fi
 
@@ -3134,6 +3153,36 @@ else
       warn "tools/plugin-vendor.cjs exited $PV_RC"
       ((ERRORS++)) || true
     fi
+
+    # Curated scaffold-supersedence sweep (Patch 81): a `ruflo init`-scaffolded
+    # agent that collides BY NAME with a vendored plugin agent shadows it
+    # (Claude Code loads both; which wins is undefined). Verified pairs only —
+    # same surface-don't-guess principle as Step 5l; anything not in this
+    # table is left alone. Retire = rename to a non-.md suffix (stops loading,
+    # stays recoverable); idempotent via the [[ -f ]] guards. Field origin:
+    # .claude/agents/v3/adr-architect.md (3 dead memory_usage refs) shadowed
+    # the vendored .claude/agents/adr-architect.md on the first real
+    # deployment. Note: gated on the vendored copy EXISTING, so a dry-run
+    # against a never-vendored target does not preview this sub-action.
+    PV_MARKER_5N="PLUGIN-VENDOR-V1"
+    PV_SUPERSEDE=(
+      "agents/v3/adr-architect.md|agents/adr-architect.md|ruflo-adr"
+    )
+    for pv_row in "${PV_SUPERSEDE[@]}"; do
+      IFS='|' read -r pv_weak pv_vend pv_plug <<< "$pv_row"
+      pv_weak_f="$TARGET_DIR/.claude/$pv_weak"
+      pv_vend_f="$TARGET_DIR/.claude/$pv_vend"
+      [[ -f "$pv_weak_f" && -f "$pv_vend_f" ]] || continue
+      if ! grep -q "$PV_MARKER_5N" "$pv_vend_f" 2>/dev/null; then
+        continue  # same-named file is NOT a vendored copy — user-owned, leave both alone
+      fi
+      if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "[dry-run] Would: retire scaffolded .claude/$pv_weak (name-collides with vendored .claude/$pv_vend) → ${pv_weak}.superseded-by-${pv_plug}-vendored"
+      else
+        mv "$pv_weak_f" "${pv_weak_f}.superseded-by-${pv_plug}-vendored"
+        fix "Retired scaffolded .claude/$pv_weak — superseded by vendored .claude/$pv_vend (renamed, recoverable)"
+      fi
+    done
 
     # SessionStart drift sentinel + helper: only wired on a real (non-dry) run
     # of --vendor-plugins. Deliberately unconditional on whether THIS run

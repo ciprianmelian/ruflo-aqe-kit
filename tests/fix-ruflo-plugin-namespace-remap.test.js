@@ -42,6 +42,13 @@ function mkPluginFixture() {
     path.join(target, '.claude', 'settings.local.json'),
     JSON.stringify({ enabledPlugins: { 'ruflo-sparc@ruflo-marketplace': true } }, null, 2) + '\n'
   );
+  // Pre-Patch-81 report location — the migration sweep must announce its
+  // removal (the .md under commands/ surfaces as a slash command).
+  fs.mkdirSync(path.join(target, '.claude', 'commands'), { recursive: true });
+  fs.writeFileSync(
+    path.join(target, '.claude', 'commands', 'plugin-namespace-report.md'),
+    '# stale legacy advisory report\n'
+  );
 
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pns-fakehome-'));
   const pluginDir = path.join(
@@ -99,15 +106,22 @@ describe('fix-ruflo PLUGIN-NS-ADVISORY-V1 (--dry-run only)', () => {
 
   it('does NOT create a plugin-namespace report for a target with no enabled plugins', () => {
     expect(fs.existsSync(path.join(plainTarget, '.claude', 'commands', 'plugin-namespace-report.md'))).toBe(false);
+    expect(fs.existsSync(path.join(plainTarget, '.claude', 'PLUGIN-NS-ADVISORY-REPORT.md'))).toBe(false);
   });
 
   it('announces the PLUGIN-NS-ADVISORY-V1 step for a target with an enabled plugin carrying the dead namespace', () => {
     expect(/PLUGIN-NS-ADVISORY-V1/.test(fixtureOut)).toBe(true);
   });
 
-  it('announces it would write the advisory report without creating it in dry-run', () => {
-    expect(/Would: write plugin-namespace advisory report/.test(fixtureOut)).toBe(true);
-    expect(fs.existsSync(path.join(fixture.target, '.claude', 'commands', 'plugin-namespace-report.md'))).toBe(false);
+  it('announces it would write the advisory report (at the Patch-81 location) without creating it in dry-run', () => {
+    expect(/Would: write plugin-namespace advisory report.*PLUGIN-NS-ADVISORY-REPORT\.md/.test(fixtureOut)).toBe(true);
+    expect(fs.existsSync(path.join(fixture.target, '.claude', 'PLUGIN-NS-ADVISORY-REPORT.md'))).toBe(false);
+  });
+
+  it('announces the legacy commands/ report removal in dry-run WITHOUT removing it', () => {
+    expect(/Would: remove legacy advisory report/.test(fixtureOut)).toBe(true);
+    // dry-run must not actually remove the legacy file
+    expect(fs.existsSync(path.join(fixture.target, '.claude', 'commands', 'plugin-namespace-report.md'))).toBe(true);
   });
 
   it('does NOT modify the host-global marketplace plugin cache in dry-run (byte-identical)', () => {
