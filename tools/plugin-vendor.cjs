@@ -44,6 +44,16 @@ const DRY = process.argv.includes('--dry-run');
 // surface duplicate skills/commands. --keep-enabled (fix-ruflo:
 // --no-disable-originals) opts out.
 const KEEP_ENABLED = process.argv.includes('--keep-enabled');
+// Patch 83 owner policy: vendoring applies ONLY to the ruflo plugin family —
+// plugin name starting "ruflo-", installed from the ruflo marketplace.
+// Plugins from OTHER marketplaces are never vendored, regardless of content:
+// the namespace defect this step fixes is a ruflo-family design artifact
+// (their tool refs assume ruflo-core's server), and vendoring third-party
+// plugins would fork content the kit has no verified substitution map for.
+// Override the marketplace allowlist via RUFLO_KIT_VENDOR_MARKETPLACES
+// (comma-separated) if a ruflo-family fork lives under another name.
+const VENDOR_MARKETPLACES = (process.env.RUFLO_KIT_VENDOR_MARKETPLACES || 'ruflo').split(',');
+const inVendorScope = (plugin, marketplace) => VENDOR_MARKETPLACES.includes(marketplace) && plugin.startsWith('ruflo-');
 const HOME = process.env.HOME || os.homedir();
 
 function say(tag, msg) { process.stdout.write(`${tag}:${msg}\n`); }
@@ -337,6 +347,7 @@ function main() {
   const reportVendored = [];      // { pluginKey, files, rewritten, flaggedCount }
   const reportFlagged = [];       // { pluginKey, file, ref, reason }
   const reportSkippedNoNs = [];   // pluginKey
+  const reportOutOfScope = [];    // pluginKey — enabled but not ruflo-family (Patch 83)
   const reportCollisions = [];    // { pluginKey, file }
   const disableRows = [];         // { pluginKey, ctx, action } — Patch 82 auto-disable ledger
   const managed = new Set();      // pluginKeys vendored now / already vendored / would-vendor (dry)
@@ -347,7 +358,22 @@ function main() {
     if (at < 1) { say('WARN', `enabledPlugins key "${pluginKey}" is not in <plugin>@<marketplace> form — skipping`); continue; }
     const plugin = pluginKey.slice(0, at);
     const marketplace = pluginKey.slice(at + 1);
-    const pluginDir = path.join(marketplacesRoot, marketplace, 'plugins', plugin);
+    if (!inVendorScope(plugin, marketplace)) {
+      reportOutOfScope.push(pluginKey);
+      say('PASS', `${pluginKey}: outside vendoring scope (only ruflo-* plugins from the '${VENDOR_MARKETPLACES.join("','")}' marketplace are vendored) — untouched`);
+      continue;
+    }
+    let pluginDir = path.join(marketplacesRoot, marketplace, 'plugins', plugin);
+    if (!fs.existsSync(pluginDir)) {
+      // Single-plugin marketplace layout (e.g. a repo added directly via
+      // `/plugin marketplace add <owner>/<repo>`): the marketplace ROOT is
+      // the plugin itself — no plugins/ subdir. Accept it only when its
+      // .claude-plugin/plugin.json name matches, so a same-named dir can't
+      // masquerade as the plugin.
+      const rootDir = path.join(marketplacesRoot, marketplace);
+      const pj = readJsonSafe(path.join(rootDir, '.claude-plugin', 'plugin.json'));
+      if (pj && pj.name === plugin) pluginDir = rootDir;
+    }
 
     if (!fs.existsSync(pluginDir)) {
       say('WARN', `${pluginKey}: not found under ~/.claude/plugins/marketplaces/${marketplace}/plugins/${plugin} — skipping`);
@@ -547,6 +573,14 @@ function main() {
     lines.push('- (none)');
   } else {
     for (const p of reportSkippedNoNs) lines.push(`- ${p}`);
+  }
+  lines.push('');
+  lines.push('## Out of vendoring scope (not ruflo-family — never vendored, never auto-disabled; Patch 83)');
+  lines.push('');
+  if (reportOutOfScope.length === 0) {
+    lines.push('- (none)');
+  } else {
+    for (const p of reportOutOfScope) lines.push(`- ${p}`);
   }
   lines.push('');
   lines.push('## Collision skips (destination already exists and is not a previous vendor copy — never overwritten)');

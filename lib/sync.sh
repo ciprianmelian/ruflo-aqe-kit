@@ -134,7 +134,9 @@ record() {
 # fall through to 0. If you add a graceful warn to any of them, use 21. Reaching
 # for `exit 1` out of habit would be misgraded here as "did not complete".
 run_fix() {
-  local label="$1" script="$2"
+  local label="$1" script="$2"; shift 2
+  # Remaining args are stage-specific extra flags (e.g. fix-ruflo's
+  # --vendor-plugins / --no-disable-originals — Patch 83).
   if [[ ! -f "$script" ]]; then
     info "$label: script not present — skipping"
     record "$label" skip "-" "not present"
@@ -142,7 +144,7 @@ run_fix() {
   fi
   header "$label" "running${_DRY_TAG}"
   local out rc
-  out="$(bash "$script" "$TARGET_DIR" ${_dryflag[@]+"${_dryflag[@]}"} 2>&1)"; rc=$?
+  out="$(bash "$script" "$TARGET_DIR" ${_dryflag[@]+"${_dryflag[@]}"} "$@" 2>&1)"; rc=$?
   # DRYRUN-WOULD-COUNT-V1: in dry-run every stage applies 0 changes by design,
   # so the stage's own change counter truthfully reads 0 while its transcript is
   # full of "[dry-run] Would:" lines — the old summary then claimed
@@ -180,7 +182,13 @@ run_fix() {
   esac
 }
 
-run_fix "fix-ruflo"     "$KIT_LIB/fix-ruflo.sh"
+# Patch 83: --vendor-plugins / --no-disable-originals propagate to the
+# fix-ruflo stage only (Step 5n is the sole consumer; other stages would
+# warn on unknown flags via kit_resolve).
+_vendorflags=()
+[[ "${VENDOR_PLUGINS:-0}" -eq 1 ]] && _vendorflags+=(--vendor-plugins)
+[[ "${NO_DISABLE_ORIGINALS:-0}" -eq 1 ]] && _vendorflags+=(--no-disable-originals)
+run_fix "fix-ruflo"     "$KIT_LIB/fix-ruflo.sh" ${_vendorflags[@]+"${_vendorflags[@]}"}
 run_fix "fix-aqe"       "$KIT_LIB/fix-aqe.sh"
 run_fix "fix-statusbar" "$KIT_LIB/fix-statusbar.sh"
 run_fix "fix-brain"     "$KIT_LIB/fix-brain.sh"
