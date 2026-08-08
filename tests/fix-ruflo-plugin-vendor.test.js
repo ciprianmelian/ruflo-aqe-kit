@@ -208,6 +208,89 @@ describe('plugin-vendor.cjs manifest-refresh (disabled plugin, --dry-run only)',
   });
 });
 
+// Patch 82: real (non-dry) worker run against a fully fixture-isolated
+// target + HOME — safe because the worker only ever writes inside the target
+// (proven by the marketplace byte-identity assertion below). Covers the
+// three Patch-82 behaviors: plugin-root scripts vendoring + asset-path
+// rewrite, and the post-vendor auto-disable with scope detection.
+describe('plugin-vendor.cjs real run — scripts vendoring + auto-disable (fixture-isolated)', () => {
+  const WORKER = path.resolve(__dirname, '..', 'tools', 'plugin-vendor.cjs');
+  const { spawnSync } = require('child_process');
+  let fx;
+
+  function mkScriptedFixture({ enabled = true, userEnabled = true } = {}) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pv82-'));
+    const home = path.join(base, 'home');
+    const target = path.join(base, 'target');
+    const pluginRoot = path.join(home, '.claude', 'plugins', 'marketplaces', 'testmp', 'plugins', 'testplug');
+    fs.mkdirSync(path.join(pluginRoot, 'skills', 'tskill'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(target, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'testplug', version: '1.0.0' }));
+    fs.writeFileSync(
+      path.join(pluginRoot, 'skills', 'tskill', 'SKILL.md'),
+      '---\nname: tskill\nallowed-tools: Bash mcp__plugin_ruflo-core_ruflo__memory_store\n---\n' +
+      'Run `node plugins/testplug/scripts/tool.mjs` or see [tool](../../scripts/tool.mjs).\n'
+    );
+    fs.writeFileSync(path.join(pluginRoot, 'scripts', 'tool.mjs'), '#!/usr/bin/env node\nconsole.log("ok");\n');
+    fs.writeFileSync(
+      path.join(target, '.claude', 'settings.local.json'),
+      JSON.stringify({ enabledPlugins: { 'testplug@testmp': enabled }, otherKey: 42 }, null, 2)
+    );
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({ enabledPlugins: { 'testplug@testmp': userEnabled } })
+    );
+    return { base, home, target, pluginRoot };
+  }
+
+  function runWorker(target, home, extra = []) {
+    const r = spawnSync('node', [WORKER, target, ...extra], {
+      encoding: 'utf8', timeout: 60000, env: { ...process.env, HOME: home },
+    });
+    return `${r.stdout || ''}${r.stderr || ''}`;
+  }
+
+  afterEach(() => {
+    if (fx) { try { fs.rmSync(fx.base, { recursive: true, force: true }); } catch { /* ignore */ } fx = null; }
+  });
+
+  it('vendors plugin-root scripts under scripts/<plugin>/ with a shebang-safe header, rewrites both asset-path forms, and auto-disables locally while leaving the user-scope file untouched', () => {
+    fx = mkScriptedFixture();
+    const out = runWorker(fx.target, fx.home);
+    const script = fs.readFileSync(path.join(fx.target, '.claude', 'scripts', 'testplug', 'tool.mjs'), 'utf8');
+    expect(script.startsWith('#!/usr/bin/env node\n// PLUGIN-VENDOR-V1')).toBe(true);
+    const skill = fs.readFileSync(path.join(fx.target, '.claude', 'skills', 'tskill', 'SKILL.md'), 'utf8');
+    expect(skill).toContain('node .claude/scripts/testplug/tool.mjs');
+    expect(skill).toContain('(.claude/scripts/testplug/tool.mjs)');
+    expect(skill).not.toContain('plugins/testplug/scripts/');
+    const local = JSON.parse(fs.readFileSync(path.join(fx.target, '.claude', 'settings.local.json'), 'utf8'));
+    expect(local.enabledPlugins['testplug@testmp']).toBe(false);
+    expect(local.otherKey).toBe(42); // unrelated keys preserved
+    const user = JSON.parse(fs.readFileSync(path.join(fx.home, '.claude', 'settings.json'), 'utf8'));
+    expect(user.enabledPlugins['testplug@testmp']).toBe(true); // host-wide scope NEVER edited
+    expect(out).toMatch(/original plugin disabled via \.claude\/settings\.local\.json override/);
+    expect(out).toMatch(/user .*host-wide.*NOT edited/);
+  });
+
+  it('--keep-enabled leaves enablement untouched and says so', () => {
+    fx = mkScriptedFixture();
+    const out = runWorker(fx.target, fx.home, ['--keep-enabled']);
+    const local = JSON.parse(fs.readFileSync(path.join(fx.target, '.claude', 'settings.local.json'), 'utf8'));
+    expect(local.enabledPlugins['testplug@testmp']).toBe(true);
+    expect(out).toMatch(/left as-is per --no-disable-originals/);
+  });
+
+  it('marketplace cache is byte-identical after a real run (never written)', () => {
+    fx = mkScriptedFixture();
+    const before = JSON.stringify(snapshotTree(fx.pluginRoot));
+    runWorker(fx.target, fx.home);
+    expect(JSON.stringify(snapshotTree(fx.pluginRoot))).toBe(before);
+  });
+});
+
 // Patch 81 (A): a scaffolded agent that collides BY NAME with a vendored
 // plugin agent shadows it — the curated supersedence table retires the
 // scaffolded copy (rename, recoverable). Dry-run announces without touching.

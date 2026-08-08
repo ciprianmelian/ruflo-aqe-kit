@@ -3137,6 +3137,7 @@ else
   else
     PV_ARGS=("$TARGET_DIR")
     [[ "$DRY_RUN" -eq 1 ]] && PV_ARGS+=(--dry-run)
+    [[ "${NO_DISABLE_ORIGINALS:-0}" -eq 1 ]] && PV_ARGS+=(--keep-enabled)
     PV_OUT="$(node "$PV_TOOL" "${PV_ARGS[@]}" 2>&1)"
     PV_RC=$?
     while IFS= read -r pv_line; do

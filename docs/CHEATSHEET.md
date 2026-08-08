@@ -27,7 +27,7 @@ All commands run through the `bin/ruflo-kit` dispatcher with a positional `<targ
 | Coverage analysis (AQE) | `aqe coverage <path>` |
 | Re-mint AQE promoted patterns | `aqe learning extract` |
 | Fix ruflo config drift (incl. Router-B re-rank + exploration patches) | `bin/ruflo-kit fix-ruflo <target>` |
-| **Vendor namespace-corrected marketplace-plugin copies into a project** (opt-in; rewrites verified `mcp__plugin_*__` refs to `mcp__claude-flow__*`, FLAGs the rest, wires a SessionStart drift sentinel) | `bin/ruflo-kit fix-ruflo <target> --vendor-plugins` |
+| **Vendor namespace-corrected marketplace-plugin copies into a project** (opt-in; rewrites verified `mcp__plugin_*__` refs to `mcp__claude-flow__*`, FLAGs the rest, vendors plugin-root `scripts/` with asset paths redirected, wires a SessionStart drift sentinel, auto-disables originals via project-local override — `--no-disable-originals` to skip) | `bin/ruflo-kit fix-ruflo <target> --vendor-plugins` |
 | Fix AQE config drift (incl. dream-lock fix + graded reward) | `bin/ruflo-kit fix-aqe <target>` |
 | Fix the status bar | `bin/ruflo-kit fix-statusbar <target>` |
 | Register the ruvnet-brain MCP knowledge base (MCP-only, no daemon/hooks) | `bin/ruflo-kit fix-brain <target> --download` |

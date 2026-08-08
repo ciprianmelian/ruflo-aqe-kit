@@ -57,7 +57,7 @@ fix() { FIXES=$((FIXES + 1)); FIX_LOG+=("$1"); }
 # Sets: DRY_RUN / FORCE / REACTIVATE / VENDOR_PLUGINS (0|1), KIT_WANT_HELP, and
 # TARGET_DIR (abspath). The first non-flag argument is the target; flags may
 # appear before or after it.
-DRY_RUN=0; FORCE=0; REACTIVATE=0; VENDOR_PLUGINS=0; KIT_WANT_HELP=0; TARGET_DIR=""
+DRY_RUN=0; FORCE=0; REACTIVATE=0; VENDOR_PLUGINS=0; NO_DISABLE_ORIGINALS=0; KIT_WANT_HELP=0; TARGET_DIR=""
 kit_resolve() {
   local a tgt=""
   for a in "$@"; do
@@ -66,6 +66,7 @@ kit_resolve() {
       --force)          FORCE=1 ;;
       --reactivate)     REACTIVATE=1 ;;
       --vendor-plugins) VENDOR_PLUGINS=1 ;;   # fix-ruflo Step 5n (PLUGIN-VENDOR-V1) opt-in — no-op for other verbs
+      --no-disable-originals) NO_DISABLE_ORIGINALS=1 ;;  # Step 5n: skip the post-vendor auto-disable of original plugins (Patch 82)
       --json)           : ;;   # several verbs (status/health/verify-learning/proof/setup) parse --json themselves — not "unknown"
       -h|--help)        KIT_WANT_HELP=1 ;;
       --*)              warn "ignoring unknown flag: $a" ;;

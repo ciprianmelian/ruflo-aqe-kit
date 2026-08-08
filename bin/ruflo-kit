@@ -420,17 +420,25 @@ Usage: ruflo-kit init <target> [--force] [--reactivate] [--dry-run] [--new-targe
 EOF
     ;;
     fix-ruflo) cat <<'EOF'
-Usage: ruflo-kit fix-ruflo <target> [--dry-run] [--vendor-plugins]
+Usage: ruflo-kit fix-ruflo <target> [--dry-run] [--vendor-plugins] [--no-disable-originals]
 
   Diagnose + repair the ruflo / claude-flow MCP + AgentDB setup in <target>
   (version pins, sentinels, dist patches).
   --vendor-plugins  opt-in: Step 5n (PLUGIN-VENDOR-V1) vendors namespace-
                     corrected copies of enabled marketplace plugin content
-                    (skills/commands/agents) into <target>/.claude/, plus a
-                    SessionStart drift sentinel. Off by default; without the
-                    flag Step 5n only reports that it was not requested.
+                    (skills/commands/agents + plugin-root scripts/) into
+                    <target>/.claude/, plus a SessionStart drift sentinel.
+                    After vendoring it auto-disables the original plugin via
+                    a project-LOCAL enabledPlugins override (Patch 82) —
+                    team-shared and user-scope settings are reported, never
+                    edited. Off by default; without the flag Step 5n only
+                    reports that it was not requested.
+  --no-disable-originals  with --vendor-plugins: skip the post-vendor
+                    auto-disable, leaving original plugins enabled (duplicate
+                    skill surfaces will coexist).
   Mutates target:   YES (config + dist patches; + .claude/{skills,commands,
-                    agents} when --vendor-plugins is passed)
+                    agents,scripts} and .claude/settings.local.json
+                    enabledPlugins overrides when --vendor-plugins is passed)
   Starts daemon:    NO
   Billed / network: no billed LLM calls
 EOF

@@ -39,6 +39,11 @@ const { execFileSync } = require('child_process');
 
 const TARGET = path.resolve(process.argv[2] || process.cwd());
 const DRY = process.argv.includes('--dry-run');
+// Patch 82: after vendoring, the original plugin is auto-disabled via a
+// project-LOCAL override (narrowest scope) so vendored + original don't
+// surface duplicate skills/commands. --keep-enabled (fix-ruflo:
+// --no-disable-originals) opts out.
+const KEEP_ENABLED = process.argv.includes('--keep-enabled');
 const HOME = process.env.HOME || os.homedir();
 
 function say(tag, msg) { process.stdout.write(`${tag}:${msg}\n`); }
@@ -86,6 +91,40 @@ function enabledPlugins() {
     ep = (proj && proj.enabledPlugins) || {};
   }
   return Object.keys(ep).filter((k) => ep[k] === true);
+}
+
+// Patch 82: where is a plugin's enablement declared? Claude Code reads
+// enabledPlugins from three scopes; more-specific wins on conflict:
+//   local   — <target>/.claude/settings.local.json (personal, this project)
+//   project — <target>/.claude/settings.json       (team-shared, this project)
+//   user    — $HOME/.claude/settings.json          (every project on this host)
+// Returns { local, project, user } each true|false|undefined (absent), plus
+// `effective` resolved by that precedence.
+function enablementContexts(pluginKey) {
+  const read = (p) => {
+    const j = readJsonSafe(p);
+    const ep = (j && j.enabledPlugins) || {};
+    return Object.prototype.hasOwnProperty.call(ep, pluginKey) ? ep[pluginKey] === true : undefined;
+  };
+  const local = read(path.join(TARGET, '.claude', 'settings.local.json'));
+  const project = read(path.join(TARGET, '.claude', 'settings.json'));
+  const user = read(path.join(HOME, '.claude', 'settings.json'));
+  const effective = local !== undefined ? local : (project !== undefined ? project : (user !== undefined ? user : false));
+  return { local, project, user, effective };
+}
+
+// Patch 82: write the project-LOCAL false override. This is the ONLY
+// enablement file the kit ever writes: the project settings.json is
+// team-shared and the user settings.json is host-wide — both are detected
+// and REPORTED, never edited; the local override neutralizes them for this
+// project only. Preserves every other key in the file.
+function disableLocally(pluginKey) {
+  const p = path.join(TARGET, '.claude', 'settings.local.json');
+  const j = readJsonSafe(p) || {};
+  if (!j.enabledPlugins || typeof j.enabledPlugins !== 'object') j.enabledPlugins = {};
+  j.enabledPlugins[pluginKey] = false;
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n', 'utf8');
 }
 
 function marketplaceSha(marketplace) {
@@ -174,7 +213,7 @@ function rewriteToolRefs(content) {
   return { content: out, rewritten, flags };
 }
 
-function collectVendorCandidates(pluginDir) {
+function collectVendorCandidates(pluginDir, plugin) {
   const files = [];
   const skillsDir = path.join(pluginDir, 'skills');
   if (fs.existsSync(skillsDir)) {
@@ -195,7 +234,45 @@ function collectVendorCandidates(pluginDir) {
       if (fs.statSync(full).isFile()) files.push({ src: full, destRel: path.join(kind, f) });
     }
   }
+  // Patch 82: plugin-root scripts/ are RUNTIME assets, not docs — vendored
+  // skills instruct running them (`node plugins/<p>/scripts/x.mjs`,
+  // `../../scripts/x.mjs` links). Without vendoring them, the vendored
+  // surface (frozen at sha X) silently depends on the live marketplace
+  // clone's scripts (drifting toward sha Y) — a split-brain found on the
+  // first ruflo-adr/-metaharness deployment. Vendored under
+  // scripts/<plugin>/ so different plugins' scripts can't collide with each
+  // other or with a project's own .claude/scripts. README/REFERENCE and
+  // docs/ stay deliberately unvendored: they are human-facing documentation
+  // with no runtime role; bundled .mcp.json servers likewise stay excluded
+  // (Patch 79/80 rationale unchanged).
+  const scriptsDir = path.join(pluginDir, 'scripts');
+  if (fs.existsSync(scriptsDir)) {
+    for (const f of findFilesRecursive(scriptsDir)) {
+      files.push({ src: f, destRel: path.join('scripts', plugin, path.relative(scriptsDir, f)) });
+    }
+  }
   return files;
+}
+
+// Patch 82: rewrite plugin-root-relative ASSET paths in vendored .md files so
+// instructions point at the vendored scripts, not the marketplace clone.
+// Three forms observed in the wild; all resolve to `.claude/scripts/<plugin>/`
+// (project-root-relative — unambiguous for the Bash invocations these docs
+// instruct). Applied to .md files only — scripts themselves are copied
+// byte-faithful apart from the provenance header + tool-ref rewrite.
+function rewriteAssetPaths(content, plugin) {
+  let count = 0;
+  const dest = `.claude/scripts/${plugin}/`;
+  const forms = [
+    new RegExp(`plugins/${plugin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/scripts/`, 'g'),
+    /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\//g,
+    /(?:\.\.\/)+scripts\//g,
+  ];
+  let out = content;
+  for (const re of forms) {
+    out = out.replace(re, () => { count++; return dest; });
+  }
+  return { content: out, count };
 }
 
 function hasProvenanceMarker(destFile) {
@@ -251,6 +328,8 @@ function main() {
   const reportFlagged = [];       // { pluginKey, file, ref, reason }
   const reportSkippedNoNs = [];   // pluginKey
   const reportCollisions = [];    // { pluginKey, file }
+  const disableRows = [];         // { pluginKey, ctx, action } — Patch 82 auto-disable ledger
+  const managed = new Set();      // pluginKeys vendored now / already vendored / would-vendor (dry)
   let anyMutation = false;
 
   for (const pluginKey of plugins) {
@@ -273,12 +352,18 @@ function main() {
     const version = pluginVersion(pluginDir);
     const sha = marketplaceSha(marketplace);
     const prior = existingManifest[pluginKey];
-    if (prior && prior.version === version && prior.marketplaceSha === sha) {
+    // Patch 82 self-migration: entries written before scripts-vendoring
+    // existed lack the assetPathRewrites field — treat them as stale ONCE so
+    // they pick up plugin-root scripts + asset-path rewrites, even at an
+    // unchanged marketplace sha.
+    if (prior && prior.version === version && prior.marketplaceSha === sha && prior.assetPathRewrites !== undefined) {
       say('PASS', `${pluginKey}: already vendored at current version (sha match) — v${version} @ ${sha.slice(0, 7)}`);
+      managed.add(pluginKey);
       continue;
     }
+    managed.add(pluginKey);
 
-    const candidates = collectVendorCandidates(pluginDir);
+    const candidates = collectVendorCandidates(pluginDir, plugin);
     if (candidates.length === 0) {
       say('WARN', `${pluginKey}: namespace refs detected but no skills/commands/agents content found to vendor`);
       continue;
@@ -298,6 +383,7 @@ function main() {
     }
 
     let pluginRewritten = 0;
+    let pluginAssetRewrites = 0;
     const pluginFlags = [];
     const pluginFiles = [];
     fs.mkdirSync(claudeDir, { recursive: true });
@@ -319,16 +405,26 @@ function main() {
       }
 
       const raw = fs.readFileSync(src, 'utf8');
-      const { content, rewritten, flags } = rewriteToolRefs(raw);
+      let { content, rewritten, flags } = rewriteToolRefs(raw);
+      let assetRewrites = 0;
+      if (dest.endsWith('.md')) {
+        const ar = rewriteAssetPaths(content, plugin);
+        content = ar.content;
+        assetRewrites = ar.count;
+        pluginAssetRewrites += ar.count;
+      }
       for (const fl of flags) pluginFlags.push({ file: destRel, ref: fl.ref, reason: fl.reason });
-      const header = `${style.open} ${PROVENANCE_MARKER}: vendored from ${pluginKey} v${version} (marketplace sha ${sha}) on ${NOW_ISO} by ruflo-kit fix-ruflo Step 5n. Substitutions: ${rewritten} tool refs rewritten to mcp__claude-flow__*, ${flags.length} flagged. Do not edit the upstream plugin cache; re-run with --vendor-plugins to refresh.${style.close}\n`;
+      const header = `${style.open} ${PROVENANCE_MARKER}: vendored from ${pluginKey} v${version} (marketplace sha ${sha}) on ${NOW_ISO} by ruflo-kit fix-ruflo Step 5n. Substitutions: ${rewritten} tool refs rewritten to mcp__claude-flow__*, ${flags.length} flagged${assetRewrites ? `, ${assetRewrites} asset path(s) redirected to .claude/scripts/${plugin}/` : ''}. Do not edit the upstream plugin cache; re-run with --vendor-plugins to refresh.${style.close}\n`;
       fs.writeFileSync(dest, insertHeader(content, header), 'utf8');
       pluginFiles.push(destRel);
       pluginRewritten += rewritten;
     }
 
     if (pluginFiles.length === 0) {
-      // every candidate collided — nothing actually written for this plugin.
+      // every candidate collided — nothing actually written for this plugin,
+      // so it must NOT count as managed: auto-disabling the original here
+      // would remove capability without a vendored replacement.
+      managed.delete(pluginKey);
       continue;
     }
 
@@ -338,10 +434,52 @@ function main() {
       vendoredAt: NOW_ISO,
       files: pluginFiles,
       rewritten: pluginRewritten,
+      assetPathRewrites: pluginAssetRewrites,
       flagged: pluginFlags,
     };
     anyMutation = true;
-    say('FIX', `${pluginKey}: vendored ${pluginFiles.length} file(s) (${pluginRewritten} tool ref(s) rewritten, ${pluginFlags.length} flagged) -> .claude/{skills,commands,agents}`);
+    say('FIX', `${pluginKey}: vendored ${pluginFiles.length} file(s) (${pluginRewritten} tool ref(s) rewritten, ${pluginAssetRewrites} asset path(s) redirected, ${pluginFlags.length} flagged) -> .claude/{skills,commands,agents,scripts/${plugin}}`);
+  }
+
+  // ── Patch 82: post-vendor auto-disable of original plugins ───────────────
+  // A vendored plugin that stays enabled surfaces DUPLICATE skills/commands/
+  // agents (vendored + original). The step now converges on the recommended
+  // end-state itself: for every managed plugin still effectively enabled,
+  // write a `false` override into the project-LOCAL settings.local.json —
+  // the narrowest scope, which also neutralizes project- and user-scope
+  // enablement for THIS project only. Team-shared (.claude/settings.json)
+  // and host-wide (~/.claude/settings.json) files are detected + reported,
+  // NEVER edited. --keep-enabled (fix-ruflo: --no-disable-originals) opts
+  // out. This supersedes Patch 80's report-only stance by owner decision.
+  const scopeDesc = (ctx) => {
+    const at = [];
+    if (ctx.local === true) at.push('project-local');
+    if (ctx.project === true) at.push('project (team-shared)');
+    if (ctx.user === true) at.push('user (host-wide)');
+    return at.length ? at.join(' + ') : 'nowhere';
+  };
+  for (const pluginKey of managed) {
+    const ctx = enablementContexts(pluginKey);
+    if (KEEP_ENABLED) {
+      if (ctx.effective) say('INFO', `${pluginKey}: original still enabled (${scopeDesc(ctx)}) — left as-is per --no-disable-originals`);
+      disableRows.push({ pluginKey, ctx, action: ctx.effective ? 'left enabled (--no-disable-originals)' : 'already disabled' });
+      continue;
+    }
+    if (!ctx.effective) {
+      disableRows.push({ pluginKey, ctx, action: 'already disabled' });
+      continue;
+    }
+    if (DRY) {
+      say('INFO', `[dry-run] Would: disable original plugin ${pluginKey} via project-local override (currently enabled at: ${scopeDesc(ctx)})`);
+      disableRows.push({ pluginKey, ctx, action: 'would disable (dry-run)' });
+      continue;
+    }
+    disableLocally(pluginKey);
+    anyMutation = true;
+    say('FIX', `${pluginKey}: original plugin disabled via .claude/settings.local.json override (was enabled at: ${scopeDesc(ctx)})`);
+    if (ctx.project === true) say('INFO', `${pluginKey}: also enabled in project .claude/settings.json (team-shared) — NOT edited; the local override neutralizes it for this project only`);
+    if (ctx.user === true) say('INFO', `${pluginKey}: also enabled in user ~/.claude/settings.json (host-wide) — NOT edited; other projects on this host are unaffected`);
+    disableRows.push({ pluginKey, ctx, action: 'disabled (project-local override)' });
   }
 
   if (DRY) return; // dry-run never writes the manifest or report
@@ -409,14 +547,27 @@ function main() {
     for (const c of reportCollisions) lines.push(`- ${c.pluginKey}: .claude/${c.file}`);
   }
   lines.push('');
-  lines.push('## Recommended follow-up');
+  lines.push('## Original-plugin enablement (Patch 82 auto-disable)');
   lines.push('');
-  lines.push('Vendored copies are now project-scoped and reproducible, but the original marketplace plugin(s)');
-  lines.push('above are still enabled in `.claude/settings.local.json` — Claude Code will surface BOTH the');
-  lines.push('vendored and the original skill/command/agent unless the plugin is disabled. Consider setting the');
-  lines.push('corresponding `enabledPlugins` entry to `false` once you have confirmed the vendored copy works,');
-  lines.push('to avoid a duplicate skill/command surface. This step never changes `enabledPlugins` itself —');
-  lines.push('that is the user\'s call, not this script\'s.');
+  lines.push('Enablement is checked across three scopes — project-local (`.claude/settings.local.json`),');
+  lines.push('project team-shared (`.claude/settings.json`), and user host-wide (`~/.claude/settings.json`).');
+  lines.push('Only the project-LOCAL file is ever edited (a `false` override, narrowest scope); the other two');
+  lines.push('are reported and left untouched. Opt out with `--no-disable-originals`.');
+  lines.push('');
+  if (disableRows.length === 0) {
+    lines.push('- (none managed this run)');
+  } else {
+    lines.push('| Plugin | local | project | user | Action |');
+    lines.push('|---|---|---|---|---|');
+    const cell = (v) => (v === true ? 'enabled' : v === false ? 'disabled' : '—');
+    for (const r of disableRows) {
+      lines.push(`| ${r.pluginKey} | ${cell(r.ctx.local)} | ${cell(r.ctx.project)} | ${cell(r.ctx.user)} | ${r.action} |`);
+    }
+  }
+  lines.push('');
+  lines.push('To re-enable an original temporarily (e.g. to compare against the vendored copy), flip its');
+  lines.push('`enabledPlugins` entry back to `true` in `.claude/settings.local.json` — the next');
+  lines.push('`--vendor-plugins` run will re-disable it unless `--no-disable-originals` is passed.');
   lines.push('');
   fs.writeFileSync(reportPath, lines.join('\n'), 'utf8');
 
